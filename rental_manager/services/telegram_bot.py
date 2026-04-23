@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import urllib.error
 import urllib.request
 from typing import Any
@@ -90,3 +91,17 @@ def send_message(token: str, chat_id: int | str, text: str, reply_markup: dict[s
     if reply_markup:
         payload["reply_markup"] = reply_markup
     return telegram_api_request(token, "sendMessage", payload)
+
+
+def telegram_file_info(token: str, file_id: str) -> dict[str, Any]:
+    response = telegram_api_request(token, "getFile", {"file_id": file_id})
+    return response.get("result") or {}
+
+
+def download_telegram_file(token: str, file_path: str, destination: str | Path) -> Path:
+    url = f"https://api.telegram.org/file/bot{token}/{file_path.lstrip('/')}"
+    target = Path(destination)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with urllib.request.urlopen(url, timeout=30) as response:
+        target.write_bytes(response.read())
+    return target
