@@ -23,9 +23,11 @@
 
 ```text
 RENTAL_MANAGER_DATABASE_URL=postgresql+psycopg://user:password@host:5432/rental_manager
+```
 
 Готовый шаблон лежит в корне: `.env.example`.
-```
+
+Для Railway можно просто сослаться на стандартную переменную `DATABASE_URL`. Приложение само приведёт её к формату `postgresql+psycopg://...`.
 
 ## Порядок запуска в облаке
 

@@ -11,9 +11,21 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
-DATABASE_URL = os.getenv(
-    "RENTAL_MANAGER_DATABASE_URL",
-    f"sqlite:///{(DATA_DIR / 'rental_manager.db').as_posix()}",
+
+def normalize_database_url(url: str) -> str:
+    normalized = (url or "").strip()
+    if normalized.startswith("postgres://"):
+        normalized = "postgresql://" + normalized[len("postgres://") :]
+    if normalized.startswith("postgresql://") and "+psycopg" not in normalized:
+        normalized = "postgresql+psycopg://" + normalized[len("postgresql://") :]
+    return normalized
+
+
+DATABASE_URL = normalize_database_url(
+    os.getenv(
+        "RENTAL_MANAGER_DATABASE_URL",
+        f"sqlite:///{(DATA_DIR / 'rental_manager.db').as_posix()}",
+    )
 )
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
