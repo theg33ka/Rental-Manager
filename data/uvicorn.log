@@ -1,0 +1,30 @@
+INFO:     127.0.0.1:64979 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64980 - "GET /api/tariffs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64981 - "GET /api/bootstrap HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56413 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56413 - "GET /static/styles.css HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:55974 - "GET /static/app.js HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:55974 - "GET /api/bootstrap HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56413 - "GET /api/utility-bills HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52108 - "GET /api/tariffs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59502 - "GET /api/expenses HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55974 - "GET /api/rent-charges HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62216 - "GET /api/bootstrap HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58397 - "GET /api/utility-bills HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49392 - "GET /api/tariffs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62744 - "GET /api/expenses HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62216 - "GET /api/rent-charges?start=2026-04-23&end=2026-04-23 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62216 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62216 - "GET /static/styles.css HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:62744 - "GET /static/app.js HTTP/1.1" 304 Not Modified
+INFO:     127.0.0.1:62744 - "GET /api/bootstrap HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62216 - "GET /api/utility-bills HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58397 - "GET /api/tariffs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49392 - "GET /api/expenses HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62744 - "GET /api/rent-charges HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62768 - "GET /api/settings HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62769 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62765 - "GET /api/bootstrap HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62782 - "GET /api/integrations/telegram/webhook-info HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:57638 - "GET /healthz HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:57643 - "GET /api/integrations/telegram/webhook-info HTTP/1.1" 404 Not Found

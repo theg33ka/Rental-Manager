@@ -1,0 +1,1 @@
+"""Rental Manager application package."""

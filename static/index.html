@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Rental Manager</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Rental Manager</p>
+        <h1>Пульт аренды</h1>
+      </div>
+      <div class="top-actions">
+        <button class="icon-button" id="refreshBtn" title="Обновить данные">⟳</button>
+        <button class="primary" id="generateRentBtn">Сгенерировать аренду</button>
+      </div>
+    </header>
+
+    <nav class="tabs" aria-label="Разделы">
+      <button class="tab active" data-tab="dashboard">Пульт</button>
+      <button class="tab" data-tab="tenants">Жильцы</button>
+      <button class="tab" data-tab="rent">Аренда</button>
+      <button class="tab" data-tab="meters">Счётчики</button>
+      <button class="tab" data-tab="utilities">Коммуналка</button>
+      <button class="tab" data-tab="tariffs">Тарифы</button>
+      <button class="tab" data-tab="expenses">Расходы</button>
+      <button class="tab" data-tab="reports">Отчёты</button>
+      <button class="tab" data-tab="settings">Настройки</button>
+    </nav>
+
+    <main>
+      <section class="panel active" id="dashboard">
+        <div class="summary-grid" id="summaryGrid"></div>
+        <div class="monthly-report-tray" id="monthlyReportTray"></div>
+        <div class="section-grid">
+          <section>
+            <div class="section-title">
+              <h2>Что требует внимания</h2>
+              <span>Цвет важнее красоты: красное первым, жёлтое потом</span>
+            </div>
+            <div id="attentionList" class="attention-grid"></div>
+          </section>
+          <section>
+            <div class="section-title">
+              <h2>Объекты кратко</h2>
+              <span>Подробности уехали в жильцов, им там спокойнее</span>
+            </div>
+            <div id="objectCards" class="object-summary"></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="panel" id="tenants">
+        <div class="section-title">
+          <h2>Заселение</h2>
+          <span>Поля можно дозаполнить позже, потому что жизнь не ждёт форму</span>
+        </div>
+        <form id="onboardForm" class="form-grid">
+          <label>Квартира<select name="apartment_id" required></select></label>
+          <label>ФИО<input name="full_name" placeholder="Иванов Иван Иванович" /></label>
+          <label>Телефон<input name="phone" placeholder="+7..." /></label>
+          <label>Telegram<input name="telegram" placeholder="@username" /></label>
+          <label>WhatsApp<input name="whatsapp" placeholder="+7..." /></label>
+          <label>Дата заезда<input type="date" name="start_date" required /></label>
+          <label>День оплаты<input type="number" min="1" max="31" name="payment_day" placeholder="по дате заезда" /></label>
+          <label>Платёж на ИП<input type="number" min="0" step="0.01" name="ip_amount" /></label>
+          <label>Личный перевод<input type="number" min="0" step="0.01" name="personal_amount" /></label>
+          <label>Залог<input type="number" min="0" step="0.01" name="deposit_amount" /></label>
+          <label>Где хранится залог<input name="deposit_location" /></label>
+          <label class="wide">Условия залога<textarea name="deposit_terms" rows="2"></textarea></label>
+          <label class="wide">Комментарий<textarea name="notes" rows="2"></textarea></label>
+          <button class="primary wide" type="submit">Заселить</button>
+        </form>
+
+        <div class="section-title">
+          <h2>Активные жильцы</h2>
+          <span>Кнопки связи пока открывают стандартные ссылки</span>
+        </div>
+        <div id="leaseList" class="table-wrap"></div>
+      </section>
+
+      <section class="panel" id="rent">
+        <div class="section-title">
+          <h2>Аренда</h2>
+          <span>Две части платежа закрываются отдельно</span>
+        </div>
+        <div class="filters">
+          <label>С<input type="date" id="rentStart" /></label>
+          <label>По<input type="date" id="rentEnd" /></label>
+          <button id="loadRentBtn">Показать</button>
+        </div>
+        <div id="rentTable" class="table-wrap"></div>
+      </section>
+
+      <section class="panel" id="meters">
+        <div class="section-title">
+          <h2>Показания</h2>
+          <span>Можно ввести за прошлую дату, система не осудит</span>
+        </div>
+        <form id="readingForm" class="form-grid compact">
+          <label>Счётчик<select name="meter_id" required></select></label>
+          <label>Дата<input type="date" name="reading_date" required /></label>
+          <label>Показание<input type="number" step="0.001" name="value" required /></label>
+          <label>Комментарий<input name="note" /></label>
+          <button class="primary" type="submit">Сохранить</button>
+        </form>
+        <div id="meterList" class="table-wrap"></div>
+      </section>
+
+      <section class="panel" id="utilities">
+        <div class="section-title">
+          <h2>Коммуналка</h2>
+          <span>Общий счётчик платишь ты, квартирные нужны для честной раскладки</span>
+        </div>
+        <form id="quickReadingsForm" class="quick-readings">
+          <div class="section-title">
+            <div>
+              <h2>Быстрая передача показаний</h2>
+              <span>Заполняй только то, что снял. Остальное молча пропускается.</span>
+            </div>
+            <label>Дата<input type="date" id="quickReadingDate" name="reading_date" required /></label>
+          </div>
+          <div id="quickReadingFields" class="quick-reading-grid"></div>
+          <button class="primary wide" id="quickReadingsSubmit" type="submit">Передать показания</button>
+        </form>
+
+        <div class="utility-actions">
+          <button id="openTariffsBtn" type="button">Открыть тарифы</button>
+        </div>
+
+        <form id="utilityCalcForm" class="form-grid compact">
+          <label>Услуга<select name="service_id" required></select></label>
+          <label>Начало периода<input type="date" name="period_start" required /></label>
+          <label>Конец периода<input type="date" name="period_end" required /></label>
+          <label class="check"><input type="checkbox" name="allow_estimate" /> Разрешить прогноз</label>
+          <button class="primary" type="submit">Рассчитать черновик</button>
+        </form>
+
+        <div id="utilityBills" class="stack"></div>
+      </section>
+
+      <section class="panel" id="tariffs">
+        <div class="section-title">
+          <h2>Тарифы</h2>
+          <span>Электричество можно задавать ступенями: 1000:4.18; 2200:4.7; 3000:7; 9</span>
+        </div>
+        <form id="tariffForm" class="form-grid compact">
+          <label>Услуга<select name="service_id" required></select></label>
+          <label>Действует с<input type="date" name="starts_on" required /></label>
+          <label>Название<input name="name" placeholder="Тариф с июля" /></label>
+          <label class="wide">Ступени<input name="tiers" placeholder="1000:4.18; 2200:4.7; 3000:7; 9" required /></label>
+          <button class="primary" type="submit">Добавить тариф</button>
+        </form>
+        <div id="tariffCards" class="tariff-grid"></div>
+      </section>
+
+      <section class="panel" id="expenses">
+        <div class="section-title">
+          <h2>Расходы</h2>
+          <span>Личные деньги можно потом отметить компенсированными</span>
+        </div>
+        <form id="expenseForm" class="form-grid">
+          <label>Дата<input type="date" name="expense_date" required /></label>
+          <label>Объект<select name="object_id"></select></label>
+          <label>Квартира<select name="apartment_id"></select></label>
+          <label>Категория<input name="category" placeholder="ремонт, реклама..." /></label>
+          <label>Сумма<input type="number" min="0" step="0.01" name="amount" required /></label>
+          <label>Источник<select name="source_funds"><option value="personal">личные</option><option value="rental_budget">арендный бюджет</option><option value="other">другое</option></select></label>
+          <label>Способ оплаты<input name="payment_method" /></label>
+          <label class="wide">Описание<textarea name="description" rows="2"></textarea></label>
+          <button class="primary wide" type="submit">Добавить расход</button>
+        </form>
+        <div id="expenseList" class="table-wrap"></div>
+      </section>
+
+      <section class="panel" id="reports">
+        <div class="section-title">
+          <h2>Excel-отчёты</h2>
+          <span>Период выбирается один раз и применяется к нужному отчёту</span>
+        </div>
+        <div class="report-box">
+          <label>С<input type="date" id="reportStart" /></label>
+          <label>По<input type="date" id="reportEnd" /></label>
+          <a class="button" id="rentReport" href="#">Аренда</a>
+          <a class="button" id="utilitiesReport" href="#">Коммуналка</a>
+          <a class="button" id="expensesReport" href="#">Расходы</a>
+          <a class="button danger-soft" href="/api/reports/debts.xlsx">Долги</a>
+          <a class="button" id="historyReport" href="/api/reports/history.xlsx">История</a>
+        </div>
+        <div id="monthlyReportDetails" class="monthly-report-details"></div>
+      </section>
+
+      <section class="panel" id="settings">
+        <div class="section-title">
+          <h2>Настройки</h2>
+          <span>Цвет, спокойствие и чуть меньше хаоса</span>
+        </div>
+        <form id="settingsForm" class="form-grid compact">
+          <label>Публичный URL приложения
+            <input name="app_base_url" id="appBaseUrlInput" placeholder="https://your-app.example.com" />
+          </label>
+          <label>Telegram owner chat id
+            <input name="telegram_owner_chat_id" id="telegramOwnerChatIdInput" placeholder="123456789" />
+          </label>
+          <label>Telegram bot token
+            <input type="password" name="telegram_bot_token" id="telegramBotTokenInput" placeholder="Оставь пустым, чтобы не менять" />
+          </label>
+          <label>Telegram webhook secret
+            <input type="password" name="telegram_webhook_secret" id="telegramWebhookSecretInput" placeholder="Оставь пустым, чтобы не менять" />
+          </label>
+          <label>Цветовая палитра
+            <select name="color_palette" id="paletteSelect">
+              <option value="classic">Классическая</option>
+              <option value="forest">Лесная</option>
+              <option value="contrast">Контрастная</option>
+              <option value="dark-classic">Тёмная классическая</option>
+              <option value="neon">Тёмная неоновая</option>
+            </select>
+          </label>
+          <button class="primary" type="submit">Сохранить настройки</button>
+        </form>
+        <div class="settings-actions">
+          <button id="telegramWebhookBtn" type="button">Подключить Telegram webhook</button>
+          <button id="telegramTestBtn" type="button">Отправить тест в Telegram</button>
+          <button id="telegramWebhookInfoBtn" type="button">Проверить webhook</button>
+        </div>
+        <div id="telegramStatusBox" class="card muted-box"></div>
+      </section>
+    </main>
+
+    <div id="toast" role="status" aria-live="polite"></div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
