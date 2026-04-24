@@ -10,6 +10,7 @@ const state = {
   suspiciousReceipts: [],
   paymentHistory: null,
   editingPaymentReceiptId: null,
+  utilityIssuePreview: null,
   settings: {},
   editingLeaseId: null,
   quickReadingArmedUntil: 0,
@@ -1170,6 +1171,77 @@ function renderUtilities() {
   qs("#utilityBills").innerHTML = bills || `<div class="card"><p class="muted">Коммунальных счетов пока нет.</p></div>`;
 }
 
+function renderUtilities() {
+  renderQuickReadingFields();
+  renderUtilityTimeline();
+  updateUtilityPeriodControls();
+  const previewCard = state.utilityIssuePreview ? `
+    <article class="card warn">
+      <div class="section-title">
+        <div>
+          <h3>Предпросмотр рассылки по коммуналке</h3>
+          <span>${escapeHtml(state.utilityIssuePreview.object)}: ${escapeHtml(state.utilityIssuePreview.service)}, ${escapeHtml(state.utilityIssuePreview.period_label)}</span>
+        </div>
+      </div>
+      <div class="pill-row">
+        <span class="pill">срок оплаты: ${formatDate(state.utilityIssuePreview.due_date)}</span>
+        <span class="pill">${state.utilityIssuePreview.targets.length} сообщений</span>
+      </div>
+      <div class="stack">
+        ${state.utilityIssuePreview.targets.map((target) => `
+          <article class="card">
+            <div class="section-title">
+              <div>
+                <strong>${escapeHtml(target.object)}, ${escapeHtml(target.apartment)}, ${escapeHtml(target.tenant)}</strong>
+              </div>
+              ${target.linked ? '<span class="pill ok">бот отправит</span>' : '<span class="pill warn">ждём /start</span>'}
+            </div>
+            <pre class="message-preview">${escapeHtml(target.text)}</pre>
+          </article>
+        `).join("")}
+      </div>
+      <div class="attention-actions">
+        <button class="mini primary" onclick="confirmIssueBill()">Подтвердить рассылку</button>
+        <button class="mini" onclick="clearIssueBillPreview()">Отмена</button>
+      </div>
+    </article>
+  ` : "";
+  const bills = state.utilityBills.map((bill) => {
+    const lines = bill.lines.map((line) => `
+      <tr>
+        <td>${line.apartment}</td>
+        <td><strong>${line.tenant || "без жильца"}</strong>${line.period_label ? `<br><span class="muted">${line.period_label}</span>` : ""}</td>
+        <td>${line.personal_consumption}</td>
+        <td>${line.odn_consumption}</td>
+        <td>${money(line.total_amount)}</td>
+        <td>${money(line.paid_amount)}</td>
+        <td>${statusPill(line.status)}</td>
+        <td class="actions">${utilityActions(line)}</td>
+      </tr>
+    `).join("");
+    return `<article class="card">
+      <h3>${bill.object}: ${bill.service}</h3>
+      <p class="muted">${bill.period_label}. По дому: ${money(bill.total_cost)} и ${bill.total_consumption}. Жильцам сейчас: ${money(bill.resident_total_amount)}.</p>
+      <div class="pill-row">
+        ${statusPill(bill.status)}
+        ${bill.is_forecast ? '<span class="pill warn">прогноз</span>' : ""}
+        ${bill.provider_paid ? '<span class="pill ok">поставщик оплачен</span>' : '<span class="pill warn">поставщик не отмечен</span>'}
+        <span class="pill">личное ${bill.apartment_consumption}</span>
+        <span class="pill">ОДН ${bill.odn_consumption}</span>
+        ${bill.provider_paid_at ? `<span class="pill ok">закрыт ${formatDate(bill.provider_paid_at)}</span>` : ""}
+      </div>
+      <div class="pill-row">
+        ${bill.status === "draft" ? `<button class="mini primary" onclick="issueBill(${bill.id})">Выставить жильцам</button>` : ""}
+        ${bill.status === "draft" ? `<button class="mini danger-soft" onclick="deleteUtilityBill(${bill.id})">Удалить черновик</button>` : ""}
+        ${!bill.provider_paid ? `<button class="mini primary" onclick="providerPaid(${bill.id})">Поставщик оплачен</button>` : ""}
+      </div>
+      <div class="table-wrap">${table(["Квартира", "Жилец / сегмент", "Личное", "ОДН", "Сумма", "Оплачено", "Статус", "Действия"], lines)}</div>
+      ${bill.notes ? `<p class="muted">${bill.notes.replace(/\n/g, "<br>")}</p>` : ""}
+    </article>`;
+  }).join("");
+  qs("#utilityBills").innerHTML = `${previewCard}${bills || `<div class="card"><p class="muted">Коммунальных счетов пока нет.</p></div>`}`;
+}
+
 function renderTariffs() {
   const root = qs("#tariffCards");
   if (!root) return;
@@ -1345,6 +1417,27 @@ async function providerPaid(id) {
 async function compensateExpense(id) {
   await api(`/api/expenses/${id}/compensate`, { method: "POST", body: "{}" });
   toast("Расход компенсирован");
+  await loadAll();
+}
+
+async function issueBill(id) {
+  state.utilityIssuePreview = await api(`/api/utility-bills/${id}/issue-preview`);
+  renderUtilities();
+  qs("#utilityBills")?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function clearIssueBillPreview() {
+  state.utilityIssuePreview = null;
+  renderUtilities();
+}
+
+async function confirmIssueBill() {
+  if (!state.utilityIssuePreview?.bill_id) return;
+  const result = await api(`/api/utility-bills/${state.utilityIssuePreview.bill_id}/issue`, { method: "POST", body: "{}" });
+  const sent = Number(result.sent || 0);
+  const skipped = Number(result.skipped_unlinked || 0);
+  state.utilityIssuePreview = null;
+  toast(`Счёт выставлен. Отправлено: ${sent}. Ждут /start: ${skipped}.`);
   await loadAll();
 }
 

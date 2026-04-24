@@ -388,6 +388,76 @@ class UtilityBillingTests(DatabaseTestCase):
         self.assertIn("Остаток", breakdown)
         self.assertIn("Отправьте чеки в этот чат в виде документа", text)
 
+    def test_utility_message_lists_detailed_lines(self) -> None:
+        with self.seed() as session:
+            gas_service = session.scalar(select(UtilityService).where(UtilityService.kind == "gas"))
+            water_service = session.scalar(select(UtilityService).where(UtilityService.kind == "water"))
+            apartment = gas_service.object.apartments[0]
+            lease = self._lease(session, apartment)
+
+            gas_bill = UtilityBill(
+                service_id=gas_service.id,
+                period_start=date(2026, 3, 1),
+                period_end=date(2026, 3, 31),
+                status="issued",
+                total_consumption=0,
+                apartment_consumption=0,
+                odn_consumption=0,
+                total_cost=1200,
+                average_unit_price=0,
+                due_date=date(2026, 4, 24),
+            )
+            gas_line = UtilityBillLine(
+                apartment_id=apartment.id,
+                lease_id=lease.id,
+                total_amount=1200,
+                paid_amount=0,
+                status="issued",
+                due_date=date(2026, 4, 24),
+                note="01.03.2026 -> 31.03.2026 (30 дн.)",
+            )
+            gas_bill.lines.append(gas_line)
+
+            water_bill = UtilityBill(
+                service_id=water_service.id,
+                period_start=date(2026, 3, 1),
+                period_end=date(2026, 3, 31),
+                status="issued",
+                total_consumption=0,
+                apartment_consumption=0,
+                odn_consumption=0,
+                total_cost=800,
+                average_unit_price=0,
+                due_date=date(2026, 4, 24),
+            )
+            water_line = UtilityBillLine(
+                apartment_id=apartment.id,
+                lease_id=lease.id,
+                total_amount=800,
+                paid_amount=0,
+                status="issued",
+                due_date=date(2026, 4, 24),
+                note="01.03.2026 -> 31.03.2026 (30 дн.)",
+            )
+            water_bill.lines.append(water_line)
+            session.add_all([gas_bill, water_bill])
+            session.flush()
+
+            text = render_message_text(
+                session,
+                "message_utility_bill",
+                lease,
+                line=gas_line,
+                utility_lines_override=[gas_line, water_line],
+                utility_due_date_override=date(2026, 4, 24),
+            )
+
+        self.assertIn("Сформированы счета по коммунальным платежам", text)
+        self.assertIn("газ за период 01.03.2026 -> 31.03.2026", text)
+        self.assertIn("вода за период 01.03.2026 -> 31.03.2026", text)
+        self.assertIn("Всего:", text)
+        self.assertIn("Сбербанк", text)
+
     @staticmethod
     def _lease(session, apartment: Apartment, start_date: date = date(2026, 4, 1), end_date: date | None = None, full_name: str | None = None) -> Lease:
         tenant = Tenant(full_name=full_name or f"Tenant {apartment.id}")
