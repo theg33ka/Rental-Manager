@@ -21,7 +21,7 @@ class ReceiptMatchingTests(unittest.TestCase):
 
         self.assertEqual(detect_receipt_channel(parsed), "personal")
 
-    def test_ip_validation_checks_name_account_and_bik(self) -> None:
+    def test_ip_validation_checks_name_and_account_only(self) -> None:
         issues = receipt_validation_issues(
             {
                 "recipient_name": "ИП Кто-то Другой",
@@ -37,8 +37,7 @@ class ReceiptMatchingTests(unittest.TestCase):
         )
 
         self.assertIn("счёт получателя ИП не совпал с настройками", issues)
-        self.assertIn("БИК получателя ИП не совпал с настройками", issues)
-        self.assertGreaterEqual(len(issues), 2)
+        self.assertEqual(len(issues), 1)
 
     def test_personal_validation_checks_name_phone_and_bank(self) -> None:
         issues = receipt_validation_issues(

@@ -1916,8 +1916,8 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
         send_telegram_text(
             session,
             chat_id,
-            f"Привет. Текущий chat id: {chat_id}\nСохрани его в настройках приложения как Telegram owner chat id.",
-            app_keyboard(base_url),
+            "Привет. Этот бот принимает чеки, показывает реквизиты и отвечает по платежам только для привязанных жильцов. Доступ к пульту аренды через этого бота не выдаётся.",
+            tenant_keyboard(),
         )
         return
 

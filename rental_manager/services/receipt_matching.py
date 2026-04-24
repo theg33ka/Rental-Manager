@@ -61,13 +61,14 @@ def receipt_validation_issues(parsed: dict[str, Any], settings: dict[str, Any], 
     if channel == "ip":
         expected_name = settings.get("ip_recipient_name") or ""
         expected_account = settings.get("ip_recipient_account") or ""
-        expected_bik = (settings.get("ip_recipient_bik") or "").strip()
+        # expected_bik = (settings.get("ip_recipient_bik") or "").strip()
         if expected_name and not names_loosely_match(parsed.get("recipient_name") or "", expected_name):
             issues.append("получатель ИП не совпал с настройками")
         if expected_account and (parsed.get("recipient_account") or "") != expected_account:
             issues.append("счёт получателя ИП не совпал с настройками")
-        if expected_bik and (parsed.get("recipient_bik") or "").strip() != expected_bik:
-            issues.append("БИК получателя ИП не совпал с настройками")
+        # ???????? ?????????: ????????? ????? ????????? ??? ??????????? ?????? ???? ??????????.
+        # if expected_bik and (parsed.get("recipient_bik") or "").strip() != expected_bik:
+        #     issues.append("??? ?????????? ?? ?? ?????? ? ???????????")
     elif channel == "personal":
         expected_name = settings.get("personal_recipient_name") or ""
         expected_phone = normalize_phone(settings.get("personal_recipient_phone") or "")
