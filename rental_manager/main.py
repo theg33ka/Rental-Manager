@@ -110,6 +110,7 @@ DEFAULT_SETTINGS = {
     "message_all_debts": "Здравствуйте. Уведомляем вас о наличии следующих задолженностей:\n{all_debts_breakdown}\n\nОтправьте чеки в этот чат в виде документа, скриншоты больше не принимаются.\n(История платежей в приложении банка -> чек об операции -> сохранить или отправить)",
     "message_receipt_received": "Чек получил и сохранил. Если всё совпало, я это отмечу. Если нет, передам владельцу на ручную проверку.",
     "message_receipt_review": "Чек получил, но там есть вопросы. Я уже отправил его владельцу на проверку.",
+    "message_receipt_duplicate": "Этот чек уже есть в системе. Повторно засчитывать его не буду.",
     "message_owner_receipt_alert": "Новый чек от {tenant_name}. Квартира: {apartment}. Сумма: {amount}. Канал: {channel}. Статус: {receipt_status}. {receipt_summary}",
 }
 SECRET_SETTINGS = {
@@ -507,6 +508,7 @@ def serialize_lease(lease: Lease) -> dict[str, Any]:
         "apartment_id": lease.apartment_id,
         "apartment": lease.apartment.name,
         "object": lease.apartment.object.name,
+        "apartment_active": lease.apartment.active,
         "tenant_id": lease.tenant_id,
         "tenant": lease.tenant.full_name,
         "phone": lease.tenant.phone,
@@ -876,6 +878,9 @@ def monthly_report_status(session: Session, year: int, month: int, today: date |
 
     rent_charges = session.scalars(
         select(RentCharge)
+        .join(Lease)
+        .join(Apartment)
+        .where(Apartment.active.is_(True))
         .where(RentCharge.due_date >= start, RentCharge.due_date <= end)
         .order_by(RentCharge.due_date)
     ).all()
@@ -889,7 +894,9 @@ def monthly_report_status(session: Session, year: int, month: int, today: date |
     utility_lines = session.scalars(
         select(UtilityBillLine)
         .join(UtilityBill)
+        .join(Apartment, UtilityBillLine.apartment_id == Apartment.id)
         .where(
+            Apartment.active.is_(True),
             UtilityBillLine.due_date >= start,
             UtilityBillLine.due_date <= end,
         )
@@ -962,10 +969,10 @@ def build_monthly_reports(session: Session, today: date | None = None) -> list[d
 
 def build_dashboard(session: Session) -> dict[str, Any]:
     today = date.today()
-    charges = session.scalars(select(RentCharge).order_by(RentCharge.due_date)).all()
+    charges = session.scalars(select(RentCharge).join(Lease).join(Apartment).where(Apartment.active.is_(True)).order_by(RentCharge.due_date)).all()
     for charge in charges:
         update_rent_charge_status(charge, today)
-    utility_lines = session.scalars(select(UtilityBillLine)).all()
+    utility_lines = session.scalars(select(UtilityBillLine).join(Apartment).where(Apartment.active.is_(True))).all()
     for line in utility_lines:
         update_utility_line_status(line, today)
 
@@ -1390,7 +1397,11 @@ def run_due_reminders(session: Session, today: date | None = None) -> dict[str, 
     }
 
     charges = session.scalars(
-        select(RentCharge).join(Lease).where(Lease.active.is_(True)).order_by(RentCharge.due_date, RentCharge.id)
+        select(RentCharge)
+        .join(Lease)
+        .join(Apartment)
+        .where(Lease.active.is_(True), Apartment.active.is_(True))
+        .order_by(RentCharge.due_date, RentCharge.id)
     ).all()
     for charge in charges:
         update_rent_charge_status(charge, today)
@@ -1417,7 +1428,11 @@ def run_due_reminders(session: Session, today: date | None = None) -> dict[str, 
             summary["failed"] += 1
 
     lines = session.scalars(
-        select(UtilityBillLine).join(Lease, UtilityBillLine.lease_id == Lease.id).where(Lease.active.is_(True)).order_by(UtilityBillLine.id)
+        select(UtilityBillLine)
+        .join(Lease, UtilityBillLine.lease_id == Lease.id)
+        .join(Apartment, UtilityBillLine.apartment_id == Apartment.id)
+        .where(Lease.active.is_(True), Apartment.active.is_(True))
+        .order_by(UtilityBillLine.id)
     ).all()
     for line in lines:
         update_utility_line_status(line, today)
@@ -1784,7 +1799,7 @@ def handle_tenant_receipt_message(session: Session, message: dict[str, Any], lin
     if status == "accepted":
         send_telegram_text(session, chat_id, message_template(session, "message_receipt_received"), tenant_keyboard())
     elif status == "duplicate":
-        send_telegram_text(session, chat_id, "Этот чек уже есть в системе. Повторно зачитывать его не буду.", tenant_keyboard())
+        send_telegram_text(session, chat_id, message_template(session, "message_receipt_duplicate"), tenant_keyboard())
     else:
         send_telegram_text(session, chat_id, message_template(session, "message_receipt_review"), tenant_keyboard())
 
@@ -2052,7 +2067,9 @@ def telegram_send_test(session: Session = Depends(get_session)) -> dict[str, Any
 
 @app.get("/api/messages/targets")
 def message_targets(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
-    leases = session.scalars(select(Lease).where(Lease.active.is_(True)).order_by(Lease.start_date.desc())).all()
+    leases = session.scalars(
+        select(Lease).join(Apartment).where(Lease.active.is_(True), Apartment.active.is_(True)).order_by(Lease.start_date.desc())
+    ).all()
     return [serialize_message_target(session, lease) for lease in leases]
 
 
@@ -2130,10 +2147,31 @@ def create_apartment(payload: dict[str, Any], session: Session = Depends(get_ses
         name=(payload.get("name") or "").strip(),
         sort_order=int(payload.get("sort_order") or 0),
         odn_share_percent=float(payload.get("odn_share_percent") or 0),
+        active=payload.get("active", True) not in {False, "false", "0", 0},
     )
     if not apartment.name:
         raise HTTPException(400, "Название квартиры обязательно")
     session.add(apartment)
+    session.commit()
+    session.refresh(apartment)
+    return serialize_apartment(apartment)
+
+
+@app.patch("/api/apartments/{apartment_id}")
+def update_apartment(apartment_id: int, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
+    apartment = session.get(Apartment, apartment_id)
+    if not apartment:
+        raise HTTPException(404, "Квартира не найдена")
+    if "name" in payload:
+        apartment.name = (payload.get("name") or apartment.name).strip()
+    if "sort_order" in payload:
+        apartment.sort_order = int(payload.get("sort_order") or 0)
+    if "odn_share_percent" in payload:
+        apartment.odn_share_percent = float(payload.get("odn_share_percent") or 0)
+    if "active" in payload:
+        apartment.active = payload.get("active") not in {False, "false", "0", 0}
+    session.flush()
+    generate_rent_charges(session)
     session.commit()
     session.refresh(apartment)
     return serialize_apartment(apartment)
@@ -2290,6 +2328,9 @@ def list_rent_charges(
         end_date = parse_date(end)
     charges = session.scalars(
         select(RentCharge)
+        .join(Lease)
+        .join(Apartment)
+        .where(Apartment.active.is_(True))
         .where(RentCharge.due_date >= start_date, RentCharge.due_date <= end_date)
         .order_by(RentCharge.due_date, RentCharge.id)
     ).all()

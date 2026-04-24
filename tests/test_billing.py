@@ -83,6 +83,28 @@ class RentScheduleTests(DatabaseTestCase):
         self.assertEqual(charges[0].period_end, date(2026, 2, 28))
         self.assertEqual(charges[1].period_end, date(2026, 3, 30))
 
+    def test_inactive_apartment_does_not_generate_new_rent_charges(self) -> None:
+        with self.seed() as session:
+            apartment = session.get(Apartment, 1)
+            apartment.active = False
+            tenant = Tenant(full_name="Paused tenant")
+            session.add(tenant)
+            session.flush()
+            lease = Lease(
+                apartment_id=apartment.id,
+                tenant_id=tenant.id,
+                start_date=date(2026, 4, 14),
+                payment_day=14,
+                ip_amount=20000,
+                personal_amount=5000,
+            )
+            session.add(lease)
+            session.flush()
+
+            created = generate_rent_charges(session, until=date(2026, 6, 30))
+
+        self.assertEqual(created, 0)
+
     def test_statuses_for_two_part_rent_payment(self) -> None:
         charge = self._charge(due_date=date(2026, 4, 14), ip_due=20000, personal_due=5000)
         self.assertEqual(update_rent_charge_status(charge, today=date(2026, 4, 14)), "pending")

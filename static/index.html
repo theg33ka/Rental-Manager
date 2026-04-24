@@ -82,6 +82,12 @@
           <span>Кнопки связи пока открывают стандартные ссылки</span>
         </div>
         <div id="leaseList" class="table-wrap"></div>
+
+        <div class="section-title">
+          <h2>Квартиры</h2>
+          <span>Неактивные квартиры не лезут в контроль, напоминания и новые начисления. А зачем им туда.</span>
+        </div>
+        <div id="apartmentRegistry" class="table-wrap"></div>
       </section>
 
       <section class="panel" id="rent">
@@ -276,6 +282,9 @@
           </label>
           <label class="wide">Ответ жильцу: ручная проверка
             <textarea name="message_receipt_review" id="messageReceiptReviewInput" rows="3"></textarea>
+          </label>
+          <label class="wide">Ответ жильцу: дубликат чека
+            <textarea name="message_receipt_duplicate" id="messageReceiptDuplicateInput" rows="3"></textarea>
           </label>
           <label class="wide">Уведомление владельцу о чеке
             <textarea name="message_owner_receipt_alert" id="messageOwnerReceiptAlertInput" rows="3"></textarea>

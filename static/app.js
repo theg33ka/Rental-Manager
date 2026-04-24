@@ -110,6 +110,10 @@ function allApartments() {
   return state.bootstrap.objects.flatMap((object) => object.apartments.map((apartment) => ({ ...apartment, object_name: object.name })));
 }
 
+function activeApartments() {
+  return allApartments().filter((apartment) => apartment.active);
+}
+
 function utilityReadingDates(serviceId) {
   const dates = state.utilityTimeline
     .filter((event) => event.kind === "reading" && Number(event.service_id) === Number(serviceId))
@@ -221,6 +225,7 @@ function applySettings(settings = {}) {
     "#messageAllDebtsInput": "message_all_debts",
     "#messageReceiptReceivedInput": "message_receipt_received",
     "#messageReceiptReviewInput": "message_receipt_review",
+    "#messageReceiptDuplicateInput": "message_receipt_duplicate",
     "#messageOwnerReceiptAlertInput": "message_owner_receipt_alert",
   };
   Object.entries(templateFields).forEach(([selector, key]) => {
@@ -290,8 +295,8 @@ async function loadSuspiciousReceipts() {
 }
 
 function hydrateForms() {
-  const apartments = allApartments();
   const currentLease = editingLease();
+  const apartments = allApartments().filter((apartment) => apartment.active || apartment.id === currentLease?.apartment_id);
   const vacantApartments = apartments.filter((apartment) => !apartment.active_lease_id || apartment.id === currentLease?.apartment_id);
   const services = state.bootstrap.services;
   const activeLeases = [...state.bootstrap.leases]
@@ -344,6 +349,7 @@ function renderAll() {
   renderDashboard();
   renderObjects();
   renderLeases();
+  renderApartmentRegistry();
   renderRent();
   renderRentHistory();
   renderMeters();
@@ -589,7 +595,7 @@ function renderLeases() {
       <td>${lease.payment_day}</td>
       <td>${money(lease.ip_amount)} / ${money(lease.personal_amount)}</td>
       <td>${lease.deposit_amount ? `${money(lease.deposit_amount)}<br><span class="muted">${lease.deposit_location || ""}</span>` : "нет"}</td>
-      <td>${statusPill(lease.active ? "issued" : "paid")}</td>
+      <td>${statusPill(lease.active ? "issued" : "paid")}${lease.apartment_active ? "" : '<br><span class="pill warn">квартира выключена</span>'}</td>
       <td class="actions">
         ${contactButtons(lease)}
         <button class="mini" onclick="startLeaseEdit(${lease.id})">Ред.</button>
@@ -598,6 +604,21 @@ function renderLeases() {
     </tr>
   `).join("");
   qs("#leaseList").innerHTML = table(["Объект", "Квартира", "Жилец", "Заезд", "День", "ИП / личный", "Залог", "Статус", "Действия"], rows);
+}
+
+function renderApartmentRegistry() {
+  const rows = allApartments()
+    .sort((left, right) => `${left.object_name} ${left.sort_order} ${left.name}`.localeCompare(`${right.object_name} ${right.sort_order} ${right.name}`, "ru"))
+    .map((apartment) => `
+      <tr>
+        <td>${apartment.object_name}</td>
+        <td>${apartment.name}</td>
+        <td>${apartment.active_tenant || '<span class="muted">нет жильца</span>'}</td>
+        <td>${apartment.odn_share_percent}</td>
+        <td><label class="checkbox-inline"><input type="checkbox" ${apartment.active ? "checked" : ""} onchange="toggleApartmentActive(${apartment.id}, this.checked)" /> учитывать</label></td>
+      </tr>
+    `).join("");
+  qs("#apartmentRegistry").innerHTML = table(["Объект", "Квартира", "Текущий жилец", "ОДН %", "Контроль"], rows);
 }
 
 function startLeaseEdit(leaseId) {
@@ -627,6 +648,20 @@ function cancelLeaseEdit() {
   const form = qs("#onboardForm");
   if (form) form.reset();
   hydrateForms();
+}
+
+async function toggleApartmentActive(apartmentId, active) {
+  try {
+    await api(`/api/apartments/${apartmentId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ active }),
+    });
+    await refreshBootstrap();
+    toast(active ? "Квартира снова участвует в контроле" : "Квартира выключена из контроля");
+  } catch (error) {
+    await refreshBootstrap();
+    toast(error.message);
+  }
 }
 
 function renderRent() {

@@ -690,6 +690,12 @@ textarea {
   background: var(--surface);
 }
 
+.checkbox-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;

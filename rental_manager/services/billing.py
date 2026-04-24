@@ -119,7 +119,7 @@ def next_due_after(current_due: date, payment_day: int) -> date:
 def generate_rent_charges(session: Session, until: date | None = None) -> int:
     until = until or (date.today() + timedelta(days=70))
     created = 0
-    leases = session.scalars(select(Lease).where(Lease.active.is_(True))).all()
+    leases = session.scalars(select(Lease).join(Apartment).where(Lease.active.is_(True), Apartment.active.is_(True))).all()
     for lease in leases:
         due = effective_due_date(lease.start_date.year, lease.start_date.month, lease.payment_day)
         if due < lease.start_date:
@@ -380,6 +380,11 @@ def calculate_utility_bill(
     total_cost = calculate_tiered_cost(total_consumption, tariff.tiers_json)
     average_price = total_cost / total_consumption if total_consumption else 0.0
 
+    all_object_apartments = session.scalars(
+        select(Apartment).where(Apartment.object_id == service.object_id).order_by(Apartment.sort_order, Apartment.name)
+    ).all()
+    inactive_apartment_names = [apartment.name for apartment in all_object_apartments if not apartment.active]
+
     apartments = session.scalars(
         select(Apartment)
         .where(Apartment.object_id == service.object_id, Apartment.active.is_(True))
@@ -398,6 +403,7 @@ def calculate_utility_bill(
         ).all()
         for apartment in apartments
     }
+    vacant_apartment_names = [apartment.name for apartment in apartments if not apartment_leases.get(apartment.id) and apartment.leases]
 
     apartment_meters: dict[int, Meter] = {}
     for apartment in apartments:
@@ -546,6 +552,10 @@ def calculate_utility_bill(
 
     house_odn_consumption = max(0.0, total_consumption - all_apartment_consumption_total)
     notes = list(dict.fromkeys(warnings))
+    if inactive_apartment_names:
+        notes.append("Выключены из учёта: " + ", ".join(inactive_apartment_names) + ".")
+    if vacant_apartment_names:
+        notes.append("Без жильца в выбранном периоде: " + ", ".join(vacant_apartment_names) + ".")
     if previously_billed_amount > 0:
         notes.append(f"\u0420\u0430\u043d\u0435\u0435 \u0436\u0438\u043b\u044c\u0446\u0430\u043c \u0443\u0436\u0435 \u0432\u044b\u0441\u0442\u0430\u0432\u043b\u044f\u043b\u043e\u0441\u044c \u043f\u0440\u0438\u043c\u0435\u0440\u043d\u043e \u043d\u0430 {money(previously_billed_amount):.2f} \u20bd.")
     if billed_segment_count:
