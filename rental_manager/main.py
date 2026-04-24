@@ -1914,12 +1914,7 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
                 tenant_keyboard(),
             )
             return
-        send_telegram_text(
-            session,
-            chat_id,
-            "Привет. Этот бот принимает чеки, показывает реквизиты и отвечает по платежам только для привязанных жильцов. Доступ к пульту аренды через этого бота не выдаётся.",
-            tenant_keyboard(),
-        )
+        # Не отвечаем неавторизованным пользователям — просто игнорируем /start
         return
 
     if command == "/help":
@@ -1984,7 +1979,10 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
         )
         return
     if command == "/app":
-        send_telegram_text(session, chat_id, "Открываю пульт.", app_keyboard(base_url))
+        if is_owner:
+            send_telegram_text(session, chat_id, "Открываю пульт.", app_keyboard(base_url))
+        else:
+            send_telegram_text(session, chat_id, "Доступ к пульту только у владельца.")
         return
     if command == "/requisites":
         send_telegram_text(session, chat_id, tenant_requisites_text(session), app_keyboard(base_url))
