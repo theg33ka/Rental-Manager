@@ -50,7 +50,7 @@ with SessionLocal() as session:
     bill, warnings = calculate_utility_bill(session, service.id, date(2026, 4, 1), date(2026, 5, 1), allow_estimate=False)
     assert bill.total_cost == 5016.0, bill.total_cost
     assert len(bill.lines) == 1, len(bill.lines)
-    assert len(warnings) == 0, warnings
+    assert any("14.04.2026" in warning for warning in warnings), warnings
 
 engine.dispose()
 print("validation ok", file=sys.stderr)

@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from rental_manager.database import Base
-from rental_manager.models import Apartment, Lease, Meter, MeterReading, RentalObject, Tenant, UtilityService
+from rental_manager.models import Apartment, Lease, Meter, MeterReading, RentalObject, Tenant, UtilityBill, UtilityBillLine, UtilityService
 from rental_manager.services.billing import (
     LEGACY_IMPORT_MARK,
     allocate_odn,
@@ -220,15 +220,73 @@ class UtilityBillingTests(DatabaseTestCase):
         self.assertEqual(forecast.note, "forecast")
         self.assertAlmostEqual(forecast.value, 1268.0)
 
+    def test_utility_bill_is_split_when_tenant_changes_inside_period(self) -> None:
+        with self.seed() as session:
+            obj = session.get(RentalObject, 1)
+            apartment = session.get(Apartment, 1)
+            service = session.scalar(select(UtilityService).where(UtilityService.object_id == obj.id, UtilityService.kind == "electricity"))
+            self._lease(session, apartment, end_date=date(2026, 4, 3), full_name="First tenant")
+            self._lease(session, apartment, start_date=date(2026, 4, 4), full_name="Second tenant")
+            self._read_all_meters(session, service, object_start=1000, object_end=1310, apartment_end_values={apartment.id: 40})
+
+            bill, warnings = calculate_utility_bill(session, service.id, date(2026, 4, 1), date(2026, 5, 1), allow_estimate=False)
+
+        self.assertTrue(any("04.04.2026" in warning for warning in warnings))
+        self.assertEqual(len(bill.lines), 2)
+        self.assertEqual([line.note for line in bill.lines], ["01.04.2026 -> 04.04.2026 (3 дн.)", "04.04.2026 -> 01.05.2026 (27 дн.)"])
+        self.assertAlmostEqual(sum(line.personal_consumption for line in bill.lines), 30.0)
+        self.assertAlmostEqual(sum(line.odn_consumption for line in bill.lines), 280.0)
+
+    def test_utility_bill_skips_interval_that_was_already_issued(self) -> None:
+        with self.seed() as session:
+            obj = session.get(RentalObject, 1)
+            apartment = session.get(Apartment, 1)
+            service = session.scalar(select(UtilityService).where(UtilityService.object_id == obj.id, UtilityService.kind == "electricity"))
+            lease = self._lease(session, apartment)
+            self._read_all_meters(session, service, object_start=1000, object_end=1310, apartment_end_values={apartment.id: 40})
+
+            issued_bill = UtilityBill(
+                service_id=service.id,
+                period_start=date(2026, 4, 1),
+                period_end=date(2026, 4, 10),
+                status="issued",
+                total_consumption=93,
+                apartment_consumption=9,
+                odn_consumption=84,
+                total_cost=388.74,
+                average_unit_price=4.18,
+            )
+            issued_bill.lines.append(
+                UtilityBillLine(
+                    apartment_id=apartment.id,
+                    lease_id=lease.id,
+                    personal_consumption=9,
+                    odn_consumption=84,
+                    total_amount=388.74,
+                    paid_amount=0,
+                    status="issued",
+                    note="01.04.2026 -> 10.04.2026 (9 дн.)",
+                )
+            )
+            session.add(issued_bill)
+            session.flush()
+
+            bill, warnings = calculate_utility_bill(session, service.id, date(2026, 4, 1), date(2026, 5, 1), allow_estimate=False)
+
+        self.assertEqual(warnings[-1], "Пропущено уже выставленных сегментов: 1.")
+        self.assertEqual(len(bill.lines), 1)
+        self.assertEqual(bill.lines[0].note, "10.04.2026 -> 01.05.2026 (21 дн.)")
+
     @staticmethod
-    def _lease(session, apartment: Apartment) -> Lease:
-        tenant = Tenant(full_name=f"Tenant {apartment.id}")
+    def _lease(session, apartment: Apartment, start_date: date = date(2026, 4, 1), end_date: date | None = None, full_name: str | None = None) -> Lease:
+        tenant = Tenant(full_name=full_name or f"Tenant {apartment.id}")
         session.add(tenant)
         session.flush()
         lease = Lease(
             apartment_id=apartment.id,
             tenant_id=tenant.id,
-            start_date=date(2026, 4, 1),
+            start_date=start_date,
+            end_date=end_date,
             payment_day=1,
             ip_amount=10000,
             personal_amount=2000,

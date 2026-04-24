@@ -449,6 +449,36 @@ section {
   gap: 10px;
 }
 
+.utility-timeline {
+  display: grid;
+  gap: 10px;
+}
+
+.timeline-event {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  display: grid;
+  gap: 8px;
+}
+
+.timeline-reading {
+  border-left: 4px solid var(--blue);
+}
+
+.timeline-bill {
+  border-left: 4px solid var(--warn);
+}
+
+.timeline-provider_paid {
+  border-left: 4px solid var(--primary);
+}
+
+.timeline-resident_payment {
+  border-left: 4px solid var(--accent);
+}
+
 .object-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));

@@ -2,6 +2,7 @@ const state = {
   bootstrap: null,
   rentCharges: [],
   utilityBills: [],
+  utilityTimeline: [],
   expenses: [],
   tariffs: [],
   messageTargets: [],
@@ -230,7 +231,7 @@ function renderTelegramStatus() {
 async function loadAll() {
   state.bootstrap = await api("/api/bootstrap");
   applySettings(state.bootstrap.settings);
-  await Promise.all([loadRent(), loadUtilityBills(), loadExpenses(), loadTariffs(), loadMessageTargets(), loadSuspiciousReceipts()]);
+  await Promise.all([loadRent(), loadUtilityBills(), loadUtilityTimeline(), loadExpenses(), loadTariffs(), loadMessageTargets(), loadSuspiciousReceipts()]);
   hydrateForms();
   renderAll();
 }
@@ -244,6 +245,10 @@ async function loadRent() {
 
 async function loadUtilityBills() {
   state.utilityBills = await api("/api/utility-bills");
+}
+
+async function loadUtilityTimeline() {
+  state.utilityTimeline = await api("/api/utilities/timeline");
 }
 
 async function loadExpenses() {
@@ -345,7 +350,6 @@ function renderDashboard() {
   dashboard.utility_partial.forEach((item) => cards.push(attentionCard("warn", "Коммуналка оплачена частично", `${item.apartment}, ${item.tenant}. Осталось ${money(item.debt)}.`, utilityAttentionActions(item), attentionBadges(item.due_date, item.reminder, `срок ${formatDate(item.due_date)}`))));
   dashboard.provider_debts.forEach((item) => cards.push(attentionCard("danger", "Поставщик не отмечен как оплаченный", `${item.object}: ${item.service} за ${formatDateRange(item.period_start, item.period_end)}. Сумма ${money(item.total_cost)}.`, `<button class="mini primary" onclick="providerPaid(${item.id})">Поставщик оплачен</button><button class="mini" onclick="openUtilitiesTab()">Открыть коммуналку</button>`, attentionBadges(item.period_end, null, "деньги у поставщика ещё не закрыты"))));
   dashboard.stale_readings.forEach((item) => cards.push(attentionCard("warn", "Давно нет показаний", `${item.object}: ${item.service}. Последнее: ${item.last_date ? formatDate(item.last_date) : "нет"}.`, `<button class="mini" onclick="openMetersTab()">Открыть счётчики</button><button class="mini" onclick="openUtilitiesTab()">Быстрая передача</button>`, attentionBadges(item.last_date || appToday(), null, item.days ? `${item.days} дн. без обновления` : "пока пусто"))));
-  dashboard.pending_personal_expenses.forEach((item) => cards.push(attentionCard("warn", "Личный расход ждёт компенсации", `${item.object || "без объекта"} ${item.apartment || ""}: ${money(item.amount)}. ${item.description || item.category}`, `<button class="mini primary" onclick="compensateExpense(${item.id})">Компенсировать</button><button class="mini" onclick="openExpensesTab()">Открыть расходы</button>`, attentionBadges(item.expense_date, null, item.source_funds === "personal" ? "из личных" : item.source_funds))));
   dashboard.suspicious_receipts.forEach((item) => cards.push(attentionCard("danger", "Подозрительный чек", `${money(item.amount)}. ${item.recipient_name || "получатель не распознан"}. ${item.notes || ""}`, `<button class="mini" onclick="openMessagesTab()">Открыть сообщения</button>`, attentionBadges(item.created_at, null, "нужна ручная проверка"))));
   qs("#attentionList").innerHTML = cards.join("") || `<div class="card ok"><h3>Критичных задач нет</h3><p class="muted">Редкий момент, когда приложение не ругается. Подозрительно, но приятно.</p></div>`;
 }
@@ -730,13 +734,64 @@ function renderQuickReadingFields() {
   }).join("");
 }
 
+function utilityTimelineActions(event) {
+  if (event.kind !== "reading") return "";
+  return `
+    <button class="mini" onclick="useTimelineReading(${event.service_id}, 'start', '${event.date}')">В начало</button>
+    <button class="mini" onclick="useTimelineReading(${event.service_id}, 'end', '${event.date}')">В конец</button>
+  `;
+}
+
+function utilityTimelineMeta(event) {
+  const badges = [
+    `<span class="pill">${formatDate(event.date)}</span>`,
+    `<span class="pill">${event.object}</span>`,
+    `<span class="pill">${event.service}</span>`,
+  ];
+  if (event.status) badges.push(statusPill(event.status));
+  if (event.kind === "bill") {
+    badges.push(`<span class="pill ${event.provider_paid ? "ok" : "warn"}">${event.provider_paid ? "поставщик закрыт" : "поставщик открыт"}</span>`);
+  }
+  return badges.join("");
+}
+
+function renderUtilityTimeline() {
+  const root = qs("#utilityTimeline");
+  if (!root) return;
+  if (!state.utilityTimeline.length) {
+    root.innerHTML = `<article class="card"><h3>Таймлайн коммуналки</h3><p class="muted">Пока пусто. Сними показания, создай период, и жизнь станет чуть менее хаотичной. Или нет, но шанс есть.</p></article>`;
+    return;
+  }
+  root.innerHTML = `
+    <article class="card">
+      <div class="section-title">
+        <div>
+          <h3>Таймлайн коммуналки</h3>
+          <span>Один платёжный период — промежуток между двумя общедомовыми показаниями.</span>
+        </div>
+      </div>
+      <div class="utility-timeline">
+        ${state.utilityTimeline.map((event) => `
+          <article class="timeline-event timeline-${event.kind}">
+            <div class="pill-row">${utilityTimelineMeta(event)}</div>
+            <strong>${event.title}</strong>
+            <p class="muted">${event.detail || ""}</p>
+            ${utilityTimelineActions(event) ? `<div class="attention-actions">${utilityTimelineActions(event)}</div>` : ""}
+          </article>
+        `).join("")}
+      </div>
+    </article>
+  `;
+}
+
 function renderUtilities() {
   renderQuickReadingFields();
+  renderUtilityTimeline();
   const bills = state.utilityBills.map((bill) => {
     const lines = bill.lines.map((line) => `
       <tr>
         <td>${line.apartment}</td>
-        <td>${line.tenant}</td>
+        <td><strong>${line.tenant || "без жильца"}</strong>${line.period_label ? `<br><span class="muted">${line.period_label}</span>` : ""}</td>
         <td>${line.personal_consumption}</td>
         <td>${line.odn_consumption}</td>
         <td>${money(line.total_amount)}</td>
@@ -747,18 +802,22 @@ function renderUtilities() {
     `).join("");
     return `<article class="card">
       <h3>${bill.object}: ${bill.service}</h3>
-      <p class="muted">${formatDateRange(bill.period_start, bill.period_end)}, расход ${bill.total_consumption}, сумма ${money(bill.total_cost)}, средняя цена ${bill.average_unit_price}</p>
+      <p class="muted">${bill.period_label}. По дому: ${money(bill.total_cost)} и ${bill.total_consumption}. Жильцам сейчас: ${money(bill.resident_total_amount)}.</p>
       <div class="pill-row">
         ${statusPill(bill.status)}
         ${bill.is_forecast ? '<span class="pill warn">прогноз</span>' : ""}
         ${bill.provider_paid ? '<span class="pill ok">поставщик оплачен</span>' : '<span class="pill warn">поставщик не отмечен</span>'}
+        <span class="pill">личное ${bill.apartment_consumption}</span>
+        <span class="pill">ОДН ${bill.odn_consumption}</span>
+        ${bill.provider_paid_at ? `<span class="pill ok">закрыт ${formatDate(bill.provider_paid_at)}</span>` : ""}
       </div>
       <div class="pill-row">
         ${bill.status === "draft" ? `<button class="mini primary" onclick="issueBill(${bill.id})">Выставить жильцам</button>` : ""}
+        ${bill.status === "draft" ? `<button class="mini danger-soft" onclick="deleteUtilityBill(${bill.id})">Удалить черновик</button>` : ""}
         ${!bill.provider_paid ? `<button class="mini primary" onclick="providerPaid(${bill.id})">Поставщик оплачен</button>` : ""}
       </div>
-      <div class="table-wrap">${table(["Квартира", "Жилец", "Личный", "ОДН", "Сумма", "Оплачено", "Статус", "Действия"], lines)}</div>
-      ${bill.notes ? `<p class="muted">${bill.notes}</p>` : ""}
+      <div class="table-wrap">${table(["Квартира", "Жилец / сегмент", "Личный", "ОДН", "Сумма", "Оплачено", "Статус", "Действия"], lines)}</div>
+      ${bill.notes ? `<p class="muted">${bill.notes.replace(/\n/g, "<br>")}</p>` : ""}
     </article>`;
   }).join("");
   qs("#utilityBills").innerHTML = bills || `<div class="card"><p class="muted">Коммунальных счетов пока нет.</p></div>`;
@@ -893,6 +952,13 @@ async function issueBill(id) {
   await loadAll();
 }
 
+async function deleteUtilityBill(id) {
+  if (!confirm("Удалить этот черновик коммуналки? Потом можно пересоздать заново.")) return;
+  await api(`/api/utility-bills/${id}`, { method: "DELETE" });
+  toast("Черновик удалён");
+  await loadAll();
+}
+
 async function providerPaid(id) {
   await api(`/api/utility-bills/${id}/provider-paid`, { method: "POST", body: "{}" });
   toast("Оплата поставщику отмечена");
@@ -961,6 +1027,14 @@ function openMetersTab() {
 function openUtilitiesTab() {
   const tab = qs('.tab[data-tab="utilities"]');
   if (tab) tab.click();
+}
+
+function useTimelineReading(serviceId, edge, dateValue) {
+  const form = qs("#utilityCalcForm");
+  if (!form) return;
+  form.elements.service_id.value = String(serviceId);
+  form.elements[edge === "start" ? "period_start" : "period_end"].value = dateValue;
+  form.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function openExpensesTab() {
@@ -1119,11 +1193,11 @@ function bindEvents() {
     const data = formData(form);
     if (state.editingLeaseId) {
       await api(`/api/leases/${state.editingLeaseId}`, { method: "PATCH", body: JSON.stringify(data) });
-      toast("????????? ?? ?????? ?????????");
+      toast("Изменения по жильцу сохранены");
       state.editingLeaseId = null;
     } else {
       await api("/api/leases/onboard", { method: "POST", body: JSON.stringify(data) });
-      toast("????? ???????");
+      toast("Жилец заселён");
     }
     form.reset();
     await loadAll();
@@ -1140,23 +1214,26 @@ function bindEvents() {
 
   qs("#utilityCalcForm").addEventListener("submit", async (event) => {
     event.preventDefault();
-    const result = await api("/api/utility-bills/calculate", { method: "POST", body: JSON.stringify(formData(event.currentTarget)) });
+    const form = event.currentTarget;
+    const result = await api("/api/utility-bills/calculate", { method: "POST", body: JSON.stringify(formData(form)) });
     toast(`Черновик создан: ${money(result.total_cost)}`);
     await loadAll();
   });
 
   qs("#tariffForm").addEventListener("submit", async (event) => {
     event.preventDefault();
-    await api("/api/tariffs", { method: "POST", body: JSON.stringify(formData(event.currentTarget)) });
-    event.currentTarget.reset();
+    const form = event.currentTarget;
+    await api("/api/tariffs", { method: "POST", body: JSON.stringify(formData(form)) });
+    form.reset();
     toast("Тариф добавлен");
     await loadAll();
   });
 
   qs("#expenseForm").addEventListener("submit", async (event) => {
     event.preventDefault();
-    await api("/api/expenses", { method: "POST", body: JSON.stringify(formData(event.currentTarget)) });
-    event.currentTarget.reset();
+    const form = event.currentTarget;
+    await api("/api/expenses", { method: "POST", body: JSON.stringify(formData(form)) });
+    form.reset();
     toast("Расход добавлен");
     await loadAll();
   });

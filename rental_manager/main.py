@@ -632,11 +632,14 @@ def serialize_bill_line(line: UtilityBillLine, session: Session | None = None) -
         "status": line.status,
         "due_date": line.due_date.isoformat() if line.due_date else None,
         "note": line.note,
+        "period_label": line.note,
         "reminder": reminder_meta(session, line.lease, line.due_date, utility_line_id=line.id) if line.lease else None,
     }
 
 
 def serialize_bill(bill: UtilityBill, session: Session | None = None) -> dict[str, Any]:
+    resident_total_amount = money(sum(line.total_amount for line in bill.lines))
+    resident_paid_amount = money(sum(line.paid_amount for line in bill.lines))
     return {
         "id": bill.id,
         "service_id": bill.service_id,
@@ -644,15 +647,20 @@ def serialize_bill(bill: UtilityBill, session: Session | None = None) -> dict[st
         "object": bill.service.object.name,
         "period_start": bill.period_start.isoformat(),
         "period_end": bill.period_end.isoformat(),
+        "period_label": f"{bill.period_start:%d.%m.%Y} -> {bill.period_end:%d.%m.%Y} ({(bill.period_end - bill.period_start).days} дн.)",
+        "days": (bill.period_end - bill.period_start).days,
         "status": bill.status,
         "total_consumption": bill.total_consumption,
         "apartment_consumption": bill.apartment_consumption,
         "odn_consumption": bill.odn_consumption,
         "total_cost": bill.total_cost,
+        "resident_total_amount": resident_total_amount,
+        "resident_paid_amount": resident_paid_amount,
         "average_unit_price": bill.average_unit_price,
         "due_date": bill.due_date.isoformat() if bill.due_date else None,
         "is_forecast": bill.is_forecast,
         "provider_paid": bill.provider_paid,
+        "provider_paid_at": bill.provider_paid_at.isoformat() if bill.provider_paid_at else None,
         "notes": bill.notes,
         "lines": [serialize_bill_line(line, session) for line in bill.lines],
     }
@@ -1293,6 +1301,12 @@ def format_date(value: date | None) -> str:
     if value.month != today.month:
         return f"{value.day} {month}"
     return f"{value.day} число"
+
+
+def format_full_date(value: date | None) -> str:
+    if not value:
+        return ""
+    return value.strftime("%d.%m.%Y")
 
 
 def message_sender_label(message: dict[str, Any]) -> str:
@@ -2362,9 +2376,103 @@ def list_utility_bills(session: Session = Depends(get_session)) -> list[dict[str
     return [serialize_bill(bill, session) for bill in bills]
 
 
+@app.get("/api/utilities/timeline")
+def utility_timeline(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    object_readings = session.scalars(
+        select(MeterReading).join(Meter).where(Meter.scope == "object", Meter.active.is_(True)).order_by(MeterReading.reading_date.desc(), MeterReading.id.desc())
+    ).all()
+    for reading in object_readings:
+        meter = reading.meter
+        service = meter.service
+        events.append(
+            {
+                "kind": "reading",
+                "sort_at": f"{reading.reading_date.isoformat()}T00:00:00",
+                "date": reading.reading_date.isoformat(),
+                "object": service.object.name,
+                "service": service.name,
+                "service_id": service.id,
+                "title": "Общедомовые показания",
+                "detail": f"{meter.name}: {reading.value}",
+            }
+        )
+
+    bills = session.scalars(select(UtilityBill).order_by(UtilityBill.period_end.desc(), UtilityBill.id.desc())).all()
+    for bill in bills:
+        events.append(
+            {
+                "kind": "bill",
+                "sort_at": f"{bill.period_end.isoformat()}T12:00:00",
+                "date": bill.period_end.isoformat(),
+                "object": bill.service.object.name,
+                "service": bill.service.name,
+                "service_id": bill.service_id,
+                "bill_id": bill.id,
+                "title": f"{bill.period_start:%d.%m.%Y} -> {bill.period_end:%d.%m.%Y} ({(bill.period_end - bill.period_start).days} дн.)",
+                "detail": f"{(bill.period_end - bill.period_start).days} дн., жильцам {money_text(sum(line.total_amount for line in bill.lines))}, по дому {money_text(bill.total_cost)}",
+                "status": bill.status,
+                "provider_paid": bill.provider_paid,
+            }
+        )
+        if bill.provider_paid_at:
+            events.append(
+                {
+                    "kind": "provider_paid",
+                    "sort_at": bill.provider_paid_at.isoformat(),
+                    "date": bill.provider_paid_at.date().isoformat(),
+                    "object": bill.service.object.name,
+                    "service": bill.service.name,
+                    "service_id": bill.service_id,
+                    "bill_id": bill.id,
+                    "title": "Поставщик оплачен",
+                    "detail": f"Период {format_full_date(bill.period_start)} -> {format_full_date(bill.period_end)}",
+                    "status": bill.status,
+                    "provider_paid": True,
+                }
+            )
+
+    utility_receipts = session.scalars(
+        select(PaymentReceipt).where(PaymentReceipt.utility_line_id.is_not(None)).order_by(PaymentReceipt.paid_at.desc(), PaymentReceipt.id.desc())
+    ).all()
+    for receipt in utility_receipts:
+        line = session.get(UtilityBillLine, receipt.utility_line_id) if receipt.utility_line_id else None
+        if not line:
+            continue
+        bill = line.bill
+        events.append(
+            {
+                "kind": "resident_payment",
+                "sort_at": receipt.paid_at.isoformat(),
+                "date": receipt.paid_at.date().isoformat(),
+                "object": bill.service.object.name,
+                "service": bill.service.name,
+                "service_id": bill.service_id,
+                "bill_id": bill.id,
+                "title": f"Оплата жильца: {line.apartment.name}",
+                "detail": f"{line.lease.tenant.full_name if line.lease else ''} — {money_text(receipt.amount)}",
+                "status": receipt.status,
+                "provider_paid": bill.provider_paid,
+            }
+        )
+
+    events.sort(key=lambda item: item["sort_at"], reverse=True)
+    return events
+
+
 @app.post("/api/utility-bills/calculate")
 def create_utility_bill(payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
     try:
+        existing = session.scalar(
+            select(UtilityBill).where(
+                UtilityBill.service_id == int(payload["service_id"]),
+                UtilityBill.period_start == parse_date(payload.get("period_start")),
+                UtilityBill.period_end == parse_date(payload.get("period_end")),
+                UtilityBill.status == "draft",
+            )
+        )
+        if existing:
+            raise ValueError("Черновик за этот период уже есть. Удалите его и пересоздайте заново, если нужен новый расчёт.")
         bill, warnings = calculate_utility_bill(
             session=session,
             service_id=int(payload["service_id"]),
@@ -2380,6 +2488,18 @@ def create_utility_bill(payload: dict[str, Any], session: Session = Depends(get_
     result = serialize_bill(bill)
     result["warnings"] = warnings
     return result
+
+
+@app.delete("/api/utility-bills/{bill_id}")
+def delete_utility_bill(bill_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
+    bill = session.get(UtilityBill, bill_id)
+    if not bill:
+        raise HTTPException(404, "Коммунальный счёт не найден")
+    if bill.status != "draft":
+        raise HTTPException(400, "Удалять можно только черновики")
+    session.delete(bill)
+    session.commit()
+    return {"ok": True, "bill_id": bill_id}
 
 
 @app.post("/api/utility-bills/{bill_id}/issue")

@@ -178,6 +178,48 @@ class ReadingValue:
     note: str
 
 
+@dataclass
+class UtilitySegment:
+    apartment: Apartment
+    lease: Lease
+    start: date
+    end: date
+    personal_consumption: float
+    odn_consumption: float
+
+
+def lease_for_day(leases: list[Lease], day: date) -> Lease | None:
+    for lease in leases:
+        if lease.start_date <= day and (lease.end_date is None or lease.end_date >= day):
+            return lease
+    return None
+
+
+def overlap_days(start: date, end: date, other_start: date, other_end: date) -> int:
+    return max(0, (min(end, other_end) - max(start, other_start)).days)
+
+
+def segment_label(start: date, end: date) -> str:
+    return f"{start:%d.%m.%Y} -> {end:%d.%m.%Y} ({(end - start).days} \u0434\u043d.)"
+
+
+def reading_or_error(
+    session: Session,
+    meter_id: int,
+    target: date,
+    *,
+    allow_estimate: bool,
+    warning_prefix: str,
+    warnings: list[str],
+) -> ReadingValue:
+    reading = reading_value_at(session, meter_id, target, allow_estimate)
+    if not reading:
+        raise ValueError(f"\u041d\u0435 \u0445\u0432\u0430\u0442\u0430\u0435\u0442 \u043f\u043e\u043a\u0430\u0437\u0430\u043d\u0438\u0439: {warning_prefix} \u043d\u0430 {target:%d.%m.%Y}")
+    if reading.estimated:
+        warnings.append(f"{warning_prefix}: \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u043e \u0440\u0430\u0441\u0447\u0451\u0442\u043d\u043e\u0435 \u0437\u043d\u0430\u0447\u0435\u043d\u0438\u0435 \u043d\u0430 {target:%d.%m.%Y}")
+    return reading
+
+
 def reading_value_at(session: Session, meter_id: int, target: date, allow_estimate: bool) -> ReadingValue | None:
     exact = session.scalar(
         select(MeterReading).where(MeterReading.meter_id == meter_id, MeterReading.reading_date == target)
@@ -297,49 +339,67 @@ def calculate_utility_bill(
     allow_estimate: bool = False,
 ) -> tuple[UtilityBill, list[str]]:
     if period_end <= period_start:
-        raise ValueError("Дата окончания должна быть позже даты начала")
+        raise ValueError("\u0414\u0430\u0442\u0430 \u043e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u044f \u0434\u043e\u043b\u0436\u043d\u0430 \u0431\u044b\u0442\u044c \u043f\u043e\u0437\u0436\u0435 \u0434\u0430\u0442\u044b \u043d\u0430\u0447\u0430\u043b\u0430")
 
     service = session.get(UtilityService, service_id)
     if not service:
-        raise ValueError("Услуга не найдена")
+        raise ValueError("\u0423\u0441\u043b\u0443\u0433\u0430 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u0430")
 
     object_meter = session.scalar(
         select(Meter).where(Meter.service_id == service_id, Meter.scope == "object", Meter.active.is_(True)).limit(1)
     )
     if not object_meter:
-        raise ValueError("У услуги нет общедомового счётчика")
+        raise ValueError("\u0423 \u0443\u0441\u043b\u0443\u0433\u0438 \u043d\u0435\u0442 \u043e\u0431\u0449\u0435\u0434\u043e\u043c\u043e\u0432\u043e\u0433\u043e \u0441\u0447\u0451\u0442\u0447\u0438\u043a\u0430")
 
     warnings: list[str] = []
-    object_start = reading_value_at(session, object_meter.id, period_start, allow_estimate)
-    object_end = reading_value_at(session, object_meter.id, period_end, allow_estimate)
-    if not object_start or not object_end:
-        raise ValueError("Не хватает показаний общедомового счётчика для выбранного периода")
-    if object_start.estimated or object_end.estimated:
-        warnings.append("Общедомовой расход рассчитан по средним значениям")
+    object_start = reading_or_error(
+        session,
+        object_meter.id,
+        period_start,
+        allow_estimate=allow_estimate,
+        warning_prefix=f"{service.object.name}: \u043e\u0431\u0449\u0435\u0434\u043e\u043c\u043e\u0432\u043e\u0439 \u0441\u0447\u0451\u0442\u0447\u0438\u043a ({service.name})",
+        warnings=warnings,
+    )
+    object_end = reading_or_error(
+        session,
+        object_meter.id,
+        period_end,
+        allow_estimate=allow_estimate,
+        warning_prefix=f"{service.object.name}: \u043e\u0431\u0449\u0435\u0434\u043e\u043c\u043e\u0432\u043e\u0439 \u0441\u0447\u0451\u0442\u0447\u0438\u043a ({service.name})",
+        warnings=warnings,
+    )
 
     total_consumption = object_end.value - object_start.value
     if total_consumption < 0:
-        raise ValueError("Общедомовой счётчик уменьшился. Проверьте показания")
+        raise ValueError("\u041e\u0431\u0449\u0435\u0434\u043e\u043c\u043e\u0432\u043e\u0439 \u0441\u0447\u0451\u0442\u0447\u0438\u043a \u0443\u043c\u0435\u043d\u044c\u0448\u0438\u043b\u0441\u044f. \u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u043f\u043e\u043a\u0430\u0437\u0430\u043d\u0438\u044f")
 
     tariff = tariff_for_date(session, service_id, period_end)
     if not tariff:
-        raise ValueError("Не найден тариф на дату окончания периода")
+        raise ValueError("\u041d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d \u0442\u0430\u0440\u0438\u0444 \u043d\u0430 \u0434\u0430\u0442\u0443 \u043e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u044f \u043f\u0435\u0440\u0438\u043e\u0434\u0430")
 
     total_cost = calculate_tiered_cost(total_consumption, tariff.tiers_json)
-    average_price = total_cost / total_consumption if total_consumption else 0
+    average_price = total_cost / total_consumption if total_consumption else 0.0
 
     apartments = session.scalars(
         select(Apartment)
         .where(Apartment.object_id == service.object_id, Apartment.active.is_(True))
         .order_by(Apartment.sort_order, Apartment.name)
     ).all()
-    leases_by_apartment = {
-        apartment.id: active_lease_for_apartment(session, apartment.id, period_start, period_end)
+
+    apartment_leases: dict[int, list[Lease]] = {
+        apartment.id: session.scalars(
+            select(Lease)
+            .where(
+                Lease.apartment_id == apartment.id,
+                Lease.start_date < period_end,
+                or_(Lease.end_date.is_(None), Lease.end_date >= period_start),
+            )
+            .order_by(Lease.start_date)
+        ).all()
         for apartment in apartments
     }
 
-    personal_by_apartment: dict[int, float] = {}
-    apartment_consumption = 0.0
+    apartment_meters: dict[int, Meter] = {}
     for apartment in apartments:
         apartment_meter = session.scalar(
             select(Meter)
@@ -351,26 +411,145 @@ def calculate_utility_bill(
             )
             .limit(1)
         )
-        personal = 0.0
         if apartment_meter:
-            reading_start = reading_value_at(session, apartment_meter.id, period_start, allow_estimate)
-            reading_end = reading_value_at(session, apartment_meter.id, period_end, allow_estimate)
-            if reading_start and reading_end:
-                personal = reading_end.value - reading_start.value
-                if personal < 0:
-                    raise ValueError(f"Счётчик {apartment.name} уменьшился. Проверьте показания")
-                if reading_start.estimated or reading_end.estimated:
-                    warnings.append(f"{apartment.name}: личный расход рассчитан по средним значениям")
-            elif not allow_estimate:
-                raise ValueError(f"Не хватает показаний по квартире {apartment.name}")
-        personal_by_apartment[apartment.id] = personal
-        apartment_consumption += personal
+            apartment_meters[apartment.id] = apartment_meter
 
-    if apartment_consumption - total_consumption > 0.001:
-        raise ValueError("Сумма квартирных счётчиков больше общедомового расхода. Тут бухгалтерия сказала 'стоп'.")
+    existing_lines = session.scalars(
+        select(UtilityBillLine)
+        .join(UtilityBill)
+        .where(
+            UtilityBill.service_id == service_id,
+            UtilityBill.status != "draft",
+            UtilityBill.period_start < period_end,
+            UtilityBill.period_end > period_start,
+        )
+    ).all()
 
-    odn_consumption = max(0.0, total_consumption - apartment_consumption)
-    odn_by_apartment = allocate_odn(apartments, leases_by_apartment, period_start, period_end, odn_consumption)
+    covered_intervals: dict[tuple[int, int], list[tuple[date, date]]] = {}
+    boundaries = {period_start, period_end}
+    previously_billed_amount = 0.0
+    billed_segment_count = 0
+
+    for leases in apartment_leases.values():
+        for lease in leases:
+            if period_start < lease.start_date < period_end:
+                boundaries.add(lease.start_date)
+            if lease.end_date:
+                next_day = lease.end_date + timedelta(days=1)
+                if period_start < next_day < period_end:
+                    boundaries.add(next_day)
+
+    for line in existing_lines:
+        if not line.lease_id:
+            continue
+        overlap_start = max(period_start, line.bill.period_start)
+        overlap_end = min(period_end, line.bill.period_end)
+        if overlap_end <= overlap_start:
+            continue
+        boundaries.add(overlap_start)
+        boundaries.add(overlap_end)
+        covered_intervals.setdefault((line.apartment_id, line.lease_id), []).append((overlap_start, overlap_end))
+        full_days = max((line.bill.period_end - line.bill.period_start).days, 1)
+        overlap_ratio = overlap_days(period_start, period_end, line.bill.period_start, line.bill.period_end) / full_days
+        previously_billed_amount += line.total_amount * overlap_ratio
+
+    sorted_boundaries = sorted(boundaries)
+    segments: list[UtilitySegment] = []
+    all_apartment_consumption_total = 0.0
+
+    for start, end in zip(sorted_boundaries, sorted_boundaries[1:]):
+        if end <= start:
+            continue
+
+        object_segment_start = reading_or_error(
+            session,
+            object_meter.id,
+            start,
+            allow_estimate=True,
+            warning_prefix=f"{service.object.name}: \u043e\u0431\u0449\u0435\u0434\u043e\u043c\u043e\u0432\u043e\u0439 \u0441\u0447\u0451\u0442\u0447\u0438\u043a ({service.name})",
+            warnings=warnings,
+        )
+        object_segment_end = reading_or_error(
+            session,
+            object_meter.id,
+            end,
+            allow_estimate=True,
+            warning_prefix=f"{service.object.name}: \u043e\u0431\u0449\u0435\u0434\u043e\u043c\u043e\u0432\u043e\u0439 \u0441\u0447\u0451\u0442\u0447\u0438\u043a ({service.name})",
+            warnings=warnings,
+        )
+        object_segment_consumption = object_segment_end.value - object_segment_start.value
+        if object_segment_consumption < 0:
+            raise ValueError("\u041e\u0431\u0449\u0435\u0434\u043e\u043c\u043e\u0432\u043e\u0439 \u0441\u0447\u0451\u0442\u0447\u0438\u043a \u0443\u043c\u0435\u043d\u044c\u0448\u0438\u043b\u0441\u044f \u0432\u043d\u0443\u0442\u0440\u0438 \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u043e\u0433\u043e \u043f\u0435\u0440\u0438\u043e\u0434\u0430. \u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u043f\u043e\u043a\u0430\u0437\u0430\u043d\u0438\u044f.")
+
+        active_leases = {apartment.id: lease_for_day(apartment_leases[apartment.id], start) for apartment in apartments}
+        personal_by_apartment: dict[int, float] = {}
+        segment_apartment_consumption = 0.0
+
+        for apartment in apartments:
+            personal = 0.0
+            apartment_meter = apartment_meters.get(apartment.id)
+            if apartment_meter:
+                reading_start = reading_value_at(session, apartment_meter.id, start, True)
+                reading_end = reading_value_at(session, apartment_meter.id, end, True)
+                if reading_start and reading_end:
+                    personal = reading_end.value - reading_start.value
+                    if personal < 0:
+                        raise ValueError(f"\u0421\u0447\u0451\u0442\u0447\u0438\u043a {apartment.name} \u0443\u043c\u0435\u043d\u044c\u0448\u0438\u043b\u0441\u044f. \u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u043f\u043e\u043a\u0430\u0437\u0430\u043d\u0438\u044f")
+                    if reading_start.estimated:
+                        warnings.append(f"{apartment.name}: \u0440\u0430\u0441\u0447\u0451\u0442\u043d\u043e\u0435 \u043b\u0438\u0447\u043d\u043e\u0435 \u043f\u043e\u043a\u0430\u0437\u0430\u043d\u0438\u0435 \u043d\u0430 {start:%d.%m.%Y}")
+                    if reading_end.estimated:
+                        warnings.append(f"{apartment.name}: \u0440\u0430\u0441\u0447\u0451\u0442\u043d\u043e\u0435 \u043b\u0438\u0447\u043d\u043e\u0435 \u043f\u043e\u043a\u0430\u0437\u0430\u043d\u0438\u0435 \u043d\u0430 {end:%d.%m.%Y}")
+                elif not allow_estimate:
+                    raise ValueError(f"\u041d\u0435 \u0445\u0432\u0430\u0442\u0430\u0435\u0442 \u043f\u043e\u043a\u0430\u0437\u0430\u043d\u0438\u0439 \u043f\u043e \u043a\u0432\u0430\u0440\u0442\u0438\u0440\u0435 {apartment.name}")
+
+            personal = money(personal)
+            personal_by_apartment[apartment.id] = personal
+            segment_apartment_consumption += personal
+
+        all_apartment_consumption_total += segment_apartment_consumption
+        if segment_apartment_consumption - object_segment_consumption > 0.001:
+            raise ValueError("\u0421\u0443\u043c\u043c\u0430 \u043a\u0432\u0430\u0440\u0442\u0438\u0440\u043d\u044b\u0445 \u0441\u0447\u0451\u0442\u0447\u0438\u043a\u043e\u0432 \u0431\u043e\u043b\u044c\u0448\u0435 \u043e\u0431\u0449\u0435\u0434\u043e\u043c\u043e\u0432\u043e\u0433\u043e \u0440\u0430\u0441\u0445\u043e\u0434\u0430. \u0422\u0443\u0442 \u0431\u0443\u0445\u0433\u0430\u043b\u0442\u0435\u0440\u0438\u044f \u0441\u043a\u0430\u0437\u0430\u043b\u0430 '\u0441\u0442\u043e\u043f'.")
+
+        segment_odn = max(0.0, object_segment_consumption - segment_apartment_consumption)
+        occupied_apartments = [apartment for apartment in apartments if active_leases.get(apartment.id)]
+        total_share = sum(max(apartment.odn_share_percent, 0) for apartment in occupied_apartments)
+
+        for apartment in occupied_apartments:
+            lease = active_leases[apartment.id]
+            assert lease is not None
+            already_covered = any(
+                interval_start <= start and interval_end >= end
+                for interval_start, interval_end in covered_intervals.get((apartment.id, lease.id), [])
+            )
+            if already_covered:
+                billed_segment_count += 1
+                continue
+
+            personal = personal_by_apartment.get(apartment.id, 0.0)
+            odn = money(segment_odn * max(apartment.odn_share_percent, 0) / total_share) if total_share > 0 else 0.0
+            segments.append(
+                UtilitySegment(
+                    apartment=apartment,
+                    lease=lease,
+                    start=start,
+                    end=end,
+                    personal_consumption=personal,
+                    odn_consumption=odn,
+                )
+            )
+
+    if all_apartment_consumption_total - total_consumption > 0.001:
+        raise ValueError("\u0421\u0443\u043c\u043c\u0430 \u043a\u0432\u0430\u0440\u0442\u0438\u0440\u043d\u044b\u0445 \u0441\u0447\u0451\u0442\u0447\u0438\u043a\u043e\u0432 \u0431\u043e\u043b\u044c\u0448\u0435 \u043e\u0431\u0449\u0435\u0434\u043e\u043c\u043e\u0432\u043e\u0433\u043e \u0440\u0430\u0441\u0445\u043e\u0434\u0430. \u0422\u0443\u0442 \u0431\u0443\u0445\u0433\u0430\u043b\u0442\u0435\u0440\u0438\u044f \u0441\u043a\u0430\u0437\u0430\u043b\u0430 '\u0441\u0442\u043e\u043f'.")
+
+    if not segments and previously_billed_amount > 0:
+        raise ValueError("\u0417\u0430 \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u044b\u0439 \u043f\u0435\u0440\u0438\u043e\u0434 \u0443\u0436\u0435 \u0435\u0441\u0442\u044c \u0432\u044b\u0441\u0442\u0430\u0432\u043b\u0435\u043d\u043d\u044b\u0435 \u043a\u043e\u043c\u043c\u0443\u043d\u0430\u043b\u044c\u043d\u044b\u0435 \u0441\u0447\u0435\u0442\u0430. \u0423\u0434\u0430\u043b\u0438\u0442\u0435 \u0441\u0442\u0430\u0440\u044b\u0439 \u0447\u0435\u0440\u043d\u043e\u0432\u0438\u043a \u0438\u043b\u0438 \u0432\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0434\u0440\u0443\u0433\u043e\u0439 \u0438\u043d\u0442\u0435\u0440\u0432\u0430\u043b.")
+
+    house_odn_consumption = max(0.0, total_consumption - all_apartment_consumption_total)
+    notes = list(dict.fromkeys(warnings))
+    if previously_billed_amount > 0:
+        notes.append(f"\u0420\u0430\u043d\u0435\u0435 \u0436\u0438\u043b\u044c\u0446\u0430\u043c \u0443\u0436\u0435 \u0432\u044b\u0441\u0442\u0430\u0432\u043b\u044f\u043b\u043e\u0441\u044c \u043f\u0440\u0438\u043c\u0435\u0440\u043d\u043e \u043d\u0430 {money(previously_billed_amount):.2f} \u20bd.")
+    if billed_segment_count:
+        notes.append(f"\u041f\u0440\u043e\u043f\u0443\u0449\u0435\u043d\u043e \u0443\u0436\u0435 \u0432\u044b\u0441\u0442\u0430\u0432\u043b\u0435\u043d\u043d\u044b\u0445 \u0441\u0435\u0433\u043c\u0435\u043d\u0442\u043e\u0432: {billed_segment_count}.")
 
     bill = UtilityBill(
         service_id=service_id,
@@ -378,32 +557,28 @@ def calculate_utility_bill(
         period_end=period_end,
         status="draft",
         total_consumption=money(total_consumption),
-        apartment_consumption=money(apartment_consumption),
-        odn_consumption=money(odn_consumption),
+        apartment_consumption=money(all_apartment_consumption_total),
+        odn_consumption=money(house_odn_consumption),
         total_cost=total_cost,
         average_unit_price=round(average_price, 4),
         is_forecast=allow_estimate,
-        notes="\n".join(warnings),
+        notes="\n".join(notes),
     )
 
-    for apartment in apartments:
-        lease = leases_by_apartment.get(apartment.id)
-        if not lease:
-            continue
-        personal = personal_by_apartment.get(apartment.id, 0.0)
-        odn = odn_by_apartment.get(apartment.id, 0.0)
+    for segment in segments:
         bill.lines.append(
             UtilityBillLine(
-                apartment_id=apartment.id,
-                lease_id=lease.id,
-                personal_consumption=money(personal),
-                odn_consumption=money(odn),
-                total_amount=money((personal + odn) * average_price),
+                apartment_id=segment.apartment.id,
+                lease_id=segment.lease.id,
+                personal_consumption=money(segment.personal_consumption),
+                odn_consumption=money(segment.odn_consumption),
+                total_amount=money((segment.personal_consumption + segment.odn_consumption) * average_price),
                 status="draft",
+                note=segment_label(segment.start, segment.end),
             )
         )
 
-    return bill, warnings
+    return bill, notes
 
 
 def resident_due_date(service: UtilityService, today: date | None = None) -> date:
