@@ -4,6 +4,7 @@ const state = {
   utilityBills: [],
   expenses: [],
   tariffs: [],
+  messageTargets: [],
   settings: {},
   quickReadingArmedUntil: 0,
 };
@@ -19,6 +20,8 @@ const statusText = {
   issued: "выставлено",
   compensated: "компенсировано",
   not_required: "не требуется",
+  suspicious: "проверить",
+  accepted: "принят",
 };
 
 const money = (value) => new Intl.NumberFormat("ru-RU", { style: "currency", currency: "RUB", maximumFractionDigits: 2 }).format(value || 0);
@@ -82,7 +85,13 @@ function allApartments() {
 }
 
 function statusPill(status) {
-  const cls = status === "overdue" ? "danger" : status === "partial" || status === "deferred" ? "warn" : status === "paid" || status === "paid_ahead" ? "ok" : "";
+  const cls = status === "overdue" || status === "suspicious"
+    ? "danger"
+    : status === "partial" || status === "deferred"
+      ? "warn"
+      : status === "paid" || status === "paid_ahead" || status === "accepted"
+        ? "ok"
+        : "";
   return `<span class="pill ${cls}">${statusText[status] || status}</span>`;
 }
 
@@ -129,6 +138,12 @@ function applySettings(settings = {}) {
     color_palette: "classic",
     app_base_url: "",
     telegram_owner_chat_id: "",
+    ip_recipient_name: "",
+    ip_recipient_account: "",
+    ip_recipient_bik: "",
+    personal_recipient_name: "",
+    personal_recipient_phone: "",
+    personal_recipient_bank: "",
     telegram_bot_token_configured: false,
     telegram_webhook_secret_configured: false,
     ...settings,
@@ -140,22 +155,50 @@ function applySettings(settings = {}) {
   const ownerChat = qs("#telegramOwnerChatIdInput");
   const token = qs("#telegramBotTokenInput");
   const secret = qs("#telegramWebhookSecretInput");
+  const ipRecipientName = qs("#ipRecipientNameInput");
+  const ipRecipientAccount = qs("#ipRecipientAccountInput");
+  const ipRecipientBik = qs("#ipRecipientBikInput");
+  const personalRecipientName = qs("#personalRecipientNameInput");
+  const personalRecipientPhone = qs("#personalRecipientPhoneInput");
+  const personalRecipientBank = qs("#personalRecipientBankInput");
   if (appBase) appBase.value = state.settings.app_base_url || "";
   if (ownerChat) ownerChat.value = state.settings.telegram_owner_chat_id || "";
   if (token) token.placeholder = state.settings.telegram_bot_token_configured ? "Токен сохранён, пусто = не менять" : "Вставь bot token";
   if (secret) secret.placeholder = state.settings.telegram_webhook_secret_configured ? "Secret сохранён, пусто = не менять" : "Вставь webhook secret";
+  if (ipRecipientName) ipRecipientName.value = state.settings.ip_recipient_name || "";
+  if (ipRecipientAccount) ipRecipientAccount.value = state.settings.ip_recipient_account || "";
+  if (ipRecipientBik) ipRecipientBik.value = state.settings.ip_recipient_bik || "";
+  if (personalRecipientName) personalRecipientName.value = state.settings.personal_recipient_name || "";
+  if (personalRecipientPhone) personalRecipientPhone.value = state.settings.personal_recipient_phone || "";
+  if (personalRecipientBank) personalRecipientBank.value = state.settings.personal_recipient_bank || "";
+  const templateFields = {
+    "#messageRentDueInput": "message_rent_due",
+    "#messageRentOverdueInput": "message_rent_overdue",
+    "#messageUtilityBillInput": "message_utility_bill",
+    "#messageReceiptReceivedInput": "message_receipt_received",
+    "#messageReceiptReviewInput": "message_receipt_review",
+    "#messageOwnerReceiptAlertInput": "message_owner_receipt_alert",
+  };
+  Object.entries(templateFields).forEach(([selector, key]) => {
+    const field = qs(selector);
+    if (field) field.value = state.settings[key] || "";
+  });
   renderTelegramStatus();
 }
 
 function renderTelegramStatus() {
   const box = qs("#telegramStatusBox");
   if (!box) return;
+  const ipReady = Boolean(state.settings.ip_recipient_name && state.settings.ip_recipient_account);
+  const personalReady = Boolean(state.settings.personal_recipient_name && state.settings.personal_recipient_phone);
   box.innerHTML = `
     <h3>Telegram</h3>
     <div class="pill-row">
       <span class="pill ${state.settings.telegram_bot_token_configured ? "ok" : "warn"}">token ${state.settings.telegram_bot_token_configured ? "сохранён" : "не задан"}</span>
       <span class="pill ${state.settings.telegram_webhook_secret_configured ? "ok" : "warn"}">secret ${state.settings.telegram_webhook_secret_configured ? "сохранён" : "не задан"}</span>
       <span class="pill ${state.settings.telegram_owner_chat_id ? "ok" : "warn"}">owner chat ${state.settings.telegram_owner_chat_id || "не задан"}</span>
+      <span class="pill ${ipReady ? "ok" : "warn"}">ИП-реквизиты ${ipReady ? "есть" : "неполные"}</span>
+      <span class="pill ${personalReady ? "ok" : "warn"}">перевод-реквизиты ${personalReady ? "есть" : "неполные"}</span>
     </div>
     <p class="muted">${state.settings.app_base_url || "Публичный URL не задан. Без него webhook не оживёт, как ни уговаривай."}</p>
   `;
@@ -164,7 +207,7 @@ function renderTelegramStatus() {
 async function loadAll() {
   state.bootstrap = await api("/api/bootstrap");
   applySettings(state.bootstrap.settings);
-  await Promise.all([loadRent(), loadUtilityBills(), loadExpenses(), loadTariffs()]);
+  await Promise.all([loadRent(), loadUtilityBills(), loadExpenses(), loadTariffs(), loadMessageTargets()]);
   hydrateForms();
   renderAll();
 }
@@ -186,6 +229,10 @@ async function loadExpenses() {
 
 async function loadTariffs() {
   state.tariffs = await api("/api/tariffs");
+}
+
+async function loadMessageTargets() {
+  state.messageTargets = await api("/api/messages/targets");
 }
 
 function hydrateForms() {
@@ -211,6 +258,7 @@ function renderAll() {
   renderUtilities();
   renderTariffs();
   renderExpenses();
+  renderMessages();
   setReportLinks();
 }
 
@@ -458,6 +506,28 @@ function renderExpenses() {
   qs("#expenseList").innerHTML = table(["Дата", "Объект", "Квартира", "Категория", "Сумма", "Источник", "Компенсация", "Описание", "Действия"], rows);
 }
 
+function renderMessages() {
+  const root = qs("#messageTargets");
+  if (!root) return;
+  const rows = state.messageTargets.map((target) => `
+    <tr>
+      <td>${target.object}</td>
+      <td>${target.apartment}</td>
+      <td>${target.tenant}<br><span class="muted">${target.telegram || "без @username"}</span></td>
+      <td>${target.linked ? '<span class="pill ok">бот знает жильца</span>' : '<span class="pill warn">ждём /start от жильца</span>'}</td>
+      <td>${target.rent_charge_id ? `${statusPill(target.rent_status)}<br><span class="muted">${money(target.rent_debt)}</span>` : '<span class="muted">нет</span>'}</td>
+      <td>${target.utility_line_id ? `${statusPill(target.utility_status)}<br><span class="muted">${money(target.utility_debt)}</span>` : '<span class="muted">нет</span>'}</td>
+      <td class="actions">
+        ${target.rent_charge_id ? `<button class="mini primary" onclick="sendTemplateMessage(${target.lease_id}, 'message_rent_due', ${target.rent_charge_id}, null)">Аренда</button>` : ""}
+        ${target.rent_charge_id ? `<button class="mini" onclick="sendTemplateMessage(${target.lease_id}, 'message_rent_overdue', ${target.rent_charge_id}, null)">Просрочка</button>` : ""}
+        ${target.utility_line_id ? `<button class="mini primary" onclick="sendTemplateMessage(${target.lease_id}, 'message_utility_bill', null, ${target.utility_line_id})">Коммуналка</button>` : ""}
+        <button class="mini" onclick="sendCustomMessage(${target.lease_id})">Свой текст</button>
+      </td>
+    </tr>
+  `).join("");
+  root.innerHTML = table(["Объект", "Квартира", "Жилец", "Связка", "Аренда", "Коммуналка", "Действия"], rows);
+}
+
 function table(headers, rows) {
   return `<table><thead><tr>${headers.map((header) => `<th>${header}</th>`).join("")}</tr></thead><tbody>${rows || `<tr><td colspan="${headers.length}" class="muted">Пока пусто</td></tr>`}</tbody></table>`;
 }
@@ -517,6 +587,37 @@ async function compensateExpense(id) {
   await api(`/api/expenses/${id}/compensate`, { method: "POST", body: "{}" });
   toast("Расход компенсирован");
   await loadAll();
+}
+
+async function sendTemplateMessage(leaseId, templateKey, chargeId = null, utilityLineId = null) {
+  await api("/api/messages/send", {
+    method: "POST",
+    body: JSON.stringify({
+      lease_id: leaseId,
+      template_key: templateKey,
+      charge_id: chargeId,
+      utility_line_id: utilityLineId,
+    }),
+  });
+  toast("Сообщение отправлено через бота");
+  await loadMessageTargets();
+  renderMessages();
+}
+
+async function sendCustomMessage(leaseId) {
+  const customText = prompt("Текст сообщения");
+  if (!customText) return;
+  await api("/api/messages/send", {
+    method: "POST",
+    body: JSON.stringify({
+      lease_id: leaseId,
+      template_key: "custom",
+      custom_text: customText,
+    }),
+  });
+  toast("Сообщение отправлено через бота");
+  await loadMessageTargets();
+  renderMessages();
 }
 
 async function moveOut(id) {
@@ -701,6 +802,14 @@ function bindEvents() {
     event.currentTarget.reset();
     toast("Расход добавлен");
     await loadAll();
+  });
+
+  qs("#messageTemplatesForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = formData(event.currentTarget);
+    const settings = await api("/api/settings", { method: "POST", body: JSON.stringify(data) });
+    applySettings(settings);
+    toast("Шаблоны сохранены");
   });
 
   qs("#settingsForm").addEventListener("submit", async (event) => {

@@ -48,14 +48,23 @@ from rental_manager.services.billing import (
     update_rent_charge_status,
     update_utility_line_status,
 )
+from rental_manager.services.receipt_matching import (
+    choose_exact_receipt_match,
+    detect_receipt_channel,
+    normalize_telegram_handle,
+    receipt_validation_issues,
+)
+from rental_manager.services.receipt_parser import parse_receipt_file
 from rental_manager.services.seed import seed_if_empty
 from rental_manager.services.telegram_bot import (
     app_keyboard,
     build_reports_message,
     build_status_message,
+    download_telegram_file,
     owner_commands,
     parse_command,
     send_message,
+    telegram_file_info,
     telegram_api_request,
 )
 
@@ -68,12 +77,27 @@ DEFAULT_SETTINGS = {
     "color_palette": "classic",
     "app_base_url": "",
     "telegram_owner_chat_id": "",
+    "ip_recipient_name": "",
+    "ip_recipient_account": "",
+    "ip_recipient_bik": "",
+    "personal_recipient_name": "",
+    "personal_recipient_phone": "",
+    "personal_recipient_bank": "",
+    "message_rent_due": "Здравствуйте. Напоминаю: по квартире {apartment} сегодня ожидается оплата аренды. ИП: {ip_due}. Перевод: {personal_due}. Итого: {total_due}.",
+    "message_rent_overdue": "Здравствуйте. По квартире {apartment} сейчас просрочена аренда. Долг: {debt}. ИП: {ip_due}. Перевод: {personal_due}.",
+    "message_utility_bill": "Здравствуйте. Коммуналка по квартире {apartment} за период {period} составляет {utility_total}. Срок оплаты до {utility_due_date}.",
+    "message_receipt_received": "Чек получил и сохранил. Если всё совпало, я это отмечу. Если нет, передам владельцу на ручную проверку.",
+    "message_receipt_review": "Чек получил, но там есть вопросы. Я уже отправил его владельцу на проверку.",
+    "message_owner_receipt_alert": "Новый чек от {tenant_name}. Квартира: {apartment}. Сумма: {amount}. Канал: {channel}. Статус: {receipt_status}. {receipt_summary}",
 }
 SECRET_SETTINGS = {
     "telegram_bot_token": "",
     "telegram_webhook_secret": "",
 }
 ALL_SETTINGS = {**DEFAULT_SETTINGS, **SECRET_SETTINGS}
+INTERNAL_SETTINGS = {
+    "telegram_tenant_links": "{}",
+}
 
 REPORT_START_MONTH = date(2026, 1, 1)
 MONTH_NAMES = [
@@ -150,12 +174,14 @@ def iter_generated_report_months(today: date | None = None) -> list[tuple[int, i
 
 
 def get_setting_value(session: Session, key: str) -> str:
-    if key not in ALL_SETTINGS:
+    if key not in ALL_SETTINGS and key not in INTERNAL_SETTINGS:
         return ""
     row = session.get(AppSetting, key)
     if row:
         return row.value
-    return str(ALL_SETTINGS[key])
+    if key in ALL_SETTINGS:
+        return str(ALL_SETTINGS[key])
+    return str(INTERNAL_SETTINGS[key])
 
 
 def get_settings(session: Session) -> dict[str, str | bool]:
@@ -165,7 +191,7 @@ def get_settings(session: Session) -> dict[str, str | bool]:
     return settings
 
 
-def save_settings(session: Session, payload: dict[str, Any]) -> dict[str, str]:
+def save_settings(session: Session, payload: dict[str, Any]) -> dict[str, str | bool]:
     allowed = set(ALL_SETTINGS)
     for key, value in payload.items():
         if key not in allowed:
@@ -200,6 +226,81 @@ def app_base_url(session: Session) -> str:
 def owner_chat_allowed(session: Session, chat_id: int | str) -> bool:
     owner_id = telegram_owner_chat_id(session)
     return bool(owner_id) and str(chat_id) == owner_id
+
+
+def message_template(session: Session, key: str) -> str:
+    return get_setting_value(session, key)
+
+
+def get_tenant_links(session: Session) -> dict[str, str]:
+    raw = get_setting_value(session, "telegram_tenant_links") or "{}"
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(key): str(value) for key, value in parsed.items() if value}
+
+
+def save_tenant_links(session: Session, links: dict[str, str]) -> None:
+    setting = session.get(AppSetting, "telegram_tenant_links")
+    if not setting:
+        setting = AppSetting(key="telegram_tenant_links")
+        session.add(setting)
+    setting.value = json.dumps(links, ensure_ascii=False)
+
+
+def lease_chat_id(session: Session, lease: Lease) -> str:
+    links = get_tenant_links(session)
+    return links.get(str(lease.tenant_id), "")
+
+
+def tenant_chat_linked(session: Session, lease: Lease) -> bool:
+    return bool(lease_chat_id(session, lease))
+
+
+def normalize_apartment_code(value: str) -> str:
+    return re.sub(r"[^a-zа-я0-9]+", "", (value or "").lower().replace("ё", "е"))
+
+
+def maybe_link_tenant_chat(session: Session, message: dict[str, Any]) -> Lease | None:
+    sender = message.get("from") or {}
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    handles = {
+        normalize_telegram_handle(sender.get("username") or ""),
+        normalize_telegram_handle(chat.get("username") or ""),
+    }
+    handles.discard("")
+    if not chat_id or not handles:
+        return None
+
+    for lease in session.scalars(select(Lease).where(Lease.active.is_(True))).all():
+        if normalize_telegram_handle(lease.tenant.telegram) in handles:
+            links = get_tenant_links(session)
+            links[str(lease.tenant_id)] = str(chat_id)
+            save_tenant_links(session, links)
+            return lease
+    return None
+
+
+def find_lease_by_receipt_purpose(session: Session, purpose: str) -> Lease | None:
+    normalized = normalize_apartment_code(purpose)
+    if not normalized:
+        return None
+    for lease in session.scalars(select(Lease).where(Lease.active.is_(True))).all():
+        apartment_code = normalize_apartment_code(lease.apartment.name)
+        if apartment_code and apartment_code in normalized:
+            return lease
+    return None
+
+
+def fill_template(template: str, context: dict[str, Any]) -> str:
+    text = template or ""
+    for key, value in context.items():
+        text = text.replace("{" + key + "}", str(value if value is not None else ""))
+    return text
 
 
 def serialize_object(obj: RentalObject) -> dict[str, Any]:
@@ -661,6 +762,356 @@ def build_dashboard(session: Session) -> dict[str, Any]:
     }
 
 
+def money_text(value: float) -> str:
+    return f"{money(value):,.2f}".replace(",", " ").replace(".", ",") + " ₽"
+
+
+def first_open_rent_charge(lease: Lease) -> RentCharge | None:
+    charges = sorted(lease.rent_charges, key=lambda item: item.due_date)
+    for charge in charges:
+        update_rent_charge_status(charge)
+        if charge.status not in {"paid", "paid_ahead"}:
+            return charge
+    return None
+
+
+def first_open_utility_line(session: Session, lease: Lease) -> UtilityBillLine | None:
+    lines = session.scalars(select(UtilityBillLine).where(UtilityBillLine.lease_id == lease.id)).all()
+    lines = sorted(lines, key=lambda item: (item.due_date or date.max, item.id))
+    for line in lines:
+        update_utility_line_status(line)
+        if line.status not in {"paid", "paid_ahead"}:
+            return line
+    return None
+
+
+def build_message_context(
+    session: Session,
+    lease: Lease,
+    charge: RentCharge | None = None,
+    line: UtilityBillLine | None = None,
+    custom_text: str = "",
+) -> dict[str, str]:
+    charge = charge or first_open_rent_charge(lease)
+    line = line or first_open_utility_line(session, lease)
+    rent_debt = 0.0
+    ip_due = 0.0
+    personal_due = 0.0
+    rent_due_date = ""
+    rent_period = ""
+    if charge:
+        update_rent_charge_status(charge)
+        ip_due = max(0.0, charge.ip_due - charge.ip_paid)
+        personal_due = max(0.0, charge.personal_due - charge.personal_paid)
+        rent_debt = ip_due + personal_due
+        rent_due_date = format_date(charge.due_date)
+        rent_period = f"{format_date(charge.period_start)} - {format_date(charge.period_end)}"
+
+    utility_total = 0.0
+    utility_due_date = ""
+    utility_period = ""
+    utility_service = ""
+    if line:
+        update_utility_line_status(line)
+        utility_total = max(0.0, line.total_amount - line.paid_amount)
+        utility_due_date = format_date(line.due_date) if line.due_date else ""
+        utility_period = f"{format_date(line.bill.period_start)} - {format_date(line.bill.period_end)}"
+        utility_service = line.bill.service.name
+
+    return {
+        "tenant_name": lease.tenant.full_name,
+        "apartment": lease.apartment.name,
+        "object": lease.apartment.object.name,
+        "phone": lease.tenant.phone or "",
+        "telegram": lease.tenant.telegram or "",
+        "payment_day": str(lease.payment_day),
+        "ip_due": money_text(ip_due),
+        "personal_due": money_text(personal_due),
+        "total_due": money_text(rent_debt),
+        "debt": money_text(rent_debt),
+        "rent_due_date": rent_due_date,
+        "rent_period": rent_period,
+        "utility_total": money_text(utility_total),
+        "utility_due_date": utility_due_date,
+        "period": utility_period or rent_period,
+        "utility_service": utility_service,
+        "custom_text": custom_text,
+    }
+
+
+def render_message_text(
+    session: Session,
+    template_key: str,
+    lease: Lease,
+    charge: RentCharge | None = None,
+    line: UtilityBillLine | None = None,
+    custom_text: str = "",
+) -> str:
+    if template_key == "custom":
+        return custom_text.strip()
+    return fill_template(message_template(session, template_key), build_message_context(session, lease, charge, line, custom_text))
+
+
+def serialize_message_target(session: Session, lease: Lease) -> dict[str, Any]:
+    charge = first_open_rent_charge(lease)
+    line = first_open_utility_line(session, lease)
+    return {
+        "lease_id": lease.id,
+        "tenant_id": lease.tenant_id,
+        "tenant": lease.tenant.full_name,
+        "object": lease.apartment.object.name,
+        "apartment": lease.apartment.name,
+        "telegram": lease.tenant.telegram,
+        "linked": tenant_chat_linked(session, lease),
+        "rent_charge_id": charge.id if charge else None,
+        "rent_status": charge.status if charge else "",
+        "rent_debt": money(max(0.0, (charge.ip_due - charge.ip_paid) if charge else 0.0) + max(0.0, (charge.personal_due - charge.personal_paid) if charge else 0.0)),
+        "utility_line_id": line.id if line else None,
+        "utility_status": line.status if line else "",
+        "utility_debt": money(max(0.0, (line.total_amount - line.paid_amount) if line else 0.0)),
+    }
+
+
+def send_tenant_message(
+    session: Session,
+    lease: Lease,
+    template_key: str,
+    charge: RentCharge | None = None,
+    line: UtilityBillLine | None = None,
+    custom_text: str = "",
+) -> dict[str, Any]:
+    chat_id = lease_chat_id(session, lease)
+    if not chat_id:
+        raise HTTPException(400, f"{lease.tenant.full_name} ещё не привязан к боту. Пусть сначала напишет /start.")
+    text = render_message_text(session, template_key, lease, charge, line, custom_text)
+    if not text.strip():
+        raise HTTPException(400, "Текст сообщения пустой")
+    send_telegram_text(session, chat_id, text)
+    return {
+        "ok": True,
+        "tenant": lease.tenant.full_name,
+        "lease_id": lease.id,
+        "template_key": template_key,
+        "text": text,
+    }
+
+
+def format_date(value: date | None) -> str:
+    if not value:
+        return ""
+    month = MONTH_NAMES[value.month - 1]
+    today = date.today()
+    if value.year != today.year:
+        return f"{value.day} {month} {value.year}"
+    if value.month != today.month:
+        return f"{value.day} {month}"
+    return f"{value.day} число"
+
+
+def message_sender_label(message: dict[str, Any]) -> str:
+    sender = message.get("from") or {}
+    full_name = " ".join(part for part in [sender.get("first_name"), sender.get("last_name")] if part).strip()
+    username = normalize_telegram_handle(sender.get("username") or "")
+    if full_name and username:
+        return f"{full_name} (@{username})"
+    if full_name:
+        return full_name
+    if username:
+        return f"@{username}"
+    return "неизвестный отправитель"
+
+
+def receipt_channel_label(value: str) -> str:
+    return {
+        "ip": "ИП",
+        "personal": "перевод",
+        "unknown": "неизвестно",
+    }.get(value, value or "неизвестно")
+
+
+def receipt_status_label(value: str) -> str:
+    return {
+        "accepted": "принят",
+        "suspicious": "нужна проверка",
+    }.get(value, value or "неизвестно")
+
+
+def receipt_storage_dir() -> Path:
+    path = ROOT_DIR / "data" / "telegram_receipts"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def telegram_media_descriptor(message: dict[str, Any]) -> tuple[str, str, str]:
+    document = message.get("document")
+    if document:
+        file_id = document.get("file_id") or ""
+        name = Path(document.get("file_name") or "telegram-document.bin").name
+        mime = document.get("mime_type") or ""
+        return file_id, name, mime
+    photos = message.get("photo") or []
+    if photos:
+        largest = photos[-1]
+        return largest.get("file_id") or "", f"telegram-photo-{largest.get('file_unique_id') or utc_now().timestamp()}.jpg", "image/jpeg"
+    return "", "", ""
+
+
+def save_telegram_media(session: Session, message: dict[str, Any]) -> Path | None:
+    token = telegram_token(session)
+    file_id, name, _mime = telegram_media_descriptor(message)
+    if not token or not file_id:
+        return None
+    info = telegram_file_info(token, file_id)
+    file_path = info.get("file_path") or ""
+    if not file_path:
+        return None
+    extension = Path(name).suffix or Path(file_path).suffix or ".bin"
+    stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    target = receipt_storage_dir() / f"{stamp}-{Path(name).stem[:40]}{extension}"
+    return download_telegram_file(token, file_path, target)
+
+
+def receipt_candidate_lease(session: Session, message: dict[str, Any], parsed: dict[str, Any] | None, linked_lease: Lease | None) -> Lease | None:
+    if linked_lease:
+        return linked_lease
+    if parsed and parsed.get("purpose"):
+        return find_lease_by_receipt_purpose(session, parsed.get("purpose") or "")
+    return None
+
+
+def apply_receipt_match(session: Session, lease: Lease, parsed: dict[str, Any]) -> tuple[str, str, int | None, list[str]]:
+    channel = detect_receipt_channel(parsed)
+    issues = receipt_validation_issues(parsed, get_settings(session), channel)
+
+    rent_candidates: list[dict[str, Any]] = []
+    for charge in sorted(lease.rent_charges, key=lambda item: item.due_date):
+        update_rent_charge_status(charge)
+        if channel == "ip":
+            debt = max(0.0, charge.ip_due - charge.ip_paid)
+        else:
+            debt = max(0.0, charge.personal_due - charge.personal_paid)
+        if debt > 0:
+            rent_candidates.append({"id": charge.id, "debt": money(debt)})
+
+    utility_candidates: list[dict[str, Any]] = []
+    if channel == "personal":
+        for line in session.scalars(select(UtilityBillLine).where(UtilityBillLine.lease_id == lease.id)).all():
+            update_utility_line_status(line)
+            debt = max(0.0, line.total_amount - line.paid_amount)
+            if debt > 0:
+                utility_candidates.append({"id": line.id, "debt": money(debt)})
+
+    match_type, match_id, match_issues = choose_exact_receipt_match(float(parsed.get("amount") or 0), channel, rent_candidates, utility_candidates)
+    issues.extend(match_issues)
+    if issues:
+        return "suspicious", "review", None, issues
+
+    if match_type == "rent" and match_id:
+        charge = session.get(RentCharge, match_id)
+        if charge:
+            if channel == "ip":
+                charge.ip_paid = money(charge.ip_paid + float(parsed.get("amount") or 0))
+            else:
+                charge.personal_paid = money(charge.personal_paid + float(parsed.get("amount") or 0))
+            update_rent_charge_status(charge)
+        return "accepted", "rent", charge.id if charge else None, []
+
+    if match_type == "utility" and match_id:
+        line = session.get(UtilityBillLine, match_id)
+        if line:
+            line.paid_amount = money(line.paid_amount + float(parsed.get("amount") or 0))
+            update_utility_line_status(line)
+        return "accepted", "utility", line.id if line else None, []
+
+    return "suspicious", "review", None, ["не удалось автоматически привязать чек"]
+
+
+def owner_receipt_alert_text(
+    session: Session,
+    lease: Lease | None,
+    parsed: dict[str, Any] | None,
+    receipt_status: str,
+    issues: list[str],
+    sender_label: str,
+) -> str:
+    summary_bits = [sender_label]
+    if parsed:
+        if parsed.get("recipient_name"):
+            summary_bits.append(f"получатель: {parsed['recipient_name']}")
+        if parsed.get("purpose"):
+            summary_bits.append(f"назначение: {parsed['purpose']}")
+    if issues:
+        summary_bits.append("вопросы: " + "; ".join(issues))
+    context = {
+        "tenant_name": lease.tenant.full_name if lease else sender_label,
+        "apartment": lease.apartment.name if lease else "не определена",
+        "amount": money_text(float(parsed.get("amount") or 0)) if parsed else "0,00 ₽",
+        "channel": receipt_channel_label(detect_receipt_channel(parsed or {})),
+        "receipt_status": receipt_status_label(receipt_status),
+        "receipt_summary": ". ".join(summary_bits),
+    }
+    return fill_template(message_template(session, "message_owner_receipt_alert"), context)
+
+
+def handle_tenant_receipt_message(session: Session, message: dict[str, Any], linked_lease: Lease | None) -> None:
+    chat_id = (message.get("chat") or {}).get("id")
+    if not chat_id:
+        return
+    saved_path = save_telegram_media(session, message)
+    if not saved_path:
+        send_telegram_text(session, chat_id, message_template(session, "message_receipt_review"))
+        return
+
+    parsed: dict[str, Any] | None = None
+    if saved_path.suffix.lower() == ".pdf":
+        try:
+            parsed = parse_receipt_file(saved_path)
+        except Exception:
+            parsed = None
+
+    lease = receipt_candidate_lease(session, message, parsed, linked_lease)
+    status = "suspicious"
+    match_type = "review"
+    linked_id: int | None = None
+    issues = ["чек сохранён, но требует ручной проверки"]
+    if parsed and lease:
+        status, match_type, linked_id, issues = apply_receipt_match(session, lease, parsed)
+    elif parsed and not lease:
+        issues = ["не удалось понять, к какому жильцу относится чек"]
+
+    channel = detect_receipt_channel(parsed or {})
+    receipt = PaymentReceipt(
+        lease_id=lease.id if lease else None,
+        rent_charge_id=linked_id if status == "accepted" and match_type == "rent" else None,
+        utility_line_id=linked_id if status == "accepted" and match_type == "utility" else None,
+        apartment_id=lease.apartment_id if lease else None,
+        amount=float((parsed or {}).get("amount") or 0),
+        channel=channel or "unknown",
+        paid_at=datetime.fromisoformat(parsed["paid_at"]) if parsed and parsed.get("paid_at") else utc_now(),
+        source="telegram",
+        status=status,
+        recipient_name=(parsed or {}).get("recipient_name") or "",
+        recipient_details=json.dumps(parsed or {}, ensure_ascii=False),
+        file_path=str(saved_path.relative_to(ROOT_DIR)),
+        notes="; ".join(issues),
+    )
+    session.add(receipt)
+
+    if status == "accepted":
+        send_telegram_text(session, chat_id, message_template(session, "message_receipt_received"))
+    else:
+        send_telegram_text(session, chat_id, message_template(session, "message_receipt_review"))
+
+    owner_id = telegram_owner_chat_id(session)
+    if owner_id:
+        send_telegram_text(
+            session,
+            owner_id,
+            owner_receipt_alert_text(session, lease, parsed, status, issues, message_sender_label(message)),
+            app_keyboard(app_base_url(session)),
+        )
+
+
 def send_telegram_text(session: Session, chat_id: int | str, text: str, keyboard: dict[str, Any] | None = None) -> dict[str, Any]:
     token = telegram_token(session)
     if not token:
@@ -691,22 +1142,31 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
     if not chat_id:
         return
 
+    linked_lease = maybe_link_tenant_chat(session, message)
     text = (message.get("text") or "").strip()
     command, _args = parse_command(text)
     base_url = app_base_url(session)
     reports = build_monthly_reports(session)
     owner_id = telegram_owner_chat_id(session)
+    is_owner = owner_chat_allowed(session, chat_id)
 
     if command in {"/start", "/id"}:
         if command == "/id":
             send_telegram_text(session, chat_id, f"Ваш chat id: {chat_id}")
             return
-        if owner_id and str(chat_id) == owner_id:
+        if is_owner:
             send_telegram_text(
                 session,
                 chat_id,
                 "Бот подключён. Можно смотреть статус, отчёты и открывать пульт с телефона.",
                 app_keyboard(base_url),
+            )
+            return
+        if linked_lease:
+            send_telegram_text(
+                session,
+                chat_id,
+                f"Привет. Я привязал этот чат к квартире {linked_lease.apartment.name}. Теперь сюда можно присылать чеки и я передам их владельцу.",
             )
             return
         send_telegram_text(
@@ -718,7 +1178,10 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
         return
 
     if command == "/help":
-        send_telegram_text(session, chat_id, telegram_help_text(), app_keyboard(base_url))
+        if is_owner:
+            send_telegram_text(session, chat_id, telegram_help_text(), app_keyboard(base_url))
+        else:
+            send_telegram_text(session, chat_id, "Можно прислать чек PDF или фото. Я его сохраню и передам владельцу.")
         return
 
     if not owner_id:
@@ -729,18 +1192,14 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
         )
         return
 
-    if not owner_chat_allowed(session, chat_id):
+    if not is_owner:
         if message.get("document") or message.get("photo"):
-            send_telegram_text(
-                session,
-                chat_id,
-                "Файл получил. Авторазбор чеков для жильцов добавим следующим этапом; пока бот в owner-режиме.",
-            )
+            handle_tenant_receipt_message(session, message, linked_lease)
             return
         send_telegram_text(
             session,
             chat_id,
-            "Бот для жильцов ещё не открыт. Пока доступны только owner-команды.",
+            "Напиши /start или просто пришли чек. Остальное пока оставим без философии.",
         )
         return
 
@@ -828,6 +1287,39 @@ def telegram_send_test(session: Session = Depends(get_session)) -> dict[str, Any
         app_keyboard(app_base_url(session), dashboard.get("monthly_reports")),
     )
     return {"ok": True}
+
+
+@app.get("/api/messages/targets")
+def message_targets(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    leases = session.scalars(select(Lease).where(Lease.active.is_(True)).order_by(Lease.start_date.desc())).all()
+    return [serialize_message_target(session, lease) for lease in leases]
+
+
+@app.post("/api/messages/send")
+def send_message_to_tenant(payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
+    lease = session.get(Lease, int(payload["lease_id"]))
+    if not lease or not lease.active:
+        raise HTTPException(404, "Активный договор не найден")
+
+    template_key = (payload.get("template_key") or "").strip()
+    if template_key not in {"message_rent_due", "message_rent_overdue", "message_utility_bill", "custom"}:
+        raise HTTPException(400, "Неизвестный шаблон сообщения")
+
+    charge = session.get(RentCharge, int(payload["charge_id"])) if payload.get("charge_id") else None
+    line = session.get(UtilityBillLine, int(payload["utility_line_id"])) if payload.get("utility_line_id") else None
+    if charge and charge.lease_id != lease.id:
+        raise HTTPException(400, "Этот арендный долг относится к другому жильцу")
+    if line and line.lease_id != lease.id:
+        raise HTTPException(400, "Этот коммунальный счёт относится к другому жильцу")
+    result = send_tenant_message(
+        session,
+        lease,
+        template_key,
+        charge=charge,
+        line=line,
+        custom_text=(payload.get("custom_text") or "").strip(),
+    )
+    return result
 
 
 @app.get("/api/objects")

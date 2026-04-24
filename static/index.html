@@ -27,6 +27,7 @@
       <button class="tab" data-tab="tariffs">Тарифы</button>
       <button class="tab" data-tab="expenses">Расходы</button>
       <button class="tab" data-tab="reports">Отчёты</button>
+      <button class="tab" data-tab="messages">Сообщения</button>
       <button class="tab" data-tab="settings">Настройки</button>
     </nav>
 
@@ -192,6 +193,44 @@
         <div id="monthlyReportDetails" class="monthly-report-details"></div>
       </section>
 
+      <section class="panel" id="messages">
+        <div class="section-title">
+          <h2>Сообщения</h2>
+          <span>Выборочная ручная рассылка через бота. Никакой самодеятельности без твоего клика.</span>
+        </div>
+        <div class="card muted-box">
+          <strong>Плейсхолдеры</strong>
+          <p class="muted">{tenant_name}, {apartment}, {object}, {ip_due}, {personal_due}, {total_due}, {debt}, {rent_due_date}, {rent_period}, {utility_total}, {utility_due_date}, {period}, {utility_service}, {custom_text}, {amount}, {channel}, {receipt_status}, {receipt_summary}</p>
+        </div>
+        <div id="messageTargets" class="table-wrap"></div>
+
+        <div class="section-title">
+          <h2>Шаблоны</h2>
+          <span>Тексты всех основных сообщений живут тут. А зачем держать их по углам?</span>
+        </div>
+        <form id="messageTemplatesForm" class="form-grid">
+          <label class="wide">Аренда: сегодня срок
+            <textarea name="message_rent_due" id="messageRentDueInput" rows="3"></textarea>
+          </label>
+          <label class="wide">Аренда: просрочка
+            <textarea name="message_rent_overdue" id="messageRentOverdueInput" rows="3"></textarea>
+          </label>
+          <label class="wide">Коммуналка
+            <textarea name="message_utility_bill" id="messageUtilityBillInput" rows="3"></textarea>
+          </label>
+          <label class="wide">Ответ жильцу: чек принят
+            <textarea name="message_receipt_received" id="messageReceiptReceivedInput" rows="3"></textarea>
+          </label>
+          <label class="wide">Ответ жильцу: ручная проверка
+            <textarea name="message_receipt_review" id="messageReceiptReviewInput" rows="3"></textarea>
+          </label>
+          <label class="wide">Уведомление владельцу о чеке
+            <textarea name="message_owner_receipt_alert" id="messageOwnerReceiptAlertInput" rows="3"></textarea>
+          </label>
+          <button class="primary wide" type="submit">Сохранить шаблоны</button>
+        </form>
+      </section>
+
       <section class="panel" id="settings">
         <div class="section-title">
           <h2>Настройки</h2>
@@ -218,6 +257,24 @@
               <option value="dark-classic">Тёмная классическая</option>
               <option value="neon">Тёмная неоновая</option>
             </select>
+          </label>
+          <label class="wide">Получатель ИП
+            <input name="ip_recipient_name" id="ipRecipientNameInput" placeholder="ИП Чантурия Эраст Митридатович" />
+          </label>
+          <label>Счёт ИП
+            <input name="ip_recipient_account" id="ipRecipientAccountInput" placeholder="4080..." />
+          </label>
+          <label>БИК ИП
+            <input name="ip_recipient_bik" id="ipRecipientBikInput" placeholder="045004641" />
+          </label>
+          <label class="wide">Получатель перевода
+            <input name="personal_recipient_name" id="personalRecipientNameInput" placeholder="Эрнест К." />
+          </label>
+          <label>Телефон получателя
+            <input name="personal_recipient_phone" id="personalRecipientPhoneInput" placeholder="+7 913 385-44-41" />
+          </label>
+          <label>Банк получателя
+            <input name="personal_recipient_bank" id="personalRecipientBankInput" placeholder="Сбербанк" />
           </label>
           <button class="primary" type="submit">Сохранить настройки</button>
         </form>

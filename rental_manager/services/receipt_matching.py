@@ -35,6 +35,14 @@ def names_loosely_match(left: str, right: str) -> bool:
     return left_norm in right_norm or right_norm in left_norm
 
 
+def text_loosely_matches(left: str, right: str) -> bool:
+    left_norm = normalize_name(left)
+    right_norm = normalize_name(right)
+    if not left_norm or not right_norm:
+        return False
+    return left_norm == right_norm or left_norm in right_norm or right_norm in left_norm
+
+
 def detect_receipt_channel(parsed: dict[str, Any]) -> str:
     transfer_type = (parsed.get("transfer_type") or "").lower()
     recipient_name = (parsed.get("recipient_name") or "").lower()
@@ -52,17 +60,23 @@ def receipt_validation_issues(parsed: dict[str, Any], settings: dict[str, Any], 
     if channel == "ip":
         expected_name = settings.get("ip_recipient_name") or ""
         expected_account = settings.get("ip_recipient_account") or ""
+        expected_bik = (settings.get("ip_recipient_bik") or "").strip()
         if expected_name and not names_loosely_match(parsed.get("recipient_name") or "", expected_name):
             issues.append("получатель ИП не совпал с настройками")
         if expected_account and (parsed.get("recipient_account") or "") != expected_account:
             issues.append("счёт получателя ИП не совпал с настройками")
+        if expected_bik and (parsed.get("recipient_bik") or "").strip() != expected_bik:
+            issues.append("БИК получателя ИП не совпал с настройками")
     elif channel == "personal":
         expected_name = settings.get("personal_recipient_name") or ""
         expected_phone = normalize_phone(settings.get("personal_recipient_phone") or "")
+        expected_bank = settings.get("personal_recipient_bank") or ""
         if expected_name and not names_loosely_match(parsed.get("recipient_name") or "", expected_name):
             issues.append("получатель перевода не совпал с настройками")
         if expected_phone and normalize_phone(parsed.get("recipient_phone") or "") != expected_phone:
             issues.append("номер получателя перевода не совпал с настройками")
+        if expected_bank and not text_loosely_matches(parsed.get("recipient_bank") or "", expected_bank):
+            issues.append("банк получателя перевода не совпал с настройками")
     return issues
 
 
