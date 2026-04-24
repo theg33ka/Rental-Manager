@@ -94,9 +94,12 @@ def rent_channel_paid_amount(charge: RentCharge, channel: str) -> float:
     return money(float(charge.ip_paid or 0)) if channel == "ip" else money(float(charge.personal_paid or 0))
 
 
-def preferred_rent_charge_for_payment_month(
+def charge_month_key(charge: RentCharge) -> tuple[int, int]:
+    return charge.due_date.year, charge.due_date.month
+
+
+def charge_for_payment_month(
     charges: list[RentCharge],
-    channel: str,
     paid_at: date | datetime | None,
 ) -> RentCharge | None:
     if not paid_at:
@@ -105,11 +108,63 @@ def preferred_rent_charge_for_payment_month(
     for charge in charges:
         if charge.due_date.year != paid_day.year or charge.due_date.month != paid_day.month:
             continue
-        if rent_channel_paid_amount(charge, channel) > EPS:
-            return None
-        if rent_charge_debt(charge, channel) > EPS:
-            return charge
+        return charge
     return None
+
+
+def describe_rent_allocation_decision(decision: dict[str, Any] | None) -> str:
+    if not decision or not decision.get("target_due_date"):
+        return ""
+    target_due = decision["target_due_date"]
+    target_label = f"{target_due:%m.%Y}"
+    current_due = decision.get("current_due_date")
+    current_label = f"{current_due:%m.%Y}" if current_due else ""
+    mode = decision.get("mode")
+    if mode == "current_month":
+        return f"зачтено за {target_label}: в текущем месяце ещё не было зачтённого ИП-платежа"
+    if mode == "nearest_past_debt":
+        return f"зачтено за {target_label}: {current_label} уже тронут по ИП, закрываю ближайший старый долг"
+    if mode == "advance":
+        return f"зачтено за {target_label}: {current_label} уже тронут по ИП, долгов нет, ушло в аванс"
+    return f"зачтено за {target_label}"
+
+
+def reorder_ip_document_charges(
+    charges: list[RentCharge],
+    channel: str,
+    paid_at: date | datetime | None,
+) -> tuple[list[RentCharge], dict[str, Any]]:
+    if not paid_at:
+        return charges, {"mode": "fifo", "target_due_date": charges[0].due_date if charges else None}
+    paid_day = paid_at.date() if isinstance(paid_at, datetime) else paid_at
+    current_charge = charge_for_payment_month(charges, paid_day)
+    if current_charge and rent_channel_paid_amount(current_charge, channel) <= EPS and rent_charge_debt(current_charge, channel) > EPS:
+        return [current_charge, *[charge for charge in charges if charge.id != current_charge.id]], {
+            "mode": "current_month",
+            "target_due_date": current_charge.due_date,
+            "current_due_date": current_charge.due_date,
+        }
+
+    if current_charge and rent_channel_paid_amount(current_charge, channel) > EPS:
+        current_key = charge_month_key(current_charge)
+        past_debts = [charge for charge in charges if charge_month_key(charge) < current_key and rent_charge_debt(charge, channel) > EPS]
+        if past_debts:
+            target = max(past_debts, key=lambda charge: (charge.due_date, charge.id))
+            return [target, *[charge for charge in charges if charge.id != target.id]], {
+                "mode": "nearest_past_debt",
+                "target_due_date": target.due_date,
+                "current_due_date": current_charge.due_date,
+            }
+        future_debts = [charge for charge in charges if charge_month_key(charge) > current_key and rent_charge_debt(charge, channel) > EPS]
+        if future_debts:
+            target = min(future_debts, key=lambda charge: (charge.due_date, charge.id))
+            return [target, *[charge for charge in charges if charge.id != target.id]], {
+                "mode": "advance",
+                "target_due_date": target.due_date,
+                "current_due_date": current_charge.due_date,
+            }
+
+    return charges, {"mode": "fifo", "target_due_date": charges[0].due_date if charges else None}
 
 
 def build_rent_plan(
@@ -121,13 +176,21 @@ def build_rent_plan(
     exact_only: bool,
     paid_at: date | datetime | None = None,
     prefer_document_month: bool = False,
-) -> tuple[list[tuple[RentCharge, float]], float]:
+) -> tuple[list[tuple[RentCharge, float]], float, dict[str, Any] | None]:
     charges = ensure_rent_debt_capacity(session, lease, channel, amount)
+    decision: dict[str, Any] | None = None
     if prefer_document_month:
-        preferred = preferred_rent_charge_for_payment_month(charges, channel, paid_at)
-        if preferred:
-            charges = [preferred, *[charge for charge in charges if charge.id != preferred.id]]
-    return _build_plan(charges, lambda charge: rent_charge_debt(charge, channel), amount, exact_only=exact_only)
+        if channel == "ip":
+            charges, decision = reorder_ip_document_charges(charges, channel, paid_at)
+        else:
+            preferred = charge_for_payment_month(charges, paid_at)
+            if preferred and rent_channel_paid_amount(preferred, channel) <= EPS and rent_charge_debt(preferred, channel) > EPS:
+                charges = [preferred, *[charge for charge in charges if charge.id != preferred.id]]
+                decision = {"mode": "current_month", "target_due_date": preferred.due_date, "current_due_date": preferred.due_date}
+    plan, remaining = _build_plan(charges, lambda charge: rent_charge_debt(charge, channel), amount, exact_only=exact_only)
+    if decision is None and plan:
+        decision = {"mode": "fifo", "target_due_date": plan[0][0].due_date}
+    return plan, remaining, decision
 
 
 def build_utility_plan(
@@ -157,7 +220,7 @@ def create_rent_receipts(
     exact_only: bool = False,
     prefer_document_month: bool = False,
 ) -> list[PaymentReceipt]:
-    plan, remaining = build_rent_plan(
+    plan, remaining, _decision = build_rent_plan(
         session,
         lease,
         channel,

@@ -56,6 +56,7 @@ from rental_manager.services.payment_allocation import (
     build_utility_plan,
     create_rent_receipts,
     create_utility_receipts,
+    describe_rent_allocation_decision,
     recalculate_lease_balances,
     rent_charge_candidates,
     utility_line_candidates,
