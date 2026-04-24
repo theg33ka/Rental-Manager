@@ -138,6 +138,8 @@ function applySettings(settings = {}) {
     color_palette: "classic",
     app_base_url: "",
     telegram_owner_chat_id: "",
+    notifications_enabled: false,
+    notification_cutoff_date: "",
     ip_recipient_name: "",
     ip_recipient_account: "",
     ip_recipient_bik: "",
@@ -155,6 +157,8 @@ function applySettings(settings = {}) {
   const ownerChat = qs("#telegramOwnerChatIdInput");
   const token = qs("#telegramBotTokenInput");
   const secret = qs("#telegramWebhookSecretInput");
+  const notificationsEnabled = qs("#notificationsEnabledInput");
+  const notificationCutoffDate = qs("#notificationCutoffDateInput");
   const ipRecipientName = qs("#ipRecipientNameInput");
   const ipRecipientAccount = qs("#ipRecipientAccountInput");
   const ipRecipientBik = qs("#ipRecipientBikInput");
@@ -163,6 +167,8 @@ function applySettings(settings = {}) {
   const personalRecipientBank = qs("#personalRecipientBankInput");
   if (appBase) appBase.value = state.settings.app_base_url || "";
   if (ownerChat) ownerChat.value = state.settings.telegram_owner_chat_id || "";
+  if (notificationsEnabled) notificationsEnabled.checked = Boolean(state.settings.notifications_enabled);
+  if (notificationCutoffDate) notificationCutoffDate.value = state.settings.notification_cutoff_date || appToday();
   if (token) token.placeholder = state.settings.telegram_bot_token_configured ? "Токен сохранён, пусто = не менять" : "Вставь bot token";
   if (secret) secret.placeholder = state.settings.telegram_webhook_secret_configured ? "Secret сохранён, пусто = не менять" : "Вставь webhook secret";
   if (ipRecipientName) ipRecipientName.value = state.settings.ip_recipient_name || "";
@@ -197,6 +203,8 @@ function renderTelegramStatus() {
       <span class="pill ${state.settings.telegram_bot_token_configured ? "ok" : "warn"}">token ${state.settings.telegram_bot_token_configured ? "сохранён" : "не задан"}</span>
       <span class="pill ${state.settings.telegram_webhook_secret_configured ? "ok" : "warn"}">secret ${state.settings.telegram_webhook_secret_configured ? "сохранён" : "не задан"}</span>
       <span class="pill ${state.settings.telegram_owner_chat_id ? "ok" : "warn"}">owner chat ${state.settings.telegram_owner_chat_id || "не задан"}</span>
+      <span class="pill ${state.settings.notifications_enabled ? "ok" : "warn"}">автонапоминания ${state.settings.notifications_enabled ? "включены" : "выключены"}</span>
+      <span class="pill">граница ${formatDate(state.settings.notification_cutoff_date || appToday())}</span>
       <span class="pill ${ipReady ? "ok" : "warn"}">ИП-реквизиты ${ipReady ? "есть" : "неполные"}</span>
       <span class="pill ${personalReady ? "ok" : "warn"}">перевод-реквизиты ${personalReady ? "есть" : "неполные"}</span>
     </div>
@@ -237,8 +245,19 @@ async function loadMessageTargets() {
 
 function hydrateForms() {
   const apartments = allApartments();
+  const vacantApartments = apartments.filter((apartment) => !apartment.active_lease_id);
   const services = state.bootstrap.services;
-  qsa('select[name="apartment_id"]').forEach((select) => setOptions(select, apartments, (a) => `${a.object_name}: ${a.name}`, select.closest("#expenseForm")));
+  qsa('select[name="apartment_id"]').forEach((select) => {
+    if (select.closest("#onboardForm")) {
+      setOptions(select, vacantApartments, (a) => `${a.object_name}: ${a.name}`);
+      if (!vacantApartments.length) {
+        select.innerHTML = "";
+        select.append(new Option("Нет свободных квартир", ""));
+      }
+      return;
+    }
+    setOptions(select, apartments, (a) => `${a.object_name}: ${a.name}`, Boolean(select.closest("#expenseForm")));
+  });
   qsa('select[name="object_id"]').forEach((select) => setOptions(select, state.bootstrap.objects, (o) => o.name, true));
   qsa('select[name="meter_id"]').forEach((select) => setOptions(select, state.bootstrap.meters, (m) => `${m.object}: ${m.name}`));
   qsa('select[name="service_id"]').forEach((select) => setOptions(select, services, (s) => `${s.object}: ${s.name}`));
@@ -262,6 +281,13 @@ function renderAll() {
   setReportLinks();
 }
 
+function formatDateTime(value) {
+  if (!value) return "нет";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleString("ru-RU", { day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" });
+}
+
 function renderDashboard() {
   const dashboard = state.bootstrap.dashboard;
   const metrics = [
@@ -277,14 +303,16 @@ function renderDashboard() {
   renderMonthlyReportTray(dashboard.monthly_reports);
 
   const cards = [];
-  dashboard.rent_today.forEach((item) => cards.push(attentionCard("warn", "Сегодня оплата аренды", `${item.apartment}, ${item.tenant}: ${money(item.debt)}`, rentActions(item), item.due_date)));
-  dashboard.rent_overdue.forEach((item) => cards.push(attentionCard("danger", "Просрочена аренда", `${item.apartment}, ${item.tenant}: ${money(item.debt)}`, rentActions(item), item.due_date)));
-  dashboard.rent_partial.forEach((item) => cards.push(attentionCard("warn", "Аренда оплачена частично", `${item.apartment}, ${item.tenant}: осталось ${money(item.debt)}`, rentActions(item), item.due_date)));
-  dashboard.rent_deferred.forEach((item) => cards.push(attentionCard("warn", "Скоро конец отсрочки", `${item.apartment}, ${item.tenant}: осталось ${item.deferral_days_left} дн., до ${formatDate(item.deferral_until)}`, rentActions(item), item.due_date)));
-  dashboard.utility_overdue.forEach((item) => cards.push(attentionCard("danger", "Просрочена коммуналка", `${item.apartment}, ${item.tenant}: ${money(item.debt)}`, utilityActions(item), item.due_date)));
-  dashboard.stale_readings.forEach((item) => cards.push(attentionCard("warn", "Давно нет показаний", `${item.object}: ${item.service}. Последнее: ${item.last_date ? formatDate(item.last_date) : "нет"}`, "", item.last_date || appToday())));
-  dashboard.pending_personal_expenses.forEach((item) => cards.push(attentionCard("warn", "Личный расход ждёт компенсации", `${item.object || "без объекта"} ${item.apartment || ""}: ${money(item.amount)} — ${item.description || item.category}`, `<button class="mini primary" onclick="compensateExpense(${item.id})">Компенсировать</button>`, item.expense_date)));
-  dashboard.suspicious_receipts.forEach((item) => cards.push(attentionCard("danger", "Подозрительный чек", `${money(item.amount)}: ${item.recipient_name || "получатель не распознан"}`, "", item.created_at)));
+  dashboard.rent_today.forEach((item) => cards.push(attentionCard("warn", "Сегодня оплата аренды", `${item.object}, ${item.apartment}, ${item.tenant}. К оплате ${money(item.debt)}.`, rentAttentionActions(item), attentionBadges(item.due_date, item.reminder, `срок ${formatDate(item.due_date)}`))));
+  dashboard.rent_overdue.forEach((item) => cards.push(attentionCard("danger", "Просрочена аренда", `${item.object}, ${item.apartment}, ${item.tenant}. Долг ${money(item.debt)}. ИП ${money(Math.max(0, item.ip_due - item.ip_paid))}, перевод ${money(Math.max(0, item.personal_due - item.personal_paid))}.`, rentAttentionActions(item, true), attentionBadges(item.due_date, item.reminder, `срок ${formatDate(item.due_date)}`))));
+  dashboard.rent_partial.forEach((item) => cards.push(attentionCard("warn", "Аренда оплачена частично", `${item.object}, ${item.apartment}, ${item.tenant}. Осталось ${money(item.debt)}.`, rentAttentionActions(item, item.due_date <= appToday()), attentionBadges(item.due_date, item.reminder, `срок ${formatDate(item.due_date)}`))));
+  dashboard.rent_deferred.forEach((item) => cards.push(attentionCard("warn", "Скоро конец отсрочки", `${item.object}, ${item.apartment}, ${item.tenant}. Осталось ${item.deferral_days_left} дн., до ${formatDate(item.deferral_until)}.${item.deferral_note ? ` ${item.deferral_note}` : ""}`, rentAttentionActions(item, true), attentionBadges(item.due_date, item.reminder, `срок ${formatDate(item.due_date)}`))));
+  dashboard.utility_overdue.forEach((item) => cards.push(attentionCard("danger", "Просрочена коммуналка", `${item.apartment}, ${item.tenant}. Долг ${money(item.debt)}.`, utilityAttentionActions(item), attentionBadges(item.due_date, item.reminder, `срок ${formatDate(item.due_date)}`))));
+  dashboard.utility_partial.forEach((item) => cards.push(attentionCard("warn", "Коммуналка оплачена частично", `${item.apartment}, ${item.tenant}. Осталось ${money(item.debt)}.`, utilityAttentionActions(item), attentionBadges(item.due_date, item.reminder, `срок ${formatDate(item.due_date)}`))));
+  dashboard.provider_debts.forEach((item) => cards.push(attentionCard("danger", "Поставщик не отмечен как оплаченный", `${item.object}: ${item.service} за ${formatDateRange(item.period_start, item.period_end)}. Сумма ${money(item.total_cost)}.`, `<button class="mini primary" onclick="providerPaid(${item.id})">Поставщик оплачен</button><button class="mini" onclick="openUtilitiesTab()">Открыть коммуналку</button>`, attentionBadges(item.period_end, null, "деньги у поставщика ещё не закрыты"))));
+  dashboard.stale_readings.forEach((item) => cards.push(attentionCard("warn", "Давно нет показаний", `${item.object}: ${item.service}. Последнее: ${item.last_date ? formatDate(item.last_date) : "нет"}.`, `<button class="mini" onclick="openMetersTab()">Открыть счётчики</button><button class="mini" onclick="openUtilitiesTab()">Быстрая передача</button>`, attentionBadges(item.last_date || appToday(), null, item.days ? `${item.days} дн. без обновления` : "пока пусто"))));
+  dashboard.pending_personal_expenses.forEach((item) => cards.push(attentionCard("warn", "Личный расход ждёт компенсации", `${item.object || "без объекта"} ${item.apartment || ""}: ${money(item.amount)}. ${item.description || item.category}`, `<button class="mini primary" onclick="compensateExpense(${item.id})">Компенсировать</button><button class="mini" onclick="openExpensesTab()">Открыть расходы</button>`, attentionBadges(item.expense_date, null, item.source_funds === "personal" ? "из личных" : item.source_funds))));
+  dashboard.suspicious_receipts.forEach((item) => cards.push(attentionCard("danger", "Подозрительный чек", `${money(item.amount)}. ${item.recipient_name || "получатель не распознан"}. ${item.notes || ""}`, `<button class="mini" onclick="openMessagesTab()">Открыть сообщения</button>`, attentionBadges(item.created_at, null, "нужна ручная проверка"))));
   qs("#attentionList").innerHTML = cards.join("") || `<div class="card ok"><h3>Критичных задач нет</h3><p class="muted">Редкий момент, когда приложение не ругается. Подозрительно, но приятно.</p></div>`;
 }
 
@@ -309,8 +337,46 @@ function monthlySeverityText(report) {
   return "закрыт";
 }
 
-function attentionCard(type, title, text, actions, monthValue) {
-  return `<article class="attention-card ${type}"><div class="pill-row">${monthMeta(monthValue)}</div><h3>${title}</h3><p>${text}</p><div class="pill-row">${actions || ""}</div></article>`;
+function reminderBadge(reminder) {
+  if (!reminder) return '<span class="pill">напоминаний ещё не было</span>';
+  if (reminder.latest) {
+    return `<span class="pill ok">${reminder.latest.label}: ${formatDateTime(reminder.latest.created_at)}</span>`;
+  }
+  if (reminder.block_reason) {
+    const cls = reminder.block_reason === "ждём /start" ? "warn" : "";
+    return `<span class="pill ${cls}">${reminder.block_reason}</span>`;
+  }
+  return '<span class="pill">напоминаний ещё не было</span>';
+}
+
+function attentionBadges(monthValue, reminder, extra = "") {
+  return [monthMeta(monthValue), reminderBadge(reminder), extra ? `<span class="pill">${extra}</span>` : ""].join("");
+}
+
+function rentAttentionActions(charge, overdueMode = false) {
+  const template = overdueMode ? "message_rent_overdue" : "message_rent_due";
+  return `
+    <button class="mini" onclick="sendTemplateMessage(${charge.lease_id}, '${template}', ${charge.id}, null)">Напомнить</button>
+    ${rentActions(charge)}
+  `;
+}
+
+function utilityAttentionActions(line) {
+  return `
+    <button class="mini" onclick="sendTemplateMessage(${line.lease_id}, 'message_utility_bill', null, ${line.id})">Напомнить</button>
+    ${utilityActions(line)}
+  `;
+}
+
+function compactReminderText(reminder) {
+  if (!reminder) return '<span class="muted">нет</span>';
+  if (reminder.latest) return `<span class="muted">${reminder.latest.label}: ${formatDateTime(reminder.latest.created_at)}</span>`;
+  if (reminder.block_reason) return `<span class="muted">${reminder.block_reason}</span>`;
+  return '<span class="muted">ещё не отправлялось</span>';
+}
+
+function attentionCard(type, title, text, actions, badges) {
+  return `<article class="attention-card ${type}"><div class="pill-row">${badges || ""}</div><h3>${title}</h3><p>${text}</p><div class="attention-actions">${actions || ""}</div></article>`;
 }
 
 function renderObjects() {
@@ -515,8 +581,8 @@ function renderMessages() {
       <td>${target.apartment}</td>
       <td>${target.tenant}<br><span class="muted">${target.telegram || "без @username"}</span></td>
       <td>${target.linked ? '<span class="pill ok">бот знает жильца</span>' : '<span class="pill warn">ждём /start от жильца</span>'}</td>
-      <td>${target.rent_charge_id ? `${statusPill(target.rent_status)}<br><span class="muted">${money(target.rent_debt)}</span>` : '<span class="muted">нет</span>'}</td>
-      <td>${target.utility_line_id ? `${statusPill(target.utility_status)}<br><span class="muted">${money(target.utility_debt)}</span>` : '<span class="muted">нет</span>'}</td>
+      <td>${target.rent_charge_id ? `${statusPill(target.rent_status)}<br><span class="muted">${money(target.rent_debt)}</span><br>${compactReminderText(target.rent_reminder)}` : '<span class="muted">нет</span>'}</td>
+      <td>${target.utility_line_id ? `${statusPill(target.utility_status)}<br><span class="muted">${money(target.utility_debt)}</span><br>${compactReminderText(target.utility_reminder)}` : '<span class="muted">нет</span>'}</td>
       <td class="actions">
         ${target.rent_charge_id ? `<button class="mini primary" onclick="sendTemplateMessage(${target.lease_id}, 'message_rent_due', ${target.rent_charge_id}, null)">Аренда</button>` : ""}
         ${target.rent_charge_id ? `<button class="mini" onclick="sendTemplateMessage(${target.lease_id}, 'message_rent_overdue', ${target.rent_charge_id}, null)">Просрочка</button>` : ""}
@@ -600,8 +666,7 @@ async function sendTemplateMessage(leaseId, templateKey, chargeId = null, utilit
     }),
   });
   toast("Сообщение отправлено через бота");
-  await loadMessageTargets();
-  renderMessages();
+  await loadAll();
 }
 
 async function sendCustomMessage(leaseId) {
@@ -616,8 +681,7 @@ async function sendCustomMessage(leaseId) {
     }),
   });
   toast("Сообщение отправлено через бота");
-  await loadMessageTargets();
-  renderMessages();
+  await loadAll();
 }
 
 async function moveOut(id) {
@@ -636,6 +700,26 @@ function openReportsTab() {
 
 function openTenantsTab() {
   const tab = qs('.tab[data-tab="tenants"]');
+  if (tab) tab.click();
+}
+
+function openMetersTab() {
+  const tab = qs('.tab[data-tab="meters"]');
+  if (tab) tab.click();
+}
+
+function openUtilitiesTab() {
+  const tab = qs('.tab[data-tab="utilities"]');
+  if (tab) tab.click();
+}
+
+function openExpensesTab() {
+  const tab = qs('.tab[data-tab="expenses"]');
+  if (tab) tab.click();
+}
+
+function openMessagesTab() {
+  const tab = qs('.tab[data-tab="messages"]');
   if (tab) tab.click();
 }
 
@@ -702,6 +786,16 @@ async function sendTelegramTest() {
   toast("Тестовое сообщение отправлено");
 }
 
+async function runRemindersNow() {
+  const result = await api("/api/reminders/run", { method: "POST", body: "{}" });
+  if (!result.enabled) {
+    toast(`Автонапоминания выключены. Граница сейчас ${formatDate(result.cutoff_date)}.`);
+    return;
+  }
+  toast(`Напоминания: отправлено ${result.sent}, дубликаты ${result.skipped_duplicate}, старые долги под молчанием ${result.skipped_legacy}`);
+  await loadAll();
+}
+
 function resetQuickReadingConfirm() {
   state.quickReadingArmedUntil = 0;
   const button = qs("#quickReadingsSubmit");
@@ -748,6 +842,7 @@ function bindEvents() {
   });
 
   qs("#refreshBtn").addEventListener("click", loadAll);
+  qs("#runRemindersBtn").addEventListener("click", runRemindersNow);
   qs("#openTariffsBtn").addEventListener("click", () => {
     const tab = qs('.tab[data-tab="tariffs"]');
     if (tab) tab.click();
@@ -826,6 +921,15 @@ function bindEvents() {
 
   ["reportStart", "reportEnd"].forEach((id) => qs(`#${id}`).addEventListener("change", setReportLinks));
 }
+
+window.addEventListener("unhandledrejection", (event) => {
+  const message = event.reason?.message || String(event.reason || "Ошибка");
+  toast(message);
+});
+
+window.addEventListener("error", (event) => {
+  if (event?.message) toast(event.message);
+});
 
 bindEvents();
 loadAll().catch((error) => toast(error.message));

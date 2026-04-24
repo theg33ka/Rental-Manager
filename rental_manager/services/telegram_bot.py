@@ -66,6 +66,7 @@ def owner_commands() -> list[dict[str, str]]:
         {"command": "id", "description": "Показать текущий chat id"},
         {"command": "status", "description": "Сводка по пульту и долгам"},
         {"command": "reports", "description": "Открытые месячные отчёты"},
+        {"command": "run_reminders", "description": "Прогнать напоминания жильцам"},
         {"command": "app", "description": "Кнопка открытия веб-пульта"},
     ]
 

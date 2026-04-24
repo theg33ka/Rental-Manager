@@ -14,6 +14,7 @@
       </div>
       <div class="top-actions">
         <button class="icon-button" id="refreshBtn" title="Обновить данные">⟳</button>
+        <button id="runRemindersBtn">Прогнать напоминания</button>
         <button class="primary" id="generateRentBtn">Сгенерировать аренду</button>
       </div>
     </header>
@@ -35,22 +36,20 @@
       <section class="panel active" id="dashboard">
         <div class="summary-grid" id="summaryGrid"></div>
         <div class="monthly-report-tray" id="monthlyReportTray"></div>
-        <div class="section-grid">
-          <section>
-            <div class="section-title">
-              <h2>Что требует внимания</h2>
-              <span>Цвет важнее красоты: красное первым, жёлтое потом</span>
-            </div>
-            <div id="attentionList" class="attention-grid"></div>
-          </section>
-          <section>
-            <div class="section-title">
-              <h2>Объекты кратко</h2>
-              <span>Подробности уехали в жильцов, им там спокойнее</span>
-            </div>
-            <div id="objectCards" class="object-summary"></div>
-          </section>
-        </div>
+        <section>
+          <div class="section-title">
+            <h2>Объекты кратко</h2>
+            <span>Подробности уехали в жильцов, им там спокойнее</span>
+          </div>
+          <div id="objectCards" class="object-summary"></div>
+        </section>
+        <section>
+          <div class="section-title">
+            <h2>Что требует внимания</h2>
+            <span>Тут уже не просто список бед, а рабочая доска: что горит, кому уже писали и что можно ткнуть сразу.</span>
+          </div>
+          <div id="attentionList" class="attention-grid"></div>
+        </section>
       </section>
 
       <section class="panel" id="tenants">
@@ -257,6 +256,10 @@
               <option value="dark-classic">Тёмная классическая</option>
               <option value="neon">Тёмная неоновая</option>
             </select>
+          </label>
+          <label class="check wide"><input type="checkbox" name="notifications_enabled" id="notificationsEnabledInput" /> Автоматические напоминания жильцам включены</label>
+          <label>Игнорировать старые долги до
+            <input type="date" name="notification_cutoff_date" id="notificationCutoffDateInput" />
           </label>
           <label class="wide">Получатель ИП
             <input name="ip_recipient_name" id="ipRecipientNameInput" placeholder="ИП Чантурия Эраст Митридатович" />

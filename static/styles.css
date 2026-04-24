@@ -467,13 +467,21 @@ section {
 }
 
 .attention-card {
-  min-height: 132px;
+  min-height: 172px;
   padding: 14px;
   border: 1px solid var(--line);
   border-left-width: 6px;
   border-radius: var(--radius);
   background: var(--surface);
   box-shadow: var(--shadow);
+}
+
+.attention-card h3 {
+  margin: 10px 0 8px;
+}
+
+.attention-card p {
+  margin: 0;
 }
 
 .attention-card.warn {
@@ -517,6 +525,13 @@ section {
   gap: 6px;
   flex-wrap: wrap;
   margin-top: 8px;
+}
+
+.attention-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
 }
 
 .pill {

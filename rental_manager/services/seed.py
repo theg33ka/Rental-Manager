@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import sys
 from datetime import date
+from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from rental_manager.models import Apartment, Meter, RentalObject, Tariff, UtilityService
+from rental_manager.models import Apartment, Meter, RentalObject, Tariff, Tenant, UtilityService
 
 
 def seed_if_empty(session: Session) -> None:
@@ -91,3 +93,29 @@ def seed_if_empty(session: Session) -> None:
             )
 
     session.commit()
+
+
+def seed_release_baseline_if_empty(session: Session) -> bool:
+    has_tenants = session.scalar(select(Tenant.id).limit(1))
+    if has_tenants:
+        return False
+
+    seed_if_empty(session)
+
+    scripts_dir = Path(__file__).resolve().parents[2] / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+
+    import seed_from_screenshots as legacy_seed  # type: ignore
+
+    legacy_seed.clear_demo_data(session)
+    legacy_seed.clear_screenshot_data(session)
+    legacy_seed.seed_tariffs(session)
+    leases = legacy_seed.seed_leases(session)
+    legacy_seed.generate_rent_charges(session, until=date(2026, 5, 31))
+    legacy_seed.mark_old_rent_paid(session)
+    legacy_seed.seed_rent_payments(session, leases)
+    legacy_seed.seed_utility_payments(session, leases)
+    legacy_seed.seed_meter_readings(session)
+    legacy_seed.seed_expenses(session)
+    return True

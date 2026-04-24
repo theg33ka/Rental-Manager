@@ -29,7 +29,10 @@ from rental_manager.models import (
 )
 from rental_manager.services.billing import generate_rent_charges, update_rent_charge_status
 from rental_manager.services.seed import seed_if_empty
-from seed_demo import clear_demo_data
+try:
+    from seed_demo import clear_demo_data
+except ImportError:
+    from scripts.seed_demo import clear_demo_data
 
 
 IMPORT_MARK = "SCREENSHOT_IMPORT"

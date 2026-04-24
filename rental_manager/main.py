@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from rental_manager.database import ROOT_DIR, SessionLocal, get_session, init_db
@@ -20,6 +20,7 @@ from rental_manager.models import (
     Apartment,
     Expense,
     Lease,
+    MessageLog,
     Meter,
     MeterReading,
     PaymentReceipt,
@@ -55,7 +56,7 @@ from rental_manager.services.receipt_matching import (
     receipt_validation_issues,
 )
 from rental_manager.services.receipt_parser import parse_receipt_file
-from rental_manager.services.seed import seed_if_empty
+from rental_manager.services.seed import seed_if_empty, seed_release_baseline_if_empty
 from rental_manager.services.telegram_bot import (
     app_keyboard,
     build_reports_message,
@@ -77,6 +78,8 @@ DEFAULT_SETTINGS = {
     "color_palette": "classic",
     "app_base_url": "",
     "telegram_owner_chat_id": "",
+    "notifications_enabled": False,
+    "notification_cutoff_date": "",
     "ip_recipient_name": "",
     "ip_recipient_account": "",
     "ip_recipient_bik": "",
@@ -98,6 +101,7 @@ ALL_SETTINGS = {**DEFAULT_SETTINGS, **SECRET_SETTINGS}
 INTERNAL_SETTINGS = {
     "telegram_tenant_links": "{}",
 }
+BOOLEAN_SETTINGS = {"notifications_enabled"}
 
 REPORT_START_MONTH = date(2026, 1, 1)
 MONTH_NAMES = [
@@ -120,7 +124,10 @@ MONTH_NAMES = [
 def startup() -> None:
     init_db()
     with SessionLocal() as session:
-        seed_if_empty(session)
+        seeded_release = seed_release_baseline_if_empty(session)
+        if not seeded_release:
+            seed_if_empty(session)
+        ensure_runtime_defaults(session)
         generate_rent_charges(session)
         session.commit()
 
@@ -173,6 +180,24 @@ def iter_generated_report_months(today: date | None = None) -> list[tuple[int, i
     return months
 
 
+def setting_bool_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def ensure_runtime_defaults(session: Session) -> None:
+    changed = False
+    if not session.get(AppSetting, "notifications_enabled"):
+        session.add(AppSetting(key="notifications_enabled", value="0"))
+        changed = True
+    if not session.get(AppSetting, "notification_cutoff_date"):
+        session.add(AppSetting(key="notification_cutoff_date", value=date.today().isoformat()))
+        changed = True
+    if changed:
+        session.flush()
+
+
 def get_setting_value(session: Session, key: str) -> str:
     if key not in ALL_SETTINGS and key not in INTERNAL_SETTINGS:
         return ""
@@ -185,7 +210,10 @@ def get_setting_value(session: Session, key: str) -> str:
 
 
 def get_settings(session: Session) -> dict[str, str | bool]:
-    settings: dict[str, str | bool] = {key: get_setting_value(session, key) for key in DEFAULT_SETTINGS}
+    settings: dict[str, str | bool] = {}
+    for key in DEFAULT_SETTINGS:
+        raw = get_setting_value(session, key)
+        settings[key] = setting_bool_value(raw) if key in BOOLEAN_SETTINGS else raw
     for key in SECRET_SETTINGS:
         settings[f"{key}_configured"] = bool(get_setting_value(session, key))
     return settings
@@ -202,7 +230,12 @@ def save_settings(session: Session, payload: dict[str, Any]) -> dict[str, str | 
         if not setting:
             setting = AppSetting(key=key)
             session.add(setting)
-        setting.value = str(value)
+        if key in BOOLEAN_SETTINGS:
+            setting.value = "1" if setting_bool_value(value) else "0"
+        elif key == "notification_cutoff_date" and not value:
+            setting.value = date.today().isoformat()
+        else:
+            setting.value = str(value)
     session.commit()
     return get_settings(session)
 
@@ -226,6 +259,17 @@ def app_base_url(session: Session) -> str:
 def owner_chat_allowed(session: Session, chat_id: int | str) -> bool:
     owner_id = telegram_owner_chat_id(session)
     return bool(owner_id) and str(chat_id) == owner_id
+
+
+def notifications_enabled(session: Session) -> bool:
+    return setting_bool_value(get_setting_value(session, "notifications_enabled"))
+
+
+def notification_cutoff_date(session: Session) -> date:
+    raw = get_setting_value(session, "notification_cutoff_date").strip()
+    if raw:
+        return parse_date(raw, date.today())
+    return date.today()
 
 
 def message_template(session: Session, key: str) -> str:
@@ -301,6 +345,75 @@ def fill_template(template: str, context: dict[str, Any]) -> str:
     for key, value in context.items():
         text = text.replace("{" + key + "}", str(value if value is not None else ""))
     return text
+
+
+def reminder_label(template_key: str) -> str:
+    return {
+        "message_rent_due": "аренда сегодня",
+        "message_rent_overdue": "долг по аренде",
+        "message_utility_bill": "коммуналка",
+        "custom": "свой текст",
+    }.get(template_key, template_key or "сообщение")
+
+
+def serialize_message_log(log: MessageLog | None) -> dict[str, Any] | None:
+    if not log:
+        return None
+    return {
+        "id": log.id,
+        "template_key": log.template_key,
+        "label": reminder_label(log.template_key),
+        "status": log.status,
+        "created_at": log.created_at.isoformat(),
+        "note": log.note,
+    }
+
+
+def latest_message_log(
+    session: Session | None,
+    *,
+    rent_charge_id: int | None = None,
+    utility_line_id: int | None = None,
+) -> MessageLog | None:
+    if not session:
+        return None
+    query = select(MessageLog)
+    if rent_charge_id is not None:
+        query = query.where(MessageLog.rent_charge_id == rent_charge_id)
+    if utility_line_id is not None:
+        query = query.where(MessageLog.utility_line_id == utility_line_id)
+    return session.scalar(query.order_by(MessageLog.created_at.desc()).limit(1))
+
+
+def reminder_meta(
+    session: Session | None,
+    lease: Lease,
+    due_date: date | None,
+    *,
+    rent_charge_id: int | None = None,
+    utility_line_id: int | None = None,
+) -> dict[str, Any]:
+    latest = latest_message_log(session, rent_charge_id=rent_charge_id, utility_line_id=utility_line_id)
+    chat_id = lease_chat_id(session, lease) if session else ""
+    cutoff = notification_cutoff_date(session) if session else date.today()
+    auto_enabled = notifications_enabled(session) if session else False
+    due = due_date or date.today()
+    eligible = bool(chat_id) and due >= cutoff
+    block_reason = ""
+    if not chat_id:
+        block_reason = "ждём /start"
+    elif due < cutoff:
+        block_reason = "старый долг до запуска"
+    elif not auto_enabled:
+        block_reason = "авто выключено"
+    return {
+        "linked": bool(chat_id),
+        "auto_enabled": auto_enabled,
+        "eligible_auto": eligible and auto_enabled,
+        "cutoff_date": cutoff.isoformat(),
+        "block_reason": block_reason,
+        "latest": serialize_message_log(latest),
+    }
 
 
 def serialize_object(obj: RentalObject) -> dict[str, Any]:
@@ -379,7 +492,7 @@ def serialize_lease(lease: Lease) -> dict[str, Any]:
     }
 
 
-def serialize_rent_charge(charge: RentCharge) -> dict[str, Any]:
+def serialize_rent_charge(charge: RentCharge, session: Session | None = None) -> dict[str, Any]:
     update_rent_charge_status(charge)
     deferral_days_left = None
     if charge.deferral_until:
@@ -409,6 +522,7 @@ def serialize_rent_charge(charge: RentCharge) -> dict[str, Any]:
         "deferral_until": charge.deferral_until.isoformat() if charge.deferral_until else None,
         "deferral_days_left": deferral_days_left,
         "deferral_note": charge.deferral_note,
+        "reminder": reminder_meta(session, charge.lease, charge.due_date, rent_charge_id=charge.id),
     }
 
 
@@ -443,7 +557,7 @@ def serialize_meter(meter: Meter) -> dict[str, Any]:
     }
 
 
-def serialize_bill_line(line: UtilityBillLine) -> dict[str, Any]:
+def serialize_bill_line(line: UtilityBillLine, session: Session | None = None) -> dict[str, Any]:
     update_utility_line_status(line)
     return {
         "id": line.id,
@@ -460,10 +574,11 @@ def serialize_bill_line(line: UtilityBillLine) -> dict[str, Any]:
         "status": line.status,
         "due_date": line.due_date.isoformat() if line.due_date else None,
         "note": line.note,
+        "reminder": reminder_meta(session, line.lease, line.due_date, utility_line_id=line.id) if line.lease else None,
     }
 
 
-def serialize_bill(bill: UtilityBill) -> dict[str, Any]:
+def serialize_bill(bill: UtilityBill, session: Session | None = None) -> dict[str, Any]:
     return {
         "id": bill.id,
         "service_id": bill.service_id,
@@ -481,7 +596,7 @@ def serialize_bill(bill: UtilityBill) -> dict[str, Any]:
         "is_forecast": bill.is_forecast,
         "provider_paid": bill.provider_paid,
         "notes": bill.notes,
-        "lines": [serialize_bill_line(line) for line in bill.lines],
+        "lines": [serialize_bill_line(line, session) for line in bill.lines],
     }
 
 
@@ -698,17 +813,17 @@ def build_dashboard(session: Session) -> dict[str, Any]:
     for line in utility_lines:
         update_utility_line_status(line, today)
 
-    overdue_rent = [serialize_rent_charge(charge) for charge in charges if charge.status == "overdue"]
-    partial_rent = [serialize_rent_charge(charge) for charge in charges if charge.status == "partial"]
-    today_rent = [serialize_rent_charge(charge) for charge in charges if charge.due_date == today and charge.status not in {"paid", "paid_ahead"}]
+    overdue_rent = [serialize_rent_charge(charge, session) for charge in charges if charge.status == "overdue"]
+    partial_rent = [serialize_rent_charge(charge, session) for charge in charges if charge.status == "partial"]
+    today_rent = [serialize_rent_charge(charge, session) for charge in charges if charge.due_date == today and charge.status not in {"paid", "paid_ahead"}]
     deferred = [
-        serialize_rent_charge(charge)
+        serialize_rent_charge(charge, session)
         for charge in charges
         if charge.status == "deferred" and charge.deferral_until and charge.deferral_until <= today + timedelta(days=2)
     ]
 
-    overdue_utilities = [serialize_bill_line(line) for line in utility_lines if line.status == "overdue"]
-    partial_utilities = [serialize_bill_line(line) for line in utility_lines if line.status == "partial"]
+    overdue_utilities = [serialize_bill_line(line, session) for line in utility_lines if line.status == "overdue"]
+    partial_utilities = [serialize_bill_line(line, session) for line in utility_lines if line.status == "partial"]
 
     pending_expenses = session.scalars(
         select(Expense).where(Expense.source_funds == "personal", Expense.compensation_status != "compensated")
@@ -866,9 +981,11 @@ def serialize_message_target(session: Session, lease: Lease) -> dict[str, Any]:
         "rent_charge_id": charge.id if charge else None,
         "rent_status": charge.status if charge else "",
         "rent_debt": money(max(0.0, (charge.ip_due - charge.ip_paid) if charge else 0.0) + max(0.0, (charge.personal_due - charge.personal_paid) if charge else 0.0)),
+        "rent_reminder": reminder_meta(session, lease, charge.due_date, rent_charge_id=charge.id) if charge else None,
         "utility_line_id": line.id if line else None,
         "utility_status": line.status if line else "",
         "utility_debt": money(max(0.0, (line.total_amount - line.paid_amount) if line else 0.0)),
+        "utility_reminder": reminder_meta(session, lease, line.due_date, utility_line_id=line.id) if line else None,
     }
 
 
@@ -879,6 +996,7 @@ def send_tenant_message(
     charge: RentCharge | None = None,
     line: UtilityBillLine | None = None,
     custom_text: str = "",
+    note: str = "manual",
 ) -> dict[str, Any]:
     chat_id = lease_chat_id(session, lease)
     if not chat_id:
@@ -887,6 +1005,20 @@ def send_tenant_message(
     if not text.strip():
         raise HTTPException(400, "Текст сообщения пустой")
     send_telegram_text(session, chat_id, text)
+    session.add(
+        MessageLog(
+            lease_id=lease.id,
+            rent_charge_id=charge.id if charge else None,
+            utility_line_id=line.id if line else None,
+            channel="telegram",
+            template_key=template_key,
+            status="sent",
+            recipient_chat_id=str(chat_id),
+            text=text,
+            note=note,
+        )
+    )
+    session.flush()
     return {
         "ok": True,
         "tenant": lease.tenant.full_name,
@@ -894,6 +1026,106 @@ def send_tenant_message(
         "template_key": template_key,
         "text": text,
     }
+
+
+def reminder_sent_today(
+    session: Session,
+    template_key: str,
+    *,
+    rent_charge_id: int | None = None,
+    utility_line_id: int | None = None,
+    today: date | None = None,
+) -> bool:
+    today = today or date.today()
+    query = select(MessageLog.id).where(
+        MessageLog.template_key == template_key,
+        func.date(MessageLog.created_at) == today.isoformat(),
+    )
+    if rent_charge_id is not None:
+        query = query.where(MessageLog.rent_charge_id == rent_charge_id)
+    if utility_line_id is not None:
+        query = query.where(MessageLog.utility_line_id == utility_line_id)
+    return bool(session.scalar(query.limit(1)))
+
+
+def run_due_reminders(session: Session, today: date | None = None) -> dict[str, Any]:
+    today = today or date.today()
+    cutoff = notification_cutoff_date(session)
+    if not notifications_enabled(session):
+        return {
+            "enabled": False,
+            "cutoff_date": cutoff.isoformat(),
+            "sent": 0,
+            "skipped_disabled": 1,
+            "skipped_legacy": 0,
+            "skipped_duplicate": 0,
+            "skipped_unlinked": 0,
+            "failed": 0,
+        }
+
+    summary = {
+        "enabled": True,
+        "cutoff_date": cutoff.isoformat(),
+        "sent": 0,
+        "skipped_disabled": 0,
+        "skipped_legacy": 0,
+        "skipped_duplicate": 0,
+        "skipped_unlinked": 0,
+        "failed": 0,
+    }
+
+    charges = session.scalars(
+        select(RentCharge).join(Lease).where(Lease.active.is_(True)).order_by(RentCharge.due_date, RentCharge.id)
+    ).all()
+    for charge in charges:
+        update_rent_charge_status(charge, today)
+        template_key = ""
+        if charge.due_date < cutoff:
+            summary["skipped_legacy"] += 1
+            continue
+        if not lease_chat_id(session, charge.lease):
+            summary["skipped_unlinked"] += 1
+            continue
+        if charge.status == "pending" and charge.due_date == today:
+            template_key = "message_rent_due"
+        elif charge.status in {"overdue", "partial"} and charge.due_date <= today:
+            template_key = "message_rent_overdue"
+        if not template_key:
+            continue
+        if reminder_sent_today(session, template_key, rent_charge_id=charge.id, today=today):
+            summary["skipped_duplicate"] += 1
+            continue
+        try:
+            send_tenant_message(session, charge.lease, template_key, charge=charge, note="auto")
+            summary["sent"] += 1
+        except HTTPException:
+            summary["failed"] += 1
+
+    lines = session.scalars(
+        select(UtilityBillLine).join(Lease, UtilityBillLine.lease_id == Lease.id).where(Lease.active.is_(True)).order_by(UtilityBillLine.id)
+    ).all()
+    for line in lines:
+        update_utility_line_status(line, today)
+        if not line.due_date:
+            continue
+        if line.due_date < cutoff:
+            summary["skipped_legacy"] += 1
+            continue
+        if not line.lease or not lease_chat_id(session, line.lease):
+            summary["skipped_unlinked"] += 1
+            continue
+        if not (line.status in {"issued", "overdue", "partial"} and line.due_date <= today):
+            continue
+        if reminder_sent_today(session, "message_utility_bill", utility_line_id=line.id, today=today):
+            summary["skipped_duplicate"] += 1
+            continue
+        try:
+            send_tenant_message(session, line.lease, "message_utility_bill", line=line, note="auto")
+            summary["sent"] += 1
+        except HTTPException:
+            summary["failed"] += 1
+
+    return summary
 
 
 def format_date(value: date | None) -> str:
@@ -1130,6 +1362,7 @@ def telegram_help_text() -> str:
             "/id - показать chat id",
             "/status - статус пульта",
             "/reports - открытые месячные отчёты",
+            "/run_reminders - прогнать напоминания",
             "/app - открыть пульт",
             "/help - подсказка",
         ]
@@ -1208,6 +1441,25 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
         return
     if command == "/reports":
         send_telegram_text(session, chat_id, build_reports_message(reports), app_keyboard(base_url, reports))
+        return
+    if command == "/run_reminders":
+        summary = run_due_reminders(session)
+        session.commit()
+        send_telegram_text(
+            session,
+            chat_id,
+            "\n".join(
+                [
+                    "Напоминания прогнаны.",
+                    f"Отправлено: {summary['sent']}",
+                    f"Дубликаты за сегодня: {summary['skipped_duplicate']}",
+                    f"Старые долги под молчанием: {summary['skipped_legacy']}",
+                    f"Без привязки к боту: {summary['skipped_unlinked']}",
+                    f"Ошибки: {summary['failed']}",
+                ]
+            ),
+            app_keyboard(base_url),
+        )
         return
     if command == "/app":
         send_telegram_text(session, chat_id, "Открываю пульт.", app_keyboard(base_url))
@@ -1319,7 +1571,15 @@ def send_message_to_tenant(payload: dict[str, Any], session: Session = Depends(g
         line=line,
         custom_text=(payload.get("custom_text") or "").strip(),
     )
+    session.commit()
     return result
+
+
+@app.post("/api/reminders/run")
+def run_reminders_now(session: Session = Depends(get_session)) -> dict[str, Any]:
+    summary = run_due_reminders(session)
+    session.commit()
+    return summary
 
 
 @app.get("/api/objects")
@@ -1370,7 +1630,10 @@ def list_leases(session: Session = Depends(get_session)) -> list[dict[str, Any]]
 
 @app.post("/api/leases/onboard")
 def onboard_tenant(payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
-    apartment = session.get(Apartment, int(payload["apartment_id"]))
+    apartment_id = int(payload.get("apartment_id") or 0)
+    if not apartment_id:
+        raise HTTPException(400, "Выберите свободную квартиру")
+    apartment = session.get(Apartment, apartment_id)
     if not apartment:
         raise HTTPException(404, "Квартира не найдена")
     active_lease = session.scalar(select(Lease).where(Lease.apartment_id == apartment.id, Lease.active.is_(True)))
@@ -1467,7 +1730,7 @@ def list_rent_charges(
         .order_by(RentCharge.due_date, RentCharge.id)
     ).all()
     session.commit()
-    return [serialize_rent_charge(charge) for charge in charges]
+    return [serialize_rent_charge(charge, session) for charge in charges]
 
 
 @app.post("/api/rent-charges/generate")
@@ -1511,7 +1774,7 @@ def add_rent_payment(charge_id: int, payload: dict[str, Any], session: Session =
     session.add(receipt)
     session.commit()
     session.refresh(charge)
-    return serialize_rent_charge(charge)
+    return serialize_rent_charge(charge, session)
 
 
 @app.post("/api/rent-charges/{charge_id}/defer")
@@ -1526,7 +1789,7 @@ def defer_rent_charge(charge_id: int, payload: dict[str, Any], session: Session 
     charge.deferral_note = payload.get("deferral_note") or ""
     update_rent_charge_status(charge)
     session.commit()
-    return serialize_rent_charge(charge)
+    return serialize_rent_charge(charge, session)
 
 
 def resolve_deferral_until(payload: dict[str, Any], today: date | None = None) -> date:
@@ -1688,7 +1951,7 @@ def create_tariff(payload: dict[str, Any], session: Session = Depends(get_sessio
 @app.get("/api/utility-bills")
 def list_utility_bills(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
     bills = session.scalars(select(UtilityBill).order_by(UtilityBill.created_at.desc(), UtilityBill.id.desc())).all()
-    return [serialize_bill(bill) for bill in bills]
+    return [serialize_bill(bill, session) for bill in bills]
 
 
 @app.post("/api/utility-bills/calculate")
@@ -1765,7 +2028,7 @@ def add_utility_payment(line_id: int, payload: dict[str, Any], session: Session 
         )
     )
     session.commit()
-    return serialize_bill_line(line)
+    return serialize_bill_line(line, session)
 
 
 @app.get("/api/expenses")

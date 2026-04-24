@@ -124,6 +124,22 @@ class PaymentReceipt(Base):
     rent_charge: Mapped[RentCharge | None] = relationship(back_populates="receipts")
 
 
+class MessageLog(Base):
+    __tablename__ = "message_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    lease_id: Mapped[int | None] = mapped_column(ForeignKey("leases.id"), nullable=True)
+    rent_charge_id: Mapped[int | None] = mapped_column(ForeignKey("rent_charges.id"), nullable=True)
+    utility_line_id: Mapped[int | None] = mapped_column(ForeignKey("utility_bill_lines.id"), nullable=True)
+    channel: Mapped[str] = mapped_column(String(40), default="telegram")
+    template_key: Mapped[str] = mapped_column(String(80), default="")
+    status: Mapped[str] = mapped_column(String(40), default="sent")
+    recipient_chat_id: Mapped[str] = mapped_column(String(80), default="")
+    text: Mapped[str] = mapped_column(Text, default="")
+    note: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
 class UtilityService(Base):
     __tablename__ = "utility_services"
 
