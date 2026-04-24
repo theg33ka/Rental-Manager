@@ -9,6 +9,7 @@ const state = {
   messagePreview: null,
   suspiciousReceipts: [],
   paymentHistory: null,
+  editingPaymentReceiptId: null,
   settings: {},
   editingLeaseId: null,
   quickReadingArmedUntil: 0,
@@ -45,6 +46,33 @@ function localDateTimeNow() {
   const now = new Date();
   const shifted = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
   return shifted.toISOString().slice(0, 16);
+}
+
+function currentYear() {
+  return new Date().getFullYear();
+}
+
+function monthOptions(selectedMonth = 0) {
+  return monthNamesNominative.map((label, index) => {
+    const value = index + 1;
+    return `<option value="${value}" ${selectedMonth === value ? "selected" : ""}>${label}</option>`;
+  }).join("");
+}
+
+function receiptTargetParts(receipt) {
+  const fallbackMonth = new Date().getMonth() + 1;
+  const fallbackYear = Number(state.paymentHistory?.current_year) || currentYear();
+  if (receipt.target_month) {
+    const [yearValue, monthValue] = receipt.target_month.slice(0, 10).split("-").map(Number);
+    return {
+      month: Number(receipt.target_month_number) || monthValue || fallbackMonth,
+      year: Number(receipt.target_year) || yearValue || fallbackYear,
+    };
+  }
+  return {
+    month: Number(receipt.target_month_number) || fallbackMonth,
+    year: Number(receipt.target_year) || fallbackYear,
+  };
 }
 
 function qs(selector, root = document) {
@@ -86,6 +114,17 @@ function formData(form) {
     data[input.name] = input.checked;
   });
   return data;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function escapeAttr(value) {
+  return escapeHtml(value).replaceAll('"', "&quot;");
 }
 
 function setOptions(select, items, getLabel, includeEmpty = false) {
@@ -326,6 +365,15 @@ function hydrateForms() {
   const paidAtInput = qs("#manualPaymentPaidAtInput");
   if (paidAtInput && !paidAtInput.value) {
     paidAtInput.value = localDateTimeNow();
+  }
+  const manualTargetMonth = qs("#manualPaymentTargetMonthSelect");
+  if (manualTargetMonth && !manualTargetMonth.dataset.ready) {
+    manualTargetMonth.innerHTML = `<option value="">Авто</option>${monthOptions(new Date().getMonth() + 1)}`;
+    manualTargetMonth.dataset.ready = "true";
+  }
+  const manualTargetYear = qs("#manualPaymentTargetYearInput");
+  if (manualTargetYear && !manualTargetYear.value) {
+    manualTargetYear.value = String(currentYear());
   }
   const rangedDefaults = {
     rentStart: daysAgo(30),
@@ -698,12 +746,14 @@ function receiptStatusLabel(status) {
 
 async function openPaymentHistory(leaseId) {
   state.paymentHistory = await api(`/api/leases/${leaseId}/payment-history`);
+  state.editingPaymentReceiptId = null;
   renderRentHistory();
   qs("#rentHistoryPanel")?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function closePaymentHistory() {
   state.paymentHistory = null;
+  state.editingPaymentReceiptId = null;
   renderRentHistory();
 }
 
@@ -714,21 +764,61 @@ function renderRentHistory() {
     root.innerHTML = "";
     return;
   }
-  const rows = state.paymentHistory.receipts.map((receipt) => `
-    <tr>
+  const rows = state.paymentHistory.receipts.map((receipt) => {
+    const target = receiptTargetParts(receipt);
+    const editing = state.editingPaymentReceiptId === receipt.id;
+    const editorRow = editing ? `
+      <tr class="receipt-editor-row">
+        <td colspan="8">
+          <form id="paymentReceiptEdit-${receipt.id}" class="receipt-editor" onsubmit="savePaymentReceiptEdit(event, ${receipt.id})">
+            <label>Сумма
+              <input type="number" min="0" step="0.01" name="amount" value="${receipt.amount}" required />
+            </label>
+            <label>Оплачен
+              <input type="datetime-local" name="paid_at" value="${escapeAttr((receipt.paid_at || "").slice(0, 16))}" required />
+            </label>
+            ${receipt.rent_charge_id ? `
+              <label>Канал
+                <select name="channel">
+                  <option value="ip" ${receipt.channel === "ip" ? "selected" : ""}>ИП</option>
+                  <option value="personal" ${receipt.channel === "personal" ? "selected" : ""}>По номеру</option>
+                </select>
+              </label>
+              <label>Зачесть за месяц
+                <select name="target_month" required>${monthOptions(target.month)}</select>
+              </label>
+              <label>Год
+                <input type="number" name="target_year" min="2020" step="1" value="${target.year || currentYear()}" required />
+              </label>
+            ` : ""}
+            <label class="wide">Комментарий
+              <input name="notes" value="${escapeAttr(receipt.notes || "")}" />
+            </label>
+            <div class="receipt-editor__actions">
+              <button class="mini primary" type="submit">Сохранить</button>
+              <button class="mini" type="button" onclick="cancelPaymentReceiptEdit()">Отмена</button>
+            </div>
+          </form>
+        </td>
+      </tr>
+    ` : "";
+    return `
+    <tr ${editing ? 'class="row-selected"' : ""}>
       <td>${formatDateTime(receipt.paid_at)}</td>
       <td>${money(receipt.amount)}</td>
-      <td>${receipt.channel}</td>
-      <td>${receipt.source_label || receipt.source || "manual"}</td>
+      <td>${escapeHtml(receipt.channel_label || receipt.channel)}</td>
+      <td>${escapeHtml(receipt.source_label || receipt.source || "manual")}</td>
       <td>${receipt.target_label || '<span class="muted">не привязан</span>'}</td>
       <td>${statusPill(receipt.status)}</td>
-      <td>${receipt.notes || ""}</td>
+      <td>${escapeHtml(receipt.notes || "")}</td>
       <td class="actions">
-        <button class="mini" onclick="editPaymentReceipt(${receipt.id})">Редактировать</button>
+        <button class="mini" onclick="editPaymentReceipt(${receipt.id})">${editing ? "Открыто" : "Редактировать"}</button>
         <button class="mini danger-soft" onclick="deletePaymentReceipt(${receipt.id})">Удалить</button>
       </td>
     </tr>
-  `).join("");
+    ${editorRow}
+  `;
+  }).join("");
   root.innerHTML = `
     <article class="card">
       <div class="section-title">
@@ -747,29 +837,37 @@ function renderRentHistory() {
   `;
 }
 
-async function editPaymentReceipt(receiptId) {
+function editPaymentReceipt(receiptId) {
+  state.editingPaymentReceiptId = state.editingPaymentReceiptId === receiptId ? null : receiptId;
+  renderRentHistory();
+}
+
+function cancelPaymentReceiptEdit() {
+  state.editingPaymentReceiptId = null;
+  renderRentHistory();
+}
+
+async function savePaymentReceiptEdit(event, receiptId) {
+  event.preventDefault();
   const history = state.paymentHistory;
   if (!history) return;
   const receipt = history.receipts.find((item) => item.id === receiptId);
   if (!receipt) return;
-  const amount = prompt("Новая сумма платежа", String(receipt.amount));
-  if (amount === null) return;
-  const paidAt = prompt("Дата и время платежа (YYYY-MM-DDTHH:MM)", (receipt.paid_at || "").slice(0, 16));
-  if (paidAt === null) return;
-  const notes = prompt("Комментарий", receipt.notes || "");
-  if (notes === null) return;
-  const payload = {
-    amount: Number(amount),
-    paid_at: paidAt,
-    notes,
-  };
+  const payload = formData(event.currentTarget);
+  payload.amount = Number(payload.amount);
   if (receipt.rent_charge_id) {
-    payload.channel = prompt("Канал: ip или personal", receipt.channel || "personal") || receipt.channel;
+    payload.target_month = Number(payload.target_month);
+    payload.target_year = Number(payload.target_year || history.current_year || currentYear());
+  } else {
+    delete payload.channel;
+    delete payload.target_month;
+    delete payload.target_year;
   }
   await api(`/api/payment-receipts/${receiptId}`, {
     method: "PATCH",
     body: JSON.stringify(payload),
   });
+  state.editingPaymentReceiptId = null;
   toast("Платёж обновлён");
   await openPaymentHistory(history.lease_id);
   await loadAll();
@@ -840,11 +938,22 @@ async function importBaseline() {
 function updateManualPaymentKind() {
   const kind = qs("#manualPaymentKindSelect")?.value || "rent";
   const channelSelect = qs("#manualPaymentChannelSelect");
+  const targetMonth = qs("#manualPaymentTargetMonthSelect");
+  const targetYear = qs("#manualPaymentTargetYearInput");
+  const monthLabel = qs("#manualPaymentTargetMonthLabel");
+  const yearLabel = qs("#manualPaymentTargetYearLabel");
   if (!channelSelect) return;
   channelSelect.disabled = kind !== "rent";
   if (kind !== "rent") {
     channelSelect.value = "personal";
   }
+  [targetMonth, targetYear].forEach((field) => {
+    if (!field) return;
+    field.disabled = kind !== "rent";
+  });
+  [monthLabel, yearLabel].forEach((node) => {
+    if (node) node.hidden = kind !== "rent";
+  });
 }
 
 async function submitManualPayment(event) {
@@ -853,6 +962,16 @@ async function submitManualPayment(event) {
   const payload = formData(form);
   if (payload.kind !== "rent") {
     delete payload.channel;
+    delete payload.target_month;
+    delete payload.target_year;
+  } else {
+    if (payload.target_month) {
+      payload.target_month = Number(payload.target_month);
+      payload.target_year = Number(payload.target_year || currentYear());
+    } else {
+      delete payload.target_month;
+      delete payload.target_year;
+    }
   }
   payload.amount = Number(payload.amount);
   await api("/api/payment-receipts/manual", {

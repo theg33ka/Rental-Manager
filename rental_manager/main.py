@@ -342,10 +342,24 @@ def normalize_apartment_code(value: str) -> str:
     return re.sub(r"[^a-zа-я0-9]+", "", (value or "").lower().replace("ё", "е"))
 
 
+def lease_by_chat_id(session: Session, chat_id: int | str | None) -> Lease | None:
+    if not chat_id:
+        return None
+    chat_ref = str(chat_id)
+    links = get_tenant_links(session)
+    for lease in session.scalars(select(Lease).where(Lease.active.is_(True))).all():
+        if links.get(str(lease.tenant_id)) == chat_ref:
+            return lease
+    return None
+
+
 def maybe_link_tenant_chat(session: Session, message: dict[str, Any]) -> Lease | None:
     sender = message.get("from") or {}
     chat = message.get("chat") or {}
     chat_id = chat.get("id")
+    linked = lease_by_chat_id(session, chat_id)
+    if linked:
+        return linked
     handles = {
         normalize_telegram_handle(sender.get("username") or ""),
         normalize_telegram_handle(chat.get("username") or ""),
@@ -578,6 +592,8 @@ def serialize_payment_receipt(receipt: PaymentReceipt, session: Session) -> dict
     elif utility_line:
         target_label = f"коммуналка {format_date(utility_line.bill.period_end)}"
         target_month = utility_line.bill.period_end.isoformat()
+    target_year = charge.due_date.year if charge else utility_line.bill.period_end.year if utility_line else date.today().year
+    target_month_number = charge.due_date.month if charge else utility_line.bill.period_end.month if utility_line else 0
     return {
         "id": receipt.id,
         "lease_id": receipt.lease_id,
@@ -587,6 +603,7 @@ def serialize_payment_receipt(receipt: PaymentReceipt, session: Session) -> dict
         "tenant": tenant,
         "amount": money(receipt.amount),
         "channel": receipt.channel,
+        "channel_label": receipt_channel_label(receipt.channel),
         "status": receipt.status,
         "paid_at": receipt.paid_at.isoformat(),
         "source": receipt.source,
@@ -598,6 +615,8 @@ def serialize_payment_receipt(receipt: PaymentReceipt, session: Session) -> dict
         "file_path": receipt.file_path or "",
         "target_label": target_label,
         "target_month": target_month,
+        "target_month_number": target_month_number,
+        "target_year": target_year,
         "parsed": parsed,
     }
 
@@ -1493,7 +1512,8 @@ def message_sender_label(message: dict[str, Any]) -> str:
 def receipt_channel_label(value: str) -> str:
     return {
         "ip": "ИП",
-        "personal": "перевод",
+        "personal": "По номеру",
+        "utilities": "коммуналка",
         "unknown": "неизвестно",
     }.get(value, value or "неизвестно")
 
@@ -1611,53 +1631,56 @@ def duplicate_receipt(session: Session, document_sha256: str, operation_fingerpr
     return None
 
 
-def apply_receipt_match(session: Session, lease: Lease, parsed: dict[str, Any]) -> tuple[str, str, int | None, list[str]]:
+def apply_receipt_match(session: Session, lease: Lease, parsed: dict[str, Any]) -> tuple[str, str, int | None, list[str], str]:
     amount = float(parsed.get("amount") or 0)
     channel = detect_receipt_channel(parsed)
     issues = receipt_validation_issues(parsed, get_settings(session), channel)
+    allocation_comment = ""
+    paid_at = datetime.fromisoformat(parsed["paid_at"]) if parsed.get("paid_at") else None
     if amount <= 0:
         issues.append("в чеке не удалось определить положительную сумму")
 
     if channel == "ip":
-        plan, remaining = build_rent_plan(
+        plan, remaining, decision = build_rent_plan(
             session,
             lease,
             "ip",
             amount,
             exact_only=False,
-            paid_at=datetime.fromisoformat(parsed["paid_at"]) if parsed.get("paid_at") else None,
+            paid_at=paid_at,
             prefer_document_month=True,
         )
+        allocation_comment = describe_rent_allocation_decision(decision)
         if not plan or remaining > EPS:
             issues.append("не удалось честно разложить платёж по аренде")
         if issues:
-            return "suspicious", "review", None, issues
-        return "accepted", "rent", plan[0][0].id, []
+            return "suspicious", "review", None, issues, allocation_comment
+        return "accepted", "rent", plan[0][0].id, [], allocation_comment
 
     if channel == "personal":
-        rent_plan, rent_remaining = build_rent_plan(
+        rent_plan, rent_remaining, _decision = build_rent_plan(
             session,
             lease,
             "personal",
             amount,
             exact_only=True,
-            paid_at=datetime.fromisoformat(parsed["paid_at"]) if parsed.get("paid_at") else None,
+            paid_at=paid_at,
             prefer_document_month=True,
         )
         utility_plan, utility_remaining = build_utility_plan(session, lease, amount, exact_only=True)
         rent_exact = bool(rent_plan) and rent_remaining <= EPS
         utility_exact = bool(utility_plan) and utility_remaining <= EPS
         if issues:
-            return "suspicious", "review", None, issues
+            return "suspicious", "review", None, issues, ""
         if rent_exact and not utility_exact:
-            return "accepted", "rent", rent_plan[0][0].id, []
+            return "accepted", "rent", rent_plan[0][0].id, [], ""
         if utility_exact and not rent_exact:
-            return "accepted", "utility", utility_plan[0][0].id, []
+            return "accepted", "utility", utility_plan[0][0].id, [], ""
         if rent_exact and utility_exact:
-            return "suspicious", "review", None, ["сумма одинаково подходит и под аренду, и под коммуналку"]
-        return "suspicious", "review", None, ["сумма не закрывает точный долг ни по аренде, ни по коммуналке"]
+            return "suspicious", "review", None, ["сумма одинаково подходит и под аренду, и под коммуналку"], ""
+        return "suspicious", "review", None, ["сумма не закрывает точный долг ни по аренде, ни по коммуналке"], ""
 
-    return "suspicious", "review", None, ["тип перевода пока не удалось определить"]
+    return "suspicious", "review", None, ["тип перевода пока не удалось определить"], ""
 
 
 def owner_receipt_alert_text(
@@ -1667,6 +1690,7 @@ def owner_receipt_alert_text(
     receipt_status: str,
     issues: list[str],
     sender_label: str,
+    allocation_comment: str = "",
 ) -> str:
     summary_bits = [sender_label]
     if parsed:
@@ -1674,6 +1698,8 @@ def owner_receipt_alert_text(
             summary_bits.append(f"получатель: {parsed['recipient_name']}")
         if parsed.get("purpose"):
             summary_bits.append(f"назначение: {parsed['purpose']}")
+    if allocation_comment:
+        summary_bits.append(f"зачёт: {allocation_comment}")
     if issues:
         summary_bits.append("вопросы: " + "; ".join(issues))
     context = {
@@ -1722,6 +1748,7 @@ def handle_tenant_receipt_message(session: Session, message: dict[str, Any], lin
     status = "suspicious"
     match_type = "review"
     linked_id: int | None = None
+    allocation_comment = ""
     issues = ["чек сохранён, но не удалось ничего распознать"]
     duplicate = duplicate_receipt(
         session,
@@ -1732,7 +1759,7 @@ def handle_tenant_receipt_message(session: Session, message: dict[str, Any], lin
         status = "duplicate"
         issues = [f"этот чек уже есть в системе с {duplicate.created_at:%d.%m.%Y}, повторно не зачитываю"]
     elif parsed and lease:
-        status, match_type, linked_id, issues = apply_receipt_match(session, lease, parsed)
+        status, match_type, linked_id, issues, allocation_comment = apply_receipt_match(session, lease, parsed)
     elif parsed and not lease:
         issues = ["чек разобран, но арендатор по нему пока не определён"]
 
@@ -1808,7 +1835,7 @@ def handle_tenant_receipt_message(session: Session, message: dict[str, Any], lin
         send_telegram_text(
             session,
             owner_id,
-            owner_receipt_alert_text(session, lease, parsed, status, issues, message_sender_label(message)),
+            owner_receipt_alert_text(session, lease, parsed, status, issues, message_sender_label(message), allocation_comment),
             app_keyboard(app_base_url(session)),
         )
         if message.get("message_id"):
@@ -1945,7 +1972,8 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
     # Обработка файлов от жильцов - до проверки owner_id
     if not is_owner and (message.get("document") or message.get("photo")):
         print(f"[TELEGRAM] handling document from chat_id={chat_id}, linked_lease={linked_lease}")
-        handle_tenant_receipt_message(session, message, linked_lease)
+        if linked_lease:
+            handle_tenant_receipt_message(session, message, linked_lease)
         return
 
     if not owner_id:
@@ -2401,8 +2429,30 @@ def lease_payment_history(lease_id: int, session: Session = Depends(get_session)
         "lease_id": lease.id,
         "tenant": lease.tenant.full_name,
         "apartment": lease.apartment.name,
+        "current_year": date.today().year,
         "receipts": [serialize_payment_receipt(receipt, session) for receipt in receipts],
     }
+
+
+def ensure_rent_charge_for_month(session: Session, lease: Lease, year: int, month: int) -> RentCharge:
+    if month < 1 or month > 12:
+        raise HTTPException(400, "Месяц зачёта должен быть от 1 до 12")
+    start, end = month_range(year, month)
+    generate_rent_charges(session, until=end + timedelta(days=40))
+    session.flush()
+    charge = session.scalar(
+        select(RentCharge)
+        .where(
+            RentCharge.lease_id == lease.id,
+            RentCharge.due_date >= start,
+            RentCharge.due_date <= end,
+        )
+        .order_by(RentCharge.due_date, RentCharge.id)
+        .limit(1)
+    )
+    if not charge:
+        raise HTTPException(400, f"Для {MONTH_NAMES[month - 1]} {year} нет начисления аренды")
+    return charge
 
 
 @app.post("/api/payment-receipts/manual")
@@ -2423,17 +2473,37 @@ def create_manual_payment(payload: dict[str, Any], session: Session = Depends(ge
         channel = (payload.get("channel") or "").strip()
         if channel not in {"ip", "personal"}:
             raise HTTPException(400, "для аренды нужен канал ip или personal")
-        receipts = create_rent_receipts(
-            session,
-            lease,
-            channel,
-            amount,
-            paid_at=paid_at,
-            source=source,
-            status="accepted",
-            notes=notes or "ручной платёж",
-            exact_only=False,
-        )
+        target_month = int(payload.get("target_month") or 0)
+        target_year = int(payload.get("target_year") or date.today().year)
+        if target_month:
+            target_charge = ensure_rent_charge_for_month(session, lease, target_year, target_month)
+            receipt = PaymentReceipt(
+                lease_id=lease.id,
+                rent_charge_id=target_charge.id,
+                apartment_id=lease.apartment_id,
+                amount=amount,
+                channel=channel,
+                paid_at=paid_at,
+                source=source,
+                status="accepted",
+                notes=notes or "ручной платёж",
+            )
+            session.add(receipt)
+            session.flush()
+            recalculate_lease_balances(session, lease.id)
+            receipts = [receipt]
+        else:
+            receipts = create_rent_receipts(
+                session,
+                lease,
+                channel,
+                amount,
+                paid_at=paid_at,
+                source=source,
+                status="accepted",
+                notes=notes or "ручной платёж",
+                exact_only=False,
+            )
     elif kind == "utility":
         receipts = create_utility_receipts(
             session,
@@ -2476,6 +2546,19 @@ def update_payment_receipt(receipt_id: int, payload: dict[str, Any], session: Se
         if channel not in {"ip", "personal"}:
             raise HTTPException(400, "для аренды канал платежа должен быть ip или personal")
         receipt.channel = channel
+    if receipt.rent_charge_id and ("target_month" in payload or "target_year" in payload):
+        lease = receipt.rent_charge.lease if receipt.rent_charge else session.get(Lease, receipt.lease_id)
+        if not lease:
+            raise HTTPException(400, "Не удалось определить аренду для этого платежа")
+        target_month = int(payload.get("target_month") or 0)
+        target_year = int(payload.get("target_year") or date.today().year)
+        if not target_month:
+            raise HTTPException(400, "Нужно выбрать месяц зачёта")
+        target_charge = ensure_rent_charge_for_month(session, lease, target_year, target_month)
+        receipt.rent_charge_id = target_charge.id
+        receipt.lease_id = lease.id
+        receipt.utility_line_id = None
+        receipt.apartment_id = lease.apartment_id
     if receipt.status == "accepted" and old_lease_id:
         session.flush()
         recalculate_lease_balances(session, old_lease_id)

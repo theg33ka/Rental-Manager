@@ -732,6 +732,33 @@ td.actions .button {
   margin: 0 6px 6px 0;
 }
 
+.row-selected {
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+}
+
+.receipt-editor-row td {
+  padding: 0;
+  background: color-mix(in srgb, var(--surface-alt, var(--surface)) 85%, var(--primary) 15%);
+}
+
+.receipt-editor {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  padding: 14px;
+}
+
+.receipt-editor .wide {
+  grid-column: 1 / -1;
+}
+
+.receipt-editor__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: end;
+}
+
 .mini {
   min-height: 32px;
   padding: 6px 8px;

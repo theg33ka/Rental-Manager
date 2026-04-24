@@ -250,6 +250,12 @@
           <label>Дата и время
             <input type="datetime-local" name="paid_at" id="manualPaymentPaidAtInput" />
           </label>
+          <label id="manualPaymentTargetMonthLabel">Зачесть за месяц
+            <select name="target_month" id="manualPaymentTargetMonthSelect"></select>
+          </label>
+          <label id="manualPaymentTargetYearLabel">Год
+            <input type="number" min="2020" step="1" name="target_year" id="manualPaymentTargetYearInput" />
+          </label>
           <label>Сумма
             <input type="number" min="0" step="0.01" name="amount" required />
           </label>
