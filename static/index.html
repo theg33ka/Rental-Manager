@@ -57,6 +57,9 @@
           <h2>Заселение</h2>
           <span>Поля можно дозаполнить позже, потому что жизнь не ждёт форму</span>
         </div>
+        <div class="section-title">
+          <button id="cancelLeaseEditBtn" class="mini" type="button" hidden>Отмена</button>
+        </div>
         <form id="onboardForm" class="form-grid">
           <label>Квартира<select name="apartment_id" required></select></label>
           <label>ФИО<input name="full_name" placeholder="Иванов Иван Иванович" /></label>
@@ -71,7 +74,7 @@
           <label>Где хранится залог<input name="deposit_location" /></label>
           <label class="wide">Условия залога<textarea name="deposit_terms" rows="2"></textarea></label>
           <label class="wide">Комментарий<textarea name="notes" rows="2"></textarea></label>
-          <button class="primary wide" type="submit">Заселить</button>
+          <button id="onboardSubmitBtn" class="primary wide" type="submit">Заселить</button>
         </form>
 
         <div class="section-title">

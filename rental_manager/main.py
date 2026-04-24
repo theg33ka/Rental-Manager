@@ -1860,6 +1860,49 @@ def onboard_tenant(payload: dict[str, Any], session: Session = Depends(get_sessi
     return serialize_lease(lease)
 
 
+@app.patch("/api/leases/{lease_id}")
+def update_lease(lease_id: int, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
+    lease = session.get(Lease, lease_id)
+    if not lease:
+        raise HTTPException(404, "Договор не найден")
+
+    apartment_id = int(payload.get("apartment_id") or lease.apartment_id)
+    apartment = session.get(Apartment, apartment_id)
+    if not apartment:
+        raise HTTPException(404, "Квартира не найдена")
+    if apartment.id != lease.apartment_id:
+        active_lease = session.scalar(select(Lease).where(Lease.apartment_id == apartment.id, Lease.active.is_(True), Lease.id != lease.id))
+        if active_lease:
+            raise HTTPException(400, "В квартире уже есть активный жилец. Сначала оформите выезд.")
+        lease.apartment_id = apartment.id
+
+    start = parse_date(payload.get("start_date"), lease.start_date)
+    payment_day = int(payload.get("payment_day") or start.day)
+
+    lease.start_date = start
+    lease.payment_day = payment_day
+    lease.ip_amount = float(payload.get("ip_amount") or 0)
+    lease.personal_amount = float(payload.get("personal_amount") or 0)
+    lease.deposit_amount = float(payload.get("deposit_amount") or 0)
+    lease.deposit_location = payload.get("deposit_location") or ""
+    lease.deposit_terms = payload.get("deposit_terms") or ""
+    lease.notes = payload.get("notes") or ""
+
+    lease.tenant.full_name = (payload.get("full_name") or "Без имени").strip()
+    lease.tenant.phone = payload.get("phone") or ""
+    lease.tenant.telegram = payload.get("telegram") or ""
+    lease.tenant.whatsapp = payload.get("whatsapp") or ""
+    tenant_notes = payload.get("tenant_notes")
+    if tenant_notes is not None:
+        lease.tenant.notes = tenant_notes
+
+    session.flush()
+    generate_rent_charges(session)
+    session.commit()
+    session.refresh(lease)
+    return serialize_lease(lease)
+
+
 @app.post("/api/leases/{lease_id}/move-out")
 def move_out(lease_id: int, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
     lease = session.get(Lease, lease_id)

@@ -8,6 +8,7 @@ const state = {
   suspiciousReceipts: [],
   paymentHistory: null,
   settings: {},
+  editingLeaseId: null,
   quickReadingArmedUntil: 0,
 };
 
@@ -92,6 +93,10 @@ function setOptions(select, items, getLabel, includeEmpty = false) {
 
 function allApartments() {
   return state.bootstrap.objects.flatMap((object) => object.apartments.map((apartment) => ({ ...apartment, object_name: object.name })));
+}
+
+function editingLease() {
+  return state.bootstrap?.leases?.find((lease) => lease.id === state.editingLeaseId) || null;
 }
 
 function statusPill(status) {
@@ -259,7 +264,8 @@ async function loadSuspiciousReceipts() {
 
 function hydrateForms() {
   const apartments = allApartments();
-  const vacantApartments = apartments.filter((apartment) => !apartment.active_lease_id);
+  const currentLease = editingLease();
+  const vacantApartments = apartments.filter((apartment) => !apartment.active_lease_id || apartment.id === currentLease?.apartment_id);
   const services = state.bootstrap.services;
   const activeLeases = [...state.bootstrap.leases]
     .filter((lease) => lease.active)
@@ -287,6 +293,10 @@ function hydrateForms() {
   if (paidAtInput && !paidAtInput.value) {
     paidAtInput.value = localDateTimeNow();
   }
+  const cancelBtn = qs("#cancelLeaseEditBtn");
+  const submitBtn = qs("#onboardSubmitBtn");
+  if (cancelBtn) cancelBtn.hidden = !state.editingLeaseId;
+  if (submitBtn) submitBtn.textContent = state.editingLeaseId ? "Сохранить изменения" : "Заселить";
   setReportLinks();
 }
 
@@ -437,11 +447,41 @@ function renderLeases() {
       <td>${statusPill(lease.active ? "issued" : "paid")}</td>
       <td class="actions">
         ${contactButtons(lease)}
+        <button class="mini" onclick="startLeaseEdit(${lease.id})">Ред.</button>
         ${lease.active ? `<button class="mini danger-soft" onclick="moveOut(${lease.id})">Выезд</button>` : ""}
       </td>
     </tr>
   `).join("");
   qs("#leaseList").innerHTML = table(["Объект", "Квартира", "Жилец", "Заезд", "День", "ИП / личный", "Залог", "Статус", "Действия"], rows);
+}
+
+function startLeaseEdit(leaseId) {
+  const lease = state.bootstrap.leases.find((item) => item.id === leaseId);
+  const form = qs("#onboardForm");
+  if (!lease || !form) return;
+  state.editingLeaseId = leaseId;
+  hydrateForms();
+  form.elements.apartment_id.value = String(lease.apartment_id);
+  form.elements.full_name.value = lease.tenant || "";
+  form.elements.phone.value = lease.phone || "";
+  form.elements.telegram.value = lease.telegram || "";
+  form.elements.whatsapp.value = lease.whatsapp || "";
+  form.elements.start_date.value = lease.start_date || "";
+  form.elements.payment_day.value = lease.payment_day || "";
+  form.elements.ip_amount.value = lease.ip_amount || "";
+  form.elements.personal_amount.value = lease.personal_amount || "";
+  form.elements.deposit_amount.value = lease.deposit_amount || "";
+  form.elements.deposit_location.value = lease.deposit_location || "";
+  form.elements.deposit_terms.value = lease.deposit_terms || "";
+  form.elements.notes.value = lease.notes || "";
+  form.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function cancelLeaseEdit() {
+  state.editingLeaseId = null;
+  const form = qs("#onboardForm");
+  if (form) form.reset();
+  hydrateForms();
 }
 
 function renderRent() {
@@ -1075,11 +1115,20 @@ function bindEvents() {
 
   qs("#onboardForm").addEventListener("submit", async (event) => {
     event.preventDefault();
-    await api("/api/leases/onboard", { method: "POST", body: JSON.stringify(formData(event.currentTarget)) });
-    event.currentTarget.reset();
-    toast("Жилец заселён");
+    const form = event.currentTarget;
+    const data = formData(form);
+    if (state.editingLeaseId) {
+      await api(`/api/leases/${state.editingLeaseId}`, { method: "PATCH", body: JSON.stringify(data) });
+      toast("????????? ?? ?????? ?????????");
+      state.editingLeaseId = null;
+    } else {
+      await api("/api/leases/onboard", { method: "POST", body: JSON.stringify(data) });
+      toast("????? ???????");
+    }
+    form.reset();
     await loadAll();
   });
+  qs("#cancelLeaseEditBtn")?.addEventListener("click", cancelLeaseEdit);
 
   qs("#readingForm").addEventListener("submit", async (event) => {
     event.preventDefault();
