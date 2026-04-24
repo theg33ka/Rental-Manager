@@ -1365,12 +1365,12 @@ def apply_receipt_match(session: Session, lease: Lease, parsed: dict[str, Any]) 
     channel = detect_receipt_channel(parsed)
     issues = receipt_validation_issues(parsed, get_settings(session), channel)
     if amount <= 0:
-        issues.append("? ???? ?? ??????? ???????? ????????????? ?????")
+        issues.append("в чеке не удалось определить положительную сумму")
 
     if channel == "ip":
         plan, remaining = build_rent_plan(session, lease, "ip", amount, exact_only=False)
         if not plan or remaining > EPS:
-            issues.append("?? ??????? ????????? ??????? ?? ?? ?? ??????")
+            issues.append("не удалось честно разложить платёж по аренде")
         if issues:
             return "suspicious", "review", None, issues
         return "accepted", "rent", plan[0][0].id, []
@@ -1387,10 +1387,10 @@ def apply_receipt_match(session: Session, lease: Lease, parsed: dict[str, Any]) 
         if utility_exact and not rent_exact:
             return "accepted", "utility", utility_plan[0][0].id, []
         if rent_exact and utility_exact:
-            return "suspicious", "review", None, ["????? ????????? ???????? ? ??? ??????, ? ??? ??????????"]
-        return "suspicious", "review", None, ["????? ?? ????????? ????? ????? ?? ?? ??????, ?? ?? ??????????"]
+            return "suspicious", "review", None, ["сумма одинаково подходит и под аренду, и под коммуналку"]
+        return "suspicious", "review", None, ["сумма не закрывает точный долг ни по аренде, ни по коммуналке"]
 
-    return "suspicious", "review", None, ["??? ???????? ???? ?? ??????? ??????????"]
+    return "suspicious", "review", None, ["тип перевода пока не удалось определить"]
 
 
 def owner_receipt_alert_text(
@@ -1440,11 +1440,11 @@ def handle_tenant_receipt_message(session: Session, message: dict[str, Any], lin
     status = "suspicious"
     match_type = "review"
     linked_id: int | None = None
-    issues = ["??? ????????, ?? ??????? ?????? ????????"]
+    issues = ["чек сохранён, но не удалось ничего распознать"]
     if parsed and lease:
         status, match_type, linked_id, issues = apply_receipt_match(session, lease, parsed)
     elif parsed and not lease:
-        issues = ["?? ??????? ??????, ? ?????? ?????? ????????? ???"]
+        issues = ["чек разобран, но арендатор по нему пока не определён"]
 
     channel = detect_receipt_channel(parsed or {})
     paid_at = datetime.fromisoformat(parsed["paid_at"]) if parsed and parsed.get("paid_at") else utc_now()
@@ -1463,7 +1463,7 @@ def handle_tenant_receipt_message(session: Session, message: dict[str, Any], lin
                     status="accepted",
                     recipient_name=parsed.get("recipient_name") or "",
                     recipient_details=receipt_details,
-                    notes="????????????? ??????? ?? Telegram",
+                    notes="автоматически принято из Telegram",
                     file_path=stored_path,
                     exact_only=channel == "personal",
                 )
@@ -1477,13 +1477,13 @@ def handle_tenant_receipt_message(session: Session, message: dict[str, Any], lin
                     status="accepted",
                     recipient_name=parsed.get("recipient_name") or "",
                     recipient_details=receipt_details,
-                    notes="????????????? ??????? ?? Telegram",
+                    notes="автоматически принято из Telegram",
                     file_path=stored_path,
                     exact_only=True,
                 )
             else:
                 status = "suspicious"
-                issues = ["??? ?? ???? ???????, ???? ??????? ??????"]
+                issues = ["бот не понял, куда зачесть чек"]
         except ValueError as exc:
             status = "suspicious"
             match_type = "review"
@@ -1934,13 +1934,13 @@ def generate_charges(payload: dict[str, Any] | None = None, session: Session = D
 def add_rent_payment(charge_id: int, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
     charge = session.get(RentCharge, charge_id)
     if not charge:
-        raise HTTPException(404, "?????????? ?? ???????")
+        raise HTTPException(404, "начисление не найдено")
     channel = payload.get("channel")
     if channel not in {"ip", "personal"}:
-        raise HTTPException(400, "????? ?????? ???? ip ??? personal")
+        raise HTTPException(400, "канал платежа должен быть ip или personal")
     amount = float(payload.get("amount") or 0)
     if amount <= 0:
-        raise HTTPException(400, "????? ?????? ???? ?????? ????")
+        raise HTTPException(400, "сумма платежа должна быть больше нуля")
 
     create_rent_receipts(
         session,
@@ -1964,7 +1964,7 @@ def add_rent_payment(charge_id: int, payload: dict[str, Any], session: Session =
 def lease_payment_history(lease_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
     lease = session.get(Lease, lease_id)
     if not lease:
-        raise HTTPException(404, "??????? ?? ??????")
+        raise HTTPException(404, "аренда не найдена")
     receipts = session.scalars(
         select(PaymentReceipt)
         .where(PaymentReceipt.lease_id == lease_id)
@@ -1982,12 +1982,12 @@ def lease_payment_history(lease_id: int, session: Session = Depends(get_session)
 def update_payment_receipt(receipt_id: int, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
     receipt = session.get(PaymentReceipt, receipt_id)
     if not receipt:
-        raise HTTPException(404, "?????? ?? ??????")
+        raise HTTPException(404, "платёж не найден")
     old_lease_id = receipt.lease_id
     if "amount" in payload:
         amount = float(payload.get("amount") or 0)
         if amount <= 0:
-            raise HTTPException(400, "????? ?????? ???? ?????? ????")
+            raise HTTPException(400, "сумма платежа должна быть больше нуля")
         receipt.amount = amount
     if payload.get("paid_at"):
         receipt.paid_at = datetime.fromisoformat(payload["paid_at"])
@@ -1996,9 +1996,10 @@ def update_payment_receipt(receipt_id: int, payload: dict[str, Any], session: Se
     if payload.get("channel") and receipt.rent_charge_id:
         channel = payload.get("channel")
         if channel not in {"ip", "personal"}:
-            raise HTTPException(400, "??? ?????? ????? ?????? ???? ip ??? personal")
+            raise HTTPException(400, "для аренды канал платежа должен быть ip или personal")
         receipt.channel = channel
     if receipt.status == "accepted" and old_lease_id:
+        session.flush()
         recalculate_lease_balances(session, old_lease_id)
     session.commit()
     return serialize_payment_receipt(receipt, session)
@@ -2008,7 +2009,7 @@ def update_payment_receipt(receipt_id: int, payload: dict[str, Any], session: Se
 def delete_payment_receipt(receipt_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
     receipt = session.get(PaymentReceipt, receipt_id)
     if not receipt:
-        raise HTTPException(404, "?????? ?? ??????")
+        raise HTTPException(404, "платёж не найден")
     lease_id = receipt.lease_id
     status = receipt.status
     session.delete(receipt)
@@ -2033,16 +2034,17 @@ def suspicious_receipts(session: Session = Depends(get_session)) -> list[dict[st
 def moderate_payment_receipt(receipt_id: int, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
     receipt = session.get(PaymentReceipt, receipt_id)
     if not receipt:
-        raise HTTPException(404, "?????? ?? ??????")
+        raise HTTPException(404, "платёж не найден")
     action = (payload.get("action") or "").strip()
     note = (payload.get("note") or "").strip()
     parsed = parse_receipt_details(receipt)
-    channel = receipt.channel if receipt.channel in {"ip", "personal"} else detect_receipt_channel(parsed)
+    channel_override = (payload.get("channel") or "").strip()
+    channel = channel_override if channel_override in {"ip", "personal"} else receipt.channel if receipt.channel in {"ip", "personal"} else detect_receipt_channel(parsed)
     lease = session.get(Lease, receipt.lease_id) if receipt.lease_id else None
     if action in {"accept_rent", "accept_utility"} and not lease:
-        raise HTTPException(400, "?????? ??????? ??? ??? ???????????? ??????")
+        raise HTTPException(400, "нужна аренда для этой операции")
 
-    moderation_note = f"????????? owner{': ' + note if note else ''}"
+    moderation_note = f"модерация owner{': ' + note if note else ''}"
     if action == "accept_rent":
         create_rent_receipts(
             session,
@@ -2077,7 +2079,7 @@ def moderate_payment_receipt(receipt_id: int, payload: dict[str, Any], session: 
     elif action == "reject":
         receipt.status = "rejected"
     else:
-        raise HTTPException(400, "???????? ???????? ?????????")
+        raise HTTPException(400, "неизвестное действие модерации")
     receipt.notes = "; ".join(part for part in [receipt.notes, moderation_note] if part)
     session.commit()
     return serialize_payment_receipt(receipt, session)
@@ -2312,12 +2314,12 @@ def mark_provider_paid(bill_id: int, session: Session = Depends(get_session)) ->
 def add_utility_payment(line_id: int, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
     line = session.get(UtilityBillLine, line_id)
     if not line:
-        raise HTTPException(404, "?????? ?????????? ?? ???????")
+        raise HTTPException(404, "строка коммуналки не найдена")
     amount = float(payload.get("amount") or 0)
     if amount <= 0:
-        raise HTTPException(400, "????? ?????? ???? ?????? ????")
+        raise HTTPException(400, "сумма платежа должна быть больше нуля")
     if not line.lease:
-        raise HTTPException(400, "? ???? ?????? ??? ????????? ??????")
+        raise HTTPException(400, "у этой строки нет привязанной аренды")
     create_utility_receipts(
         session,
         line.lease,

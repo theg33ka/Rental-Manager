@@ -24,6 +24,8 @@ const statusText = {
   not_required: "не требуется",
   suspicious: "проверить",
   accepted: "принят",
+  moderated: "модерировано",
+  rejected: "отклонён",
 };
 
 const money = (value) => new Intl.NumberFormat("ru-RU", { style: "currency", currency: "RUB", maximumFractionDigits: 2 }).format(value || 0);
@@ -443,7 +445,148 @@ function rentActions(charge) {
     ${ipLeft > 0 ? `<button class="mini primary" onclick="payRent(${charge.id}, 'ip', ${ipLeft})">ИП оплачено</button>` : ""}
     ${personalLeft > 0 ? `<button class="mini primary" onclick="payRent(${charge.id}, 'personal', ${personalLeft})">Личный оплачено</button>` : ""}
     <button class="mini" onclick="deferRent(${charge.id})">Отсрочка</button>
+    <button class="mini" onclick="openPaymentHistory(${charge.lease_id})">История</button>
   `;
+}
+
+function receiptStatusLabel(status) {
+  return statusText[status] || status || "неизвестно";
+}
+
+async function openPaymentHistory(leaseId) {
+  state.paymentHistory = await api(`/api/leases/${leaseId}/payment-history`);
+  renderRentHistory();
+  qs("#rentHistoryPanel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function closePaymentHistory() {
+  state.paymentHistory = null;
+  renderRentHistory();
+}
+
+function renderRentHistory() {
+  const root = qs("#rentHistoryPanel");
+  if (!root) return;
+  if (!state.paymentHistory) {
+    root.innerHTML = "";
+    return;
+  }
+  const rows = state.paymentHistory.receipts.map((receipt) => `
+    <tr>
+      <td>${formatDateTime(receipt.paid_at)}</td>
+      <td>${money(receipt.amount)}</td>
+      <td>${receipt.channel}</td>
+      <td>${receipt.target_label || '<span class="muted">не привязан</span>'}</td>
+      <td>${statusPill(receipt.status)}</td>
+      <td>${receipt.notes || ""}</td>
+      <td class="actions">
+        <button class="mini" onclick="editPaymentReceipt(${receipt.id})">Редактировать</button>
+        <button class="mini danger-soft" onclick="deletePaymentReceipt(${receipt.id})">Удалить</button>
+      </td>
+    </tr>
+  `).join("");
+  root.innerHTML = `
+    <article class="card">
+      <div class="section-title">
+        <div>
+          <h2>История платежей: ${state.paymentHistory.apartment}</h2>
+          <span>${state.paymentHistory.tenant}</span>
+        </div>
+        <button class="mini" type="button" onclick="closePaymentHistory()">Скрыть</button>
+      </div>
+      <div class="table-wrap">${table(["Оплачен", "Сумма", "Канал", "За что зачтён", "Статус", "Примечание", "Действия"], rows)}</div>
+    </article>
+  `;
+}
+
+async function editPaymentReceipt(receiptId) {
+  const history = state.paymentHistory;
+  if (!history) return;
+  const receipt = history.receipts.find((item) => item.id === receiptId);
+  if (!receipt) return;
+  const amount = prompt("Новая сумма платежа", String(receipt.amount));
+  if (amount === null) return;
+  const paidAt = prompt("Дата и время платежа (YYYY-MM-DDTHH:MM)", (receipt.paid_at || "").slice(0, 16));
+  if (paidAt === null) return;
+  const notes = prompt("Комментарий", receipt.notes || "");
+  if (notes === null) return;
+  const payload = {
+    amount: Number(amount),
+    paid_at: paidAt,
+    notes,
+  };
+  if (receipt.rent_charge_id) {
+    payload.channel = prompt("Канал: ip или personal", receipt.channel || "personal") || receipt.channel;
+  }
+  await api(`/api/payment-receipts/${receiptId}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+  toast("Платёж обновлён");
+  await openPaymentHistory(history.lease_id);
+  await loadAll();
+}
+
+async function deletePaymentReceipt(receiptId) {
+  if (!confirm("Удалить этот платёж из истории?")) return;
+  await api(`/api/payment-receipts/${receiptId}`, { method: "DELETE" });
+  toast("Платёж удалён");
+  if (state.paymentHistory) {
+    await openPaymentHistory(state.paymentHistory.lease_id);
+  }
+  await loadAll();
+}
+
+function renderSuspiciousReceipts() {
+  const root = qs("#suspiciousReceiptsPanel");
+  if (!root) return;
+  if (!state.suspiciousReceipts.length) {
+    root.innerHTML = `<article class="card"><h3>Подозрительных чеков нет</h3><p class="muted">Тихо. Даже бот перестал драматизировать.</p></article>`;
+    return;
+  }
+  root.innerHTML = state.suspiciousReceipts.map((receipt) => `
+    <article class="card">
+      <div class="section-title">
+        <div>
+          <h2>${receipt.apartment || "Квартира не определена"}</h2>
+          <span>${receipt.tenant || "Неопознанный отправитель"} · ${money(receipt.amount)} · ${receiptStatusLabel(receipt.status)}</span>
+        </div>
+        ${receipt.file_path ? `<span class="pill">${receipt.file_path.split("/").pop()}</span>` : ""}
+      </div>
+      <div class="pill-row">
+        ${receipt.target_month ? monthMeta(receipt.target_month) : '<span class="pill">месяц не определён</span>'}
+        <span class="pill">${receipt.channel || "канал не определён"}</span>
+        ${receipt.recipient_name ? `<span class="pill">${receipt.recipient_name}</span>` : ""}
+      </div>
+      <p>${receipt.notes || "Бот засомневался и позвал владельца. Правильно сделал."}</p>
+      <div class="attention-actions">
+        <button class="mini primary" onclick="moderateReceipt(${receipt.id}, 'accept_rent')">Зачесть в аренду</button>
+        <button class="mini primary" onclick="moderateReceipt(${receipt.id}, 'accept_utility')">Зачесть в коммуналку</button>
+        <button class="mini danger-soft" onclick="moderateReceipt(${receipt.id}, 'reject')">Отклонить</button>
+      </div>
+    </article>
+  `).join("");
+}
+
+async function moderateReceipt(receiptId, action) {
+  const note = prompt("Комментарий модератора", "") ?? "";
+  let channel = "";
+  if (action === "accept_rent") {
+    channel = prompt("Канал для аренды: ip или personal", "personal") || "personal";
+  }
+  await api(`/api/payment-receipts/${receiptId}/moderate`, {
+    method: "POST",
+    body: JSON.stringify({ action, note, channel }),
+  });
+  toast("Чек отмодерирован");
+  await loadAll();
+}
+
+async function importBaseline() {
+  if (!confirm("Импортировать данные из старой базы и перезаписать текущие demo-данные?")) return;
+  const result = await api("/api/admin/import-release-baseline", { method: "POST", body: "{}" });
+  toast(`Импорт завершён: жильцов ${result.tenants}, аренд ${result.leases}, платежей ${result.receipts}`);
+  await loadAll();
 }
 
 function utilityActions(line) {
@@ -559,7 +702,7 @@ function prefillTariff(serviceId) {
   form.elements.service_id.value = serviceId;
   form.elements.starts_on.value = today();
   form.elements.name.value = service ? `Актуальный ${service.object}: ${service.name}` : "Актуальный тариф";
-  form.elements.tiers.value = service?.kind === "electricity" ? "1000:4.18; 2200:4.7; 3000:7; 9" : "*:0";
+  form.elements.tiers.value = service?.kind === "electricity" ? "3900:4.18; 6000:6.01; 7.48" : "*:0";
   form.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 

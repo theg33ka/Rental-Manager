@@ -78,11 +78,14 @@ def seed_if_empty(session: Session) -> None:
 
             tiers = [{"limit": None, "price": 1.0}]
             if kind == "electricity":
-                tiers = [
-                    {"limit": 1000, "price": 4.2},
-                    {"limit": 4000, "price": 4.5},
-                    {"limit": None, "price": 7.0},
-                ]
+                if rental_object.name == "Баня":
+                    tiers = [{"limit": None, "price": 7.4}]
+                else:
+                    tiers = [
+                        {"limit": 3900, "price": 4.18},
+                        {"limit": 6000, "price": 6.01},
+                        {"limit": None, "price": 7.48},
+                    ]
             session.add(
                 Tariff(
                     service_id=service.id,

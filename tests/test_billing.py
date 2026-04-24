@@ -128,12 +128,12 @@ class UtilityBillingTests(DatabaseTestCase):
     def test_tiered_cost_is_applied_to_object_consumption(self) -> None:
         tiers = json.dumps(
             [
-                {"limit": 1000, "price": 4.2},
-                {"limit": 4000, "price": 4.5},
-                {"limit": None, "price": 7.0},
+                {"limit": 3900, "price": 4.18},
+                {"limit": 6000, "price": 6.01},
+                {"limit": None, "price": 7.48},
             ]
         )
-        self.assertEqual(calculate_tiered_cost(5000, tiers), 24700.0)
+        self.assertEqual(calculate_tiered_cost(7000, tiers), 36403.0)
 
     def test_odn_is_reallocated_between_occupied_apartments_by_day(self) -> None:
         a1 = Apartment(id=1, odn_share_percent=20)
@@ -163,12 +163,12 @@ class UtilityBillingTests(DatabaseTestCase):
 
         self.assertEqual(warnings, [])
         self.assertEqual(bill.total_consumption, 1200.0)
-        self.assertEqual(bill.total_cost, 5100.0)
-        self.assertEqual(bill.average_unit_price, 4.25)
+        self.assertEqual(bill.total_cost, 5016.0)
+        self.assertEqual(bill.average_unit_price, 4.18)
         self.assertEqual(len(bill.lines), 1)
         self.assertEqual(bill.lines[0].personal_consumption, 100.0)
         self.assertEqual(bill.lines[0].odn_consumption, 1100.0)
-        self.assertEqual(bill.lines[0].total_amount, 5100.0)
+        self.assertEqual(bill.lines[0].total_amount, 5016.0)
 
     def test_utility_bill_fails_when_apartment_consumption_exceeds_object(self) -> None:
         with self.seed() as session:

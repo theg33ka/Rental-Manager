@@ -48,7 +48,7 @@ with SessionLocal() as session:
         session.add(MeterReading(meter_id=meter.id, reading_date=date(2026, 5, 1), value=end_value))
     session.flush()
     bill, warnings = calculate_utility_bill(session, service.id, date(2026, 4, 1), date(2026, 5, 1), allow_estimate=False)
-    assert bill.total_cost == 5100.0, bill.total_cost
+    assert bill.total_cost == 5016.0, bill.total_cost
     assert len(bill.lines) == 1, len(bill.lines)
     assert len(warnings) == 0, warnings
 

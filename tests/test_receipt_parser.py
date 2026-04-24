@@ -64,6 +64,45 @@ TBANK_IP_RECEIPT_TEXT = """\
 """
 
 
+SBER_IP_RECEIPT_TEXT = """\
+Чек по операции
+СберБанк Онлайн
+16 марта 2026 09:03:17 мск
+ОПЛАТА ПО РЕКВИЗИТАМ
+Сумма платежа
+20 000,00 ₽
+Комиссия
+200,00 ₽
+Итого
+20 200,00 ₽
+Плательщик
+Эраст Митридатович Чантурия
+Получатель
+ИНДИВИДУАЛЬНЫЙ ПРЕДПРИНИМАТЕЛЬ ЧАНТУРИЯ ЭРАСТ МИТРИДАТОВИЧ
+БИК
+045004641
+Счёт получателя
+40802810644050156191
+Назначение платежа
+КАВ 3
+"""
+
+
+SBER_PHONE_RECEIPT_TEXT = """\
+Чек по операции
+16 апреля 2026 17:57:01 (МСК)
+Перевод клиенту СберБанка
+ФИО получателя
+Марьяна Сергеевна С
+Телефон получателя
++7(913) 206-02-94
+Сумма перевода
+765,00 ₽
+Номер документа
+1000000004706610066
+"""
+
+
 class ReceiptParserTests(unittest.TestCase):
     def test_parses_ozon_ip_receipt(self) -> None:
         parsed = parse_receipt_text(OZON_IP_RECEIPT_TEXT)
@@ -86,7 +125,7 @@ class ReceiptParserTests(unittest.TestCase):
         self.assertEqual(parsed["transfer_type"], "По номеру телефона")
         self.assertEqual(parsed["payer_name"], "Денис Часовских")
         self.assertEqual(parsed["recipient_phone"], "+7 (913) 385-44-41")
-        self.assertEqual(parsed["recipient_name"], "Эрнест К.")
+        self.assertEqual(parsed["recipient_name"], "Эрнест К")
         self.assertEqual(parsed["recipient_bank"], "Сбербанк")
         self.assertEqual(parsed["receipt_number"], "1-130-088-396-459")
         self.assertTrue(parsed["is_success"])
@@ -103,6 +142,29 @@ class ReceiptParserTests(unittest.TestCase):
         self.assertEqual(parsed["purpose"], "БД 3")
         self.assertEqual(parsed["receipt_number"], "1-103-296-522-804")
         self.assertTrue(parsed["is_success"])
+
+    def test_parses_sber_ip_receipt(self) -> None:
+        parsed = parse_receipt_text(SBER_IP_RECEIPT_TEXT)
+
+        self.assertEqual(parsed["source_bank"], "sberbank")
+        self.assertEqual(parsed["amount"], 20000.0)
+        self.assertEqual(parsed["paid_at"], "2026-03-16T09:03")
+        self.assertEqual(parsed["transfer_type"], "По реквизитам")
+        self.assertEqual(parsed["recipient_name"], "ИНДИВИДУАЛЬНЫЙ ПРЕДПРИНИМАТЕЛЬ ЧАНТУРИЯ ЭРАСТ МИТРИДАТОВИЧ")
+        self.assertEqual(parsed["recipient_account"], "40802810644050156191")
+        self.assertEqual(parsed["recipient_bik"], "045004641")
+        self.assertEqual(parsed["purpose"], "КАВ 3")
+
+    def test_parses_sber_phone_receipt(self) -> None:
+        parsed = parse_receipt_text(SBER_PHONE_RECEIPT_TEXT)
+
+        self.assertEqual(parsed["source_bank"], "sberbank")
+        self.assertEqual(parsed["amount"], 765.0)
+        self.assertEqual(parsed["paid_at"], "2026-04-16T17:57")
+        self.assertEqual(parsed["transfer_type"], "По номеру телефона")
+        self.assertEqual(parsed["recipient_name"], "Марьяна Сергеевна С")
+        self.assertEqual(parsed["recipient_phone"], "+7(913) 206-02-94")
+        self.assertEqual(parsed["receipt_number"], "1000000004706610066")
 
 
 if __name__ == "__main__":

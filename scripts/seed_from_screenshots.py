@@ -177,12 +177,13 @@ METER_READINGS = [
 ]
 
 TARIFFS = [
-    ("Чёрный дом", "electricity", "Чёрный дом - Электричество", 4.12, "2025-01-01"),
-    ("Чёрный дом", "electricity", "Чёрный дом - Электричество актуальный", 4.18, "2026-04-23"),
-    ("Белый дом", "electricity", "Белый дом - Электричество", 4.12, "2025-01-01"),
-    ("Баня", "water", "Баня - Вода 2026", 28.60, "2025-01-01"),
-    ("Баня", "gas", "Баня - Газ 2025", 7.98, "2025-01-01"),
-    ("Баня", "electricity", "Баня - Электричество 2026", 7.40, "2025-10-01"),
+    ("Чёрный дом", "electricity", "Чёрный дом - Электричество 2025", [{"limit": None, "price": 4.12}], "2025-01-01"),
+    ("Чёрный дом", "electricity", "Чёрный дом - Электричество актуальный", [{"limit": 3900, "price": 4.18}, {"limit": 6000, "price": 6.01}, {"limit": None, "price": 7.48}], "2026-04-01"),
+    ("Белый дом", "electricity", "Белый дом - Электричество 2025", [{"limit": None, "price": 4.12}], "2025-01-01"),
+    ("Белый дом", "electricity", "Белый дом - Электричество актуальный", [{"limit": 3900, "price": 4.18}, {"limit": 6000, "price": 6.01}, {"limit": None, "price": 7.48}], "2026-04-01"),
+    ("Баня", "water", "Баня - Вода 2026", [{"limit": None, "price": 28.60}], "2025-01-01"),
+    ("Баня", "gas", "Баня - Газ 2025", [{"limit": None, "price": 7.98}], "2025-01-01"),
+    ("Баня", "electricity", "Баня - Электричество 2026", [{"limit": None, "price": 7.40}], "2025-10-01"),
 ]
 
 EXPENSES = [
@@ -303,14 +304,14 @@ def seed_tariffs(session: Session) -> None:
     for tariff in session.scalars(select(Tariff)).all():
         session.delete(tariff)
     session.flush()
-    for object_name, kind, name, price, starts_on in TARIFFS:
+    for object_name, kind, name, tiers, starts_on in TARIFFS:
         service = service_for(session, object_name, kind)
         session.add(
             Tariff(
                 service_id=service.id,
                 starts_on=parse_iso(starts_on),
                 name=f"{name} ({IMPORT_MARK})",
-                tiers_json=json.dumps([{"limit": None, "price": price}], ensure_ascii=False),
+                tiers_json=json.dumps(tiers, ensure_ascii=False),
             )
         )
     session.flush()

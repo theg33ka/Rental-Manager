@@ -17,6 +17,7 @@ def normalize_phone(value: str) -> str:
 
 def normalize_name(value: str) -> str:
     normalized = (value or "").lower().replace("ё", "е")
+    normalized = normalized.replace("индивидуальный предприниматель", "ип")
     normalized = re.sub(r"[^a-zа-я0-9]+", " ", normalized)
     return re.sub(r"\s+", " ", normalized).strip()
 
@@ -75,7 +76,8 @@ def receipt_validation_issues(parsed: dict[str, Any], settings: dict[str, Any], 
             issues.append("получатель перевода не совпал с настройками")
         if expected_phone and normalize_phone(parsed.get("recipient_phone") or "") != expected_phone:
             issues.append("номер получателя перевода не совпал с настройками")
-        if expected_bank and not text_loosely_matches(parsed.get("recipient_bank") or "", expected_bank):
+        parsed_bank = parsed.get("recipient_bank") or ""
+        if expected_bank and parsed_bank and not text_loosely_matches(parsed_bank, expected_bank):
             issues.append("банк получателя перевода не совпал с настройками")
     return issues
 

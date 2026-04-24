@@ -5,6 +5,7 @@ import unittest
 from rental_manager.services.receipt_matching import (
     choose_exact_receipt_match,
     detect_receipt_channel,
+    names_loosely_match,
     receipt_validation_issues,
 )
 
@@ -55,6 +56,48 @@ class ReceiptMatchingTests(unittest.TestCase):
         )
 
         self.assertEqual(len(issues), 3)
+
+    def test_ip_validation_accepts_sber_legal_form_prefix(self) -> None:
+        issues = receipt_validation_issues(
+            {
+                "recipient_name": "ИНДИВИДУАЛЬНЫЙ ПРЕДПРИНИМАТЕЛЬ ЧАНТУРИЯ ЭРАСТ МИТРИДАТОВИЧ",
+                "recipient_account": "40802810644050156191",
+                "recipient_bik": "045004641",
+            },
+            {
+                "ip_recipient_name": "ИП Чантурия Эраст Митридатович",
+                "ip_recipient_account": "40802810644050156191",
+                "ip_recipient_bik": "045004641",
+            },
+            "ip",
+        )
+
+        self.assertEqual(issues, [])
+
+    def test_personal_validation_does_not_fail_when_bank_is_missing_in_receipt(self) -> None:
+        issues = receipt_validation_issues(
+            {
+                "recipient_name": "Марьяна Сергеевна С",
+                "recipient_phone": "+7(913)206-02-94",
+                "recipient_bank": "",
+            },
+            {
+                "personal_recipient_name": "Марьяна С.",
+                "personal_recipient_phone": "+7 913 206-02-94",
+                "personal_recipient_bank": "Сбербанк",
+            },
+            "personal",
+        )
+
+        self.assertEqual(issues, [])
+
+    def test_name_matching_understands_ip_long_form(self) -> None:
+        self.assertTrue(
+            names_loosely_match(
+                "ИНДИВИДУАЛЬНЫЙ ПРЕДПРИНИМАТЕЛЬ ЧАНТУРИЯ ЭРАСТ МИТРИДАТОВИЧ",
+                "ИП Чантурия Эраст Митридатович",
+            )
+        )
 
     def test_exact_match_prefers_single_rent_match(self) -> None:
         match_type, match_id, issues = choose_exact_receipt_match(
