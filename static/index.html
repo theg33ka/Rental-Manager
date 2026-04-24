@@ -20,7 +20,7 @@
     </header>
 
     <nav class="tabs" aria-label="Разделы">
-      <button class="tab active" data-tab="dashboard">Пульт</button>
+      <button class="tab active" data-tab="dashboard">Дашборд</button>
       <button class="tab" data-tab="tenants">Жильцы</button>
       <button class="tab" data-tab="rent">Аренда</button>
       <button class="tab" data-tab="meters">Счётчики</button>
@@ -29,6 +29,7 @@
       <button class="tab" data-tab="expenses">Расходы</button>
       <button class="tab" data-tab="reports">Отчёты</button>
       <button class="tab" data-tab="messages">Сообщения</button>
+      <button class="tab" data-tab="automation">Автоматизация</button>
       <button class="tab" data-tab="settings">Настройки</button>
     </nav>
 
@@ -45,8 +46,8 @@
         </section>
         <section>
           <div class="section-title">
-            <h2>Что требует внимания</h2>
-            <span>Тут уже не просто список бед, а рабочая доска: что горит, кому уже писали и что можно ткнуть сразу.</span>
+            <h2>Дашборд</h2>
+            <span>Главные проблемы по жильцам, коммуналке и напоминаниям. Пёстро, наглядно, без археологии.</span>
           </div>
           <div id="attentionList" class="attention-grid"></div>
         </section>
@@ -299,6 +300,38 @@
         </form>
       </section>
 
+      <section class="panel" id="automation">
+        <div class="section-title">
+          <h2>Автоматизация</h2>
+          <span>Здесь живёт частота автонапоминаний и краткая сводка, кому уже писали. Всё по делу, а зачем иначе.</span>
+        </div>
+        <form id="automationSettingsForm" class="form-grid compact">
+          <label>Аренда: день оплаты
+            <select name="automation_rent_due_cadence" id="automationRentDueCadenceInput">
+              <option value="twice_daily">2 раза в день каждый день</option>
+              <option value="daily_evening">вечером каждого дня</option>
+              <option value="every_two_days">раз в два дня</option>
+            </select>
+          </label>
+          <label>Аренда: просрочка и частичная оплата
+            <select name="automation_rent_overdue_cadence" id="automationRentOverdueCadenceInput">
+              <option value="twice_daily">2 раза в день каждый день</option>
+              <option value="daily_evening">вечером каждого дня</option>
+              <option value="every_two_days">раз в два дня</option>
+            </select>
+          </label>
+          <label>Коммуналка
+            <select name="automation_utility_cadence" id="automationUtilityCadenceInput">
+              <option value="twice_daily">2 раза в день каждый день</option>
+              <option value="daily_evening">вечером каждого дня</option>
+              <option value="every_two_days">раз в два дня</option>
+            </select>
+          </label>
+          <button class="primary" type="submit">Сохранить частоту</button>
+        </form>
+        <div id="automationList" class="stack"></div>
+      </section>
+
       <section class="panel" id="settings">
         <div class="section-title">
           <h2>Настройки</h2>
@@ -360,6 +393,7 @@
       </section>
     </main>
 
+    <div id="manualAllocationModal" class="modal-shell" hidden></div>
     <div id="toast" role="status" aria-live="polite"></div>
     <script src="/static/app.js"></script>
   </body>

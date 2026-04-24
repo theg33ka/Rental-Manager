@@ -3,10 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
@@ -93,6 +94,9 @@ DEFAULT_SETTINGS = {
     "telegram_owner_chat_id": "",
     "notifications_enabled": False,
     "notification_cutoff_date": "",
+    "automation_rent_due_cadence": "twice_daily",
+    "automation_rent_overdue_cadence": "twice_daily",
+    "automation_utility_cadence": "daily_evening",
     "ip_recipient_name": "ИНДИВИДУАЛЬНЫЙ ПРЕДПРИНИМАТЕЛЬ ЧАНТУРИЯ ЭРАСТ МИТРИДАТОВИЧ",
     "ip_recipient_inn": "540506055229",
     "ip_recipient_ogrnip": "324508100223397",
@@ -123,6 +127,12 @@ INTERNAL_SETTINGS = {
     "telegram_tenant_links": "{}",
 }
 BOOLEAN_SETTINGS = {"notifications_enabled"}
+REMINDER_CADENCE_KEYS = {
+    "message_rent_due": "automation_rent_due_cadence",
+    "message_rent_overdue": "automation_rent_overdue_cadence",
+    "message_utility_bill": "automation_utility_cadence",
+}
+LOCAL_TZ = ZoneInfo("Asia/Novosibirsk")
 DEFAULT_FALLBACK_KEYS = {
     "ip_recipient_name",
     "ip_recipient_inn",
@@ -323,6 +333,85 @@ def debt_visible_by_cutoff(due_date: date | None, cutoff: date | None) -> bool:
     return due_date >= cutoff
 
 
+def reminder_cadence(session: Session, template_key: str) -> str:
+    key = REMINDER_CADENCE_KEYS.get(template_key, "")
+    if not key:
+        return "twice_daily"
+    value = str(get_setting_value(session, key) or "").strip()
+    if value in {"twice_daily", "daily_evening", "every_two_days"}:
+        return value
+    return str(DEFAULT_SETTINGS[key])
+
+
+def cadence_label(value: str) -> str:
+    return {
+        "twice_daily": "2 раза в день",
+        "daily_evening": "вечером каждый день",
+        "every_two_days": "раз в два дня",
+    }.get(value, value)
+
+
+def local_now() -> datetime:
+    return datetime.now(LOCAL_TZ)
+
+
+def to_local_time(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(LOCAL_TZ)
+
+
+def cadence_slots_for_day(day: date, cadence: str) -> list[datetime]:
+    if cadence == "twice_daily":
+        return [
+            datetime.combine(day, time(hour=12), tzinfo=LOCAL_TZ),
+            datetime.combine(day, time(hour=20), tzinfo=LOCAL_TZ),
+        ]
+    return [datetime.combine(day, time(hour=20), tzinfo=LOCAL_TZ)]
+
+
+def next_reminder_slot(cadence: str, latest: datetime | None, now: datetime | None = None) -> datetime:
+    now = now or local_now()
+    latest_local = to_local_time(latest)
+    check_day = now.date()
+    for _ in range(8):
+        for slot in cadence_slots_for_day(check_day, cadence):
+            if slot <= now:
+                if latest_local is None or latest_local < slot:
+                    if cadence != "every_two_days":
+                        return slot
+                    if latest_local is None or latest_local <= slot - timedelta(days=2):
+                        return slot
+            else:
+                if cadence != "every_two_days":
+                    return slot
+                if latest_local is None:
+                    return slot
+                next_allowed = latest_local + timedelta(days=2)
+                if slot >= next_allowed:
+                    return slot
+        check_day += timedelta(days=1)
+    return datetime.combine(now.date() + timedelta(days=7), time(hour=20), tzinfo=LOCAL_TZ)
+
+
+def cadence_allows_send(cadence: str, latest: datetime | None, now: datetime | None = None) -> bool:
+    now = now or local_now()
+    slot = next_reminder_slot(cadence, latest, now)
+    return slot <= now
+
+
+def reminder_schedule_meta(session: Session, template_key: str, latest: MessageLog | None) -> dict[str, Any]:
+    cadence = reminder_cadence(session, template_key)
+    next_slot = next_reminder_slot(cadence, latest.created_at if latest else None)
+    return {
+        "cadence": cadence,
+        "cadence_label": cadence_label(cadence),
+        "next_auto_at": next_slot.isoformat(),
+    }
+
+
 def message_template(session: Session, key: str) -> str:
     return get_setting_value(session, key)
 
@@ -456,6 +545,7 @@ def reminder_meta(
     lease: Lease,
     due_date: date | None,
     *,
+    template_key: str | None = None,
     rent_charge_id: int | None = None,
     utility_line_id: int | None = None,
 ) -> dict[str, Any]:
@@ -472,6 +562,7 @@ def reminder_meta(
         block_reason = "старый долг до запуска"
     elif not auto_enabled:
         block_reason = "авто выключено"
+    schedule = reminder_schedule_meta(session, template_key, latest) if session and template_key else None
     return {
         "linked": bool(chat_id),
         "auto_enabled": auto_enabled,
@@ -479,6 +570,7 @@ def reminder_meta(
         "cutoff_date": cutoff.isoformat(),
         "block_reason": block_reason,
         "latest": serialize_message_log(latest),
+        "schedule": schedule,
     }
 
 
@@ -640,6 +732,7 @@ def serialize_payment_receipt(receipt: PaymentReceipt, session: Session) -> dict
 
 def serialize_rent_charge(charge: RentCharge, session: Session | None = None) -> dict[str, Any]:
     update_rent_charge_status(charge)
+    reminder_template_key = "message_rent_due" if charge.status == "pending" and charge.due_date == date.today() else "message_rent_overdue"
     deferral_days_left = None
     if charge.deferral_until:
         deferral_days_left = max((charge.deferral_until - date.today()).days, 0)
@@ -668,7 +761,13 @@ def serialize_rent_charge(charge: RentCharge, session: Session | None = None) ->
         "deferral_until": charge.deferral_until.isoformat() if charge.deferral_until else None,
         "deferral_days_left": deferral_days_left,
         "deferral_note": charge.deferral_note,
-        "reminder": reminder_meta(session, charge.lease, charge.due_date, rent_charge_id=charge.id),
+        "reminder": reminder_meta(
+            session,
+            charge.lease,
+            charge.due_date,
+            template_key=reminder_template_key,
+            rent_charge_id=charge.id,
+        ),
     }
 
 
@@ -726,7 +825,13 @@ def serialize_bill_line(line: UtilityBillLine, session: Session | None = None) -
         "bill_period_start": line.bill.period_start.isoformat(),
         "bill_period_end": line.bill.period_end.isoformat(),
         "bill_period_label": f"{line.bill.period_start:%d.%m.%Y} -> {line.bill.period_end:%d.%m.%Y} ({(line.bill.period_end - line.bill.period_start).days} дн.)",
-        "reminder": reminder_meta(session, line.lease, line.due_date, utility_line_id=line.id) if line.lease else None,
+        "reminder": reminder_meta(
+            session,
+            line.lease,
+            line.due_date,
+            template_key="message_utility_bill",
+            utility_line_id=line.id,
+        ) if line.lease else None,
     }
 
 
@@ -1055,6 +1160,11 @@ def build_dashboard(session: Session) -> dict[str, Any]:
         for line in utility_lines
         if line.status == "partial" and utility_debt(line) > 0 and debt_visible_by_cutoff(line.due_date, cutoff)
     ]
+    issued_utilities = [
+        serialize_bill_line(line, session)
+        for line in utility_lines
+        if line.status == "issued" and utility_debt(line) > 0 and debt_visible_by_cutoff(line.due_date, cutoff)
+    ]
 
     pending_expenses = session.scalars(
         select(Expense).where(Expense.source_funds == "personal", Expense.compensation_status != "compensated")
@@ -1093,6 +1203,7 @@ def build_dashboard(session: Session) -> dict[str, Any]:
         "rent_deferred": deferred,
         "utility_overdue": overdue_utilities,
         "utility_partial": partial_utilities,
+        "utility_issued": issued_utilities,
         "pending_personal_expenses": [serialize_expense(expense) for expense in pending_expenses],
         "stale_readings": stale_readings,
         "provider_debts": provider_debts,
@@ -1161,6 +1272,21 @@ def outstanding_utility_lines(
     return result
 
 
+def issued_utility_lines(
+    session: Session,
+    lease: Lease,
+    cutoff: date | None = None,
+) -> list[UtilityBillLine]:
+    result: list[UtilityBillLine] = []
+    lines = session.scalars(select(UtilityBillLine).where(UtilityBillLine.lease_id == lease.id)).all()
+    for line in sorted(lines, key=lambda item: (item.due_date or date.max, item.id)):
+        update_utility_line_status(line)
+        debt = max(0.0, line.total_amount - line.paid_amount)
+        if debt > 0.009 and line.status == "issued" and debt_visible_by_cutoff(line.due_date, cutoff):
+            result.append(line)
+    return result
+
+
 def debt_month_heading(value: date | None) -> str:
     if not value:
         return ""
@@ -1192,6 +1318,18 @@ def rent_debt_bullet(charge: RentCharge) -> str:
     if personal_paid:
         return f"неполная оплата аренды. ИП оплачено, по номеру телефона не хватает {money_text(personal_left)}."
     return "неполная оплата аренды. ИП оплачено, перевод по номеру телефона не поступил."
+
+
+def rent_channel_summary_text(charge: RentCharge) -> str:
+    ip_done = money(charge.ip_paid) + 0.009 >= money(charge.ip_due)
+    personal_done = money(charge.personal_paid) + 0.009 >= money(charge.personal_due)
+    if ip_done and personal_done:
+        return "всё оплачено"
+    if ip_done and not personal_done:
+        return "ИП оплачен, перевод нет"
+    if not ip_done and personal_done:
+        return "ИП нет, перевод оплачен"
+    return "ИП нет, перевода нет"
 
 
 def utility_debt_bullet(lines: list[UtilityBillLine]) -> str:
@@ -1393,8 +1531,11 @@ def render_message_text(
 
 def serialize_message_target(session: Session, lease: Lease) -> dict[str, Any]:
     cutoff = configured_notification_cutoff_date(session)
+    today = date.today()
     charge = first_open_rent_charge(lease, cutoff)
     line = first_open_utility_line(session, lease, cutoff)
+    rent_issues = outstanding_rent_charges(lease, today, cutoff)
+    utility_issues = [*outstanding_utility_lines(session, lease, today, cutoff), *issued_utility_lines(session, lease, cutoff)]
     rent_debt = money(max(0.0, (charge.ip_due - charge.ip_paid) if charge else 0.0) + max(0.0, (charge.personal_due - charge.personal_paid) if charge else 0.0))
     utility_debt = money(max(0.0, (line.total_amount - line.paid_amount) if line else 0.0))
     return {
@@ -1408,11 +1549,46 @@ def serialize_message_target(session: Session, lease: Lease) -> dict[str, Any]:
         "rent_charge_id": charge.id if charge else None,
         "rent_status": charge.status if charge else "",
         "rent_debt": rent_debt,
-        "rent_reminder": reminder_meta(session, lease, charge.due_date, rent_charge_id=charge.id) if charge else None,
+        "rent_reminder": reminder_meta(
+            session,
+            lease,
+            charge.due_date,
+            template_key="message_rent_overdue",
+            rent_charge_id=charge.id,
+        ) if charge else None,
         "utility_line_id": line.id if line else None,
         "utility_status": line.status if line else "",
         "utility_debt": utility_debt,
-        "utility_reminder": reminder_meta(session, lease, line.due_date, utility_line_id=line.id) if line else None,
+        "utility_reminder": reminder_meta(
+            session,
+            lease,
+            line.due_date,
+            template_key="message_utility_bill",
+            utility_line_id=line.id,
+        ) if line else None,
+        "rent_items": [
+            {
+                "id": item.id,
+                "status": item.status,
+                "due_date": item.due_date.isoformat(),
+                "label": debt_month_heading(item.due_date),
+                "debt": money(max(0.0, item.ip_due - item.ip_paid) + max(0.0, item.personal_due - item.personal_paid)),
+                "channel_summary": rent_channel_summary_text(item),
+            }
+            for item in rent_issues
+        ],
+        "utility_items": [
+            {
+                "id": item.id,
+                "status": item.status,
+                "due_date": item.due_date.isoformat() if item.due_date else "",
+                "label": f"ком. услуги {item.bill.period_start:%d.%m.%Y} -> {item.bill.period_end:%d.%m.%Y}",
+                "debt": money(max(0.0, item.total_amount - item.paid_amount)),
+                "service": item.bill.service.name,
+                "period_label": f"{item.bill.period_start:%d.%m.%Y} -> {item.bill.period_end:%d.%m.%Y}",
+            }
+            for item in utility_issues
+        ],
         "all_debt_total": money(rent_debt + utility_debt),
     }
 
@@ -1560,6 +1736,7 @@ def reminder_sent_today(
 
 def run_due_reminders(session: Session, today: date | None = None) -> dict[str, Any]:
     today = today or date.today()
+    now = local_now()
     cutoff = notification_cutoff_date(session)
     if not notifications_enabled(session):
         return {
@@ -1606,7 +1783,8 @@ def run_due_reminders(session: Session, today: date | None = None) -> dict[str, 
             template_key = "message_rent_overdue"
         if not template_key:
             continue
-        if reminder_sent_today(session, template_key, rent_charge_id=charge.id, today=today):
+        latest = latest_message_log(session, rent_charge_id=charge.id)
+        if not cadence_allows_send(reminder_cadence(session, template_key), latest.created_at if latest else None, now):
             summary["skipped_duplicate"] += 1
             continue
         try:
@@ -1634,7 +1812,8 @@ def run_due_reminders(session: Session, today: date | None = None) -> dict[str, 
             continue
         if not (line.status in {"issued", "overdue", "partial"} and line.due_date <= today):
             continue
-        if reminder_sent_today(session, "message_utility_bill", utility_line_id=line.id, today=today):
+        latest = latest_message_log(session, utility_line_id=line.id)
+        if not cadence_allows_send(reminder_cadence(session, "message_utility_bill"), latest.created_at if latest else None, now):
             summary["skipped_duplicate"] += 1
             continue
         try:
@@ -2184,6 +2363,7 @@ def tenant_help_text() -> str:
             "• принять чек PDF документом и попытаться зачесть его автоматически;",
             "• если что-то не понял — передать чек владельцу на ручную проверку;",
             "• показать реквизиты по кнопке «Реквизиты» или по команде /requisites;",
+            "• показать все текущие долги по кнопке «Все долги» или по команде /debts;",
             "• подтвердить, что чек уже был получен, чтобы не крутить один и тот же документ по кругу.",
         ]
     )
@@ -2263,6 +2443,20 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
             )
         else:
             send_telegram_text(session, chat_id, "Реквизиты доступны только для привязанных жильцов.")
+        return
+
+    if command == "/debts" or text.lower() == "все долги":
+        if linked_lease:
+            send_telegram_text(
+                session,
+                chat_id,
+                render_message_text(session, "message_all_debts", linked_lease),
+                tenant_keyboard(),
+            )
+        elif is_owner:
+            send_telegram_text(session, chat_id, "Команда /debts работает для привязанного чата жильца. У тебя для этого есть пульт, а зачем ещё кружить.")
+        else:
+            send_telegram_text(session, chat_id, "Сначала привяжи чат через @username в базе и /start.")
         return
 
     # Обработка файлов от жильцов - до проверки owner_id
@@ -2751,6 +2945,13 @@ def ensure_rent_charge_for_month(session: Session, lease: Lease, year: int, mont
     return charge
 
 
+def ensure_utility_line_target(session: Session, lease: Lease, line_id: int) -> UtilityBillLine:
+    line = session.get(UtilityBillLine, line_id)
+    if not line or line.lease_id != lease.id:
+        raise HTTPException(404, "Коммунальный счёт не найден")
+    return line
+
+
 @app.post("/api/payment-receipts/manual")
 def create_manual_payment(payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
     lease = session.get(Lease, int(payload.get("lease_id") or 0))
@@ -2769,9 +2970,29 @@ def create_manual_payment(payload: dict[str, Any], session: Session = Depends(ge
         channel = (payload.get("channel") or "").strip()
         if channel not in {"ip", "personal"}:
             raise HTTPException(400, "для аренды нужен канал ip или personal")
+        target_charge_id = int(payload.get("rent_charge_id") or 0)
         target_month = int(payload.get("target_month") or 0)
         target_year = int(payload.get("target_year") or date.today().year)
-        if target_month:
+        if target_charge_id:
+            target_charge = session.get(RentCharge, target_charge_id)
+            if not target_charge or target_charge.lease_id != lease.id:
+                raise HTTPException(404, "Арендный месяц не найден")
+            receipt = PaymentReceipt(
+                lease_id=lease.id,
+                rent_charge_id=target_charge.id,
+                apartment_id=lease.apartment_id,
+                amount=amount,
+                channel=channel,
+                paid_at=paid_at,
+                source=source,
+                status="accepted",
+                notes=notes or "ручной платёж",
+            )
+            session.add(receipt)
+            session.flush()
+            recalculate_lease_balances(session, lease.id)
+            receipts = [receipt]
+        elif target_month:
             target_charge = ensure_rent_charge_for_month(session, lease, target_year, target_month)
             receipt = PaymentReceipt(
                 lease_id=lease.id,
@@ -2801,16 +3022,35 @@ def create_manual_payment(payload: dict[str, Any], session: Session = Depends(ge
                 exact_only=False,
             )
     elif kind == "utility":
-        receipts = create_utility_receipts(
-            session,
-            lease,
-            amount,
-            paid_at=paid_at,
-            source=source,
-            status="accepted",
-            notes=notes or "ручной платёж",
-            exact_only=False,
-        )
+        target_line_id = int(payload.get("utility_line_id") or 0)
+        if target_line_id:
+            target_line = ensure_utility_line_target(session, lease, target_line_id)
+            receipt = PaymentReceipt(
+                lease_id=lease.id,
+                utility_line_id=target_line.id,
+                apartment_id=lease.apartment_id,
+                amount=amount,
+                channel="utilities",
+                paid_at=paid_at,
+                source=source,
+                status="accepted",
+                notes=notes or "ручной платёж",
+            )
+            session.add(receipt)
+            session.flush()
+            recalculate_lease_balances(session, lease.id)
+            receipts = [receipt]
+        else:
+            receipts = create_utility_receipts(
+                session,
+                lease,
+                amount,
+                paid_at=paid_at,
+                source=source,
+                status="accepted",
+                notes=notes or "ручной платёж",
+                exact_only=False,
+            )
     else:
         raise HTTPException(400, "тип ручного платежа должен быть rent или utility")
 

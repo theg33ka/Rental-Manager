@@ -550,6 +550,59 @@ class DashboardCutoffTests(DatabaseTestCase):
         self.assertEqual(dashboard["rent_overdue"][0]["due_date"], "2026-01-14")
 
 
+
+class DashboardIssuedUtilityTests(DatabaseTestCase):
+    def test_dashboard_includes_issued_utility_lines(self) -> None:
+        with self.seed() as session:
+            service = session.scalar(select(UtilityService).where(UtilityService.kind == "electricity"))
+            apartment = service.object.apartments[0]
+            tenant = Tenant(full_name="Жилец с выставленной коммуналкой")
+            session.add(tenant)
+            session.flush()
+
+            lease = Lease(
+                apartment_id=apartment.id,
+                tenant_id=tenant.id,
+                start_date=date(2026, 4, 1),
+                payment_day=14,
+                ip_amount=20000,
+                personal_amount=3000,
+            )
+            session.add(lease)
+            session.flush()
+
+            bill = UtilityBill(
+                service_id=service.id,
+                period_start=date(2026, 4, 1),
+                period_end=date(2026, 4, 20),
+                status="issued",
+                total_consumption=0,
+                apartment_consumption=0,
+                odn_consumption=0,
+                total_cost=1800,
+                average_unit_price=0,
+                due_date=date(2026, 4, 27),
+            )
+            bill.lines.append(
+                UtilityBillLine(
+                    apartment_id=apartment.id,
+                    lease_id=lease.id,
+                    total_amount=1800,
+                    paid_amount=0,
+                    status="issued",
+                    due_date=date(2026, 4, 27),
+                    note="01.04.2026 -> 20.04.2026 (19 дн.)",
+                )
+            )
+            session.add(bill)
+            session.commit()
+
+            dashboard = build_dashboard(session)
+
+        self.assertEqual(len(dashboard["utility_issued"]), 1)
+        self.assertEqual(dashboard["utility_issued"][0]["tenant"], "Жилец с выставленной коммуналкой")
+
+
 class StatusHelperTests(unittest.TestCase):
     def test_amount_statuses(self) -> None:
         self.assertEqual(status_for_amount(100, 0), "pending")

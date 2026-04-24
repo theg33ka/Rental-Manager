@@ -24,6 +24,27 @@
   --critical-bg: #f0c5cf;
   --critical-ink: #5b0715;
   --critical-muted: #7d2737;
+  --rent-critical-border: #6c0f1b;
+  --rent-critical-bg: #3a0e15;
+  --rent-critical-ink: #fff2f4;
+  --utility-overdue-border: #c62828;
+  --utility-overdue-bg: #3b1111;
+  --utility-overdue-ink: #ffe7e7;
+  --utility-partial-border: #6f42c1;
+  --utility-partial-bg: #241337;
+  --utility-partial-ink: #f2e8ff;
+  --utility-issued-border: #d05a8b;
+  --utility-issued-bg: #3b1728;
+  --utility-issued-ink: #ffe8f2;
+  --provider-border: #d97706;
+  --provider-bg: #35210b;
+  --provider-ink: #fff2db;
+  --reading-border: #2563eb;
+  --reading-bg: #101f3c;
+  --reading-ink: #e8f1ff;
+  --receipt-border: #b98719;
+  --receipt-bg: #352c0d;
+  --receipt-ink: #fff6dc;
   --radius: 8px;
   --shadow: 0 10px 26px rgba(35, 31, 24, 0.09);
   --telegram: #229ed9;
@@ -789,6 +810,185 @@ td.actions .button {
 #toast.show {
   opacity: 1;
   transform: translateY(0);
+}
+
+.attention-card.rent-critical {
+  border-left-color: var(--rent-critical-border);
+  background: var(--rent-critical-bg);
+  color: var(--rent-critical-ink);
+}
+
+.attention-card.utility-overdue {
+  border-left-color: var(--utility-overdue-border);
+  background: var(--utility-overdue-bg);
+  color: var(--utility-overdue-ink);
+}
+
+.attention-card.utility-partial {
+  border-left-color: var(--utility-partial-border);
+  background: var(--utility-partial-bg);
+  color: var(--utility-partial-ink);
+}
+
+.attention-card.utility-issued {
+  border-left-color: var(--utility-issued-border);
+  background: var(--utility-issued-bg);
+  color: var(--utility-issued-ink);
+}
+
+.attention-card.provider {
+  border-left-color: var(--provider-border);
+  background: var(--provider-bg);
+  color: var(--provider-ink);
+}
+
+.attention-card.reading {
+  border-left-color: var(--reading-border);
+  background: var(--reading-bg);
+  color: var(--reading-ink);
+}
+
+.attention-card.receipt {
+  border-left-color: var(--receipt-border);
+  background: var(--receipt-bg);
+  color: var(--receipt-ink);
+}
+
+.attention-card.rent-critical .muted,
+.attention-card.utility-overdue .muted,
+.attention-card.utility-partial .muted,
+.attention-card.utility-issued .muted,
+.attention-card.provider .muted,
+.attention-card.reading .muted,
+.attention-card.receipt .muted {
+  color: color-mix(in srgb, currentColor 72%, transparent);
+}
+
+.attention-issue-list {
+  display: grid;
+  gap: 8px;
+}
+
+.attention-issue {
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+.attention-issue strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 13px;
+}
+
+.attention-issue--rent-overdue,
+.attention-issue--rent-partial,
+.attention-issue--rent-today,
+.attention-issue--rent-deferred {
+  color: var(--rent-critical-ink);
+}
+
+.attention-issue--utility-overdue {
+  color: var(--utility-overdue-ink);
+}
+
+.attention-issue--utility-partial {
+  color: var(--utility-partial-ink);
+}
+
+.attention-issue--utility-issued {
+  color: var(--utility-issued-ink);
+}
+
+.attention-card__copy p.attention-lead {
+  padding-top: 0;
+  border-top: 0;
+  font-weight: 600;
+}
+
+.attention-card__panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+}
+
+.attention-card__panel p,
+.attention-card__panel strong {
+  margin: 0;
+}
+
+.attention-card__panel ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.attention-card__footer {
+  display: grid;
+  gap: 10px;
+  margin-top: auto;
+}
+
+.attention-card__footer-actions,
+.attention-card__footer-primary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.attention-card__footer-primary .primary {
+  min-width: 160px;
+}
+
+.automation-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.automation-card {
+  padding: 14px;
+}
+
+.automation-card__rows {
+  display: grid;
+  gap: 8px;
+}
+
+.automation-card__row {
+  display: grid;
+  grid-template-columns: minmax(140px, 200px) 1fr;
+  gap: 10px;
+}
+
+.modal-shell {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(6, 10, 18, 0.62);
+}
+
+.modal-card {
+  width: min(720px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  display: grid;
+  gap: 14px;
+}
+
+.modal-card h3,
+.modal-card p {
+  margin: 0;
 }
 
 @media (max-width: 860px) {

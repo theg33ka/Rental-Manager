@@ -22,6 +22,7 @@ class TelegramBotHelpersTests(unittest.TestCase):
             "rent_overdue": [1],
             "rent_partial": [1, 2, 3],
             "utility_overdue": [],
+            "utility_issued": [1, 2],
             "stale_readings": [1],
             "pending_personal_expenses": [1, 2],
             "suspicious_receipts": [],
@@ -30,6 +31,7 @@ class TelegramBotHelpersTests(unittest.TestCase):
 
         self.assertIn("Открытых месячных отчётов: 2", text)
         self.assertIn("Частичная аренда: 3", text)
+        self.assertIn("Выставленная коммуналка: 2", text)
 
     def test_build_reports_message_lists_open_reports(self) -> None:
         text = build_reports_message(
@@ -53,11 +55,11 @@ class TelegramBotHelpersTests(unittest.TestCase):
         self.assertIn({"command": "status", "description": "Сводка по пульту и долгам"}, commands)
         self.assertIn({"command": "reports", "description": "Открытые месячные отчёты"}, commands)
 
-
-    def test_tenant_keyboard_contains_requisites_button(self) -> None:
+    def test_tenant_keyboard_contains_requisites_and_debts_buttons(self) -> None:
         keyboard = tenant_keyboard()
 
         self.assertEqual(keyboard["keyboard"][0][0]["text"], "Реквизиты")
+        self.assertEqual(keyboard["keyboard"][1][0]["text"], "Все долги")
 
 
 if __name__ == "__main__":

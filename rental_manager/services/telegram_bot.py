@@ -23,6 +23,7 @@ def build_status_message(dashboard: dict[str, Any]) -> str:
         f"• Просроченная аренда: {len(dashboard.get('rent_overdue', []))}",
         f"• Частичная аренда: {len(dashboard.get('rent_partial', []))}",
         f"• Просроченная коммуналка: {len(dashboard.get('utility_overdue', []))}",
+        f"• Выставленная коммуналка: {len(dashboard.get('utility_issued', []))}",
         f"• Показания давно не передавались: {len(dashboard.get('stale_readings', []))}",
         f"• Личные расходы ждут компенсации: {len(dashboard.get('pending_personal_expenses', []))}",
         f"• Подозрительные чеки: {len(dashboard.get('suspicious_receipts', []))}",
@@ -64,6 +65,7 @@ def tenant_keyboard() -> dict[str, Any]:
     return {
         "keyboard": [
             [{"text": "Реквизиты"}],
+            [{"text": "Все долги"}],
             [{"text": "/help"}],
         ],
         "resize_keyboard": True,
