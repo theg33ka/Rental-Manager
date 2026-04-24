@@ -33,6 +33,12 @@ const today = () => new Date().toISOString().slice(0, 10);
 const monthNames = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
 const monthNamesNominative = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"];
 
+function localDateTimeNow() {
+  const now = new Date();
+  const shifted = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
+  return shifted.toISOString().slice(0, 16);
+}
+
 function qs(selector, root = document) {
   return root.querySelector(selector);
 }
@@ -255,6 +261,9 @@ function hydrateForms() {
   const apartments = allApartments();
   const vacantApartments = apartments.filter((apartment) => !apartment.active_lease_id);
   const services = state.bootstrap.services;
+  const activeLeases = [...state.bootstrap.leases]
+    .filter((lease) => lease.active)
+    .sort((left, right) => `${left.object} ${left.apartment} ${left.tenant}`.localeCompare(`${right.object} ${right.apartment} ${right.tenant}`, "ru"));
   qsa('select[name="apartment_id"]').forEach((select) => {
     if (select.closest("#onboardForm")) {
       setOptions(select, vacantApartments, (a) => `${a.object_name}: ${a.name}`);
@@ -269,10 +278,15 @@ function hydrateForms() {
   qsa('select[name="object_id"]').forEach((select) => setOptions(select, state.bootstrap.objects, (o) => o.name, true));
   qsa('select[name="meter_id"]').forEach((select) => setOptions(select, state.bootstrap.meters, (m) => `${m.object}: ${m.name}`));
   qsa('select[name="service_id"]').forEach((select) => setOptions(select, services, (s) => `${s.object}: ${s.name}`));
+  qsa('select[name="lease_id"]').forEach((select) => setOptions(select, activeLeases, (lease) => `${lease.object}: ${lease.apartment} — ${lease.tenant}`));
   const dateInputs = qsa('input[type="date"]');
   dateInputs.forEach((input) => {
     if (!input.value) input.value = today();
   });
+  const paidAtInput = qs("#manualPaymentPaidAtInput");
+  if (paidAtInput && !paidAtInput.value) {
+    paidAtInput.value = localDateTimeNow();
+  }
   setReportLinks();
 }
 
@@ -386,7 +400,16 @@ function compactReminderText(reminder) {
 }
 
 function attentionCard(type, title, text, actions, badges) {
-  return `<article class="attention-card ${type}"><div class="pill-row">${badges || ""}</div><h3>${title}</h3><p>${text}</p><div class="attention-actions">${actions || ""}</div></article>`;
+  return `
+    <article class="attention-card ${type}">
+      <div class="pill-row attention-card__badges">${badges || ""}</div>
+      <div class="attention-card__body">
+        <h3>${title}</h3>
+        <p>${text}</p>
+      </div>
+      <div class="attention-actions">${actions || ""}</div>
+    </article>
+  `;
 }
 
 function renderObjects() {
@@ -442,8 +465,8 @@ function rentActions(charge) {
   const ipLeft = Math.max(0, charge.ip_due - charge.ip_paid);
   const personalLeft = Math.max(0, charge.personal_due - charge.personal_paid);
   return `
-    ${ipLeft > 0 ? `<button class="mini primary" onclick="payRent(${charge.id}, 'ip', ${ipLeft})">ИП оплачено</button>` : ""}
-    ${personalLeft > 0 ? `<button class="mini primary" onclick="payRent(${charge.id}, 'personal', ${personalLeft})">Личный оплачено</button>` : ""}
+    ${ipLeft > 0 ? `<button class="mini primary" onclick="payRent(${charge.id}, 'ip', ${ipLeft})">ИП подтверждён</button>` : ""}
+    ${personalLeft > 0 ? `<button class="mini primary" onclick="payRent(${charge.id}, 'personal', ${personalLeft})">Перевод подтверждён</button>` : ""}
     <button class="mini" onclick="deferRent(${charge.id})">Отсрочка</button>
     <button class="mini" onclick="openPaymentHistory(${charge.lease_id})">История</button>
   `;
@@ -476,6 +499,7 @@ function renderRentHistory() {
       <td>${formatDateTime(receipt.paid_at)}</td>
       <td>${money(receipt.amount)}</td>
       <td>${receipt.channel}</td>
+      <td>${receipt.source || "manual"}</td>
       <td>${receipt.target_label || '<span class="muted">не привязан</span>'}</td>
       <td>${statusPill(receipt.status)}</td>
       <td>${receipt.notes || ""}</td>
@@ -494,7 +518,11 @@ function renderRentHistory() {
         </div>
         <button class="mini" type="button" onclick="closePaymentHistory()">Скрыть</button>
       </div>
-      <div class="table-wrap">${table(["Оплачен", "Сумма", "Канал", "За что зачтён", "Статус", "Примечание", "Действия"], rows)}</div>
+      <div class="pill-row">
+        <span class="pill">Жилец: ${state.paymentHistory.tenant}</span>
+        <span class="pill">Квартира: ${state.paymentHistory.apartment}</span>
+      </div>
+      <div class="table-wrap">${table(["Оплачен", "Сумма", "Канал", "Источник", "За что зачтён", "Статус", "Примечание", "Действия"], rows)}</div>
     </article>
   `;
 }
@@ -586,6 +614,36 @@ async function importBaseline() {
   if (!confirm("Импортировать данные из старой базы и перезаписать текущие demo-данные?")) return;
   const result = await api("/api/admin/import-release-baseline", { method: "POST", body: "{}" });
   toast(`Импорт завершён: жильцов ${result.tenants}, аренд ${result.leases}, платежей ${result.receipts}`);
+  await loadAll();
+}
+
+function updateManualPaymentKind() {
+  const kind = qs("#manualPaymentKindSelect")?.value || "rent";
+  const channelSelect = qs("#manualPaymentChannelSelect");
+  if (!channelSelect) return;
+  channelSelect.disabled = kind !== "rent";
+  if (kind !== "rent") {
+    channelSelect.value = "personal";
+  }
+}
+
+async function submitManualPayment(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const payload = formData(form);
+  if (payload.kind !== "rent") {
+    delete payload.channel;
+  }
+  payload.amount = Number(payload.amount);
+  await api("/api/payment-receipts/manual", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  form.reset();
+  const paidAtInput = qs("#manualPaymentPaidAtInput");
+  if (paidAtInput) paidAtInput.value = localDateTimeNow();
+  updateManualPaymentKind();
+  toast("Ручной платёж сохранён");
   await loadAll();
 }
 
@@ -743,6 +801,7 @@ function renderMessages() {
     </tr>
   `).join("");
   root.innerHTML = table(["Объект", "Квартира", "Жилец", "Связка", "Аренда", "Коммуналка", "Действия"], rows);
+  updateManualPaymentKind();
 }
 
 function table(headers, rows) {
@@ -995,6 +1054,8 @@ function bindEvents() {
   qs("#refreshBtn").addEventListener("click", loadAll);
   qs("#runRemindersBtn").addEventListener("click", runRemindersNow);
   qs("#importBaselineBtn")?.addEventListener("click", importBaseline);
+  qs("#manualPaymentForm")?.addEventListener("submit", submitManualPayment);
+  qs("#manualPaymentKindSelect")?.addEventListener("change", updateManualPaymentKind);
   qs("#openTariffsBtn").addEventListener("click", () => {
     const tab = qs('.tab[data-tab="tariffs"]');
     if (tab) tab.click();

@@ -12,6 +12,7 @@ from sqlalchemy.orm import sessionmaker
 from rental_manager.database import Base
 from rental_manager.models import Apartment, Lease, Meter, MeterReading, RentalObject, Tenant, UtilityService
 from rental_manager.services.billing import (
+    LEGACY_IMPORT_MARK,
     allocate_odn,
     calculate_tiered_cost,
     calculate_utility_bill,
@@ -101,6 +102,26 @@ class RentScheduleTests(DatabaseTestCase):
         charge.deferral_until = date(2026, 4, 25)
 
         self.assertEqual(update_rent_charge_status(charge, today=date(2026, 4, 23)), "deferred")
+
+    def test_legacy_imported_rent_before_cutoff_does_not_require_phone_transfer(self) -> None:
+        tenant = Tenant(full_name="Legacy Tenant", notes=LEGACY_IMPORT_MARK)
+        lease = Lease(tenant=tenant, notes=LEGACY_IMPORT_MARK)
+        charge = self._charge(due_date=date(2026, 3, 14), ip_due=20000, personal_due=5000)
+        charge.lease = lease
+        charge.ip_paid = 20000
+
+        self.assertEqual(update_rent_charge_status(charge, today=date(2026, 4, 1)), "paid")
+        self.assertEqual(charge.personal_paid, 5000)
+
+    def test_current_rent_after_cutoff_still_requires_phone_transfer(self) -> None:
+        tenant = Tenant(full_name="Fresh Tenant", notes=LEGACY_IMPORT_MARK)
+        lease = Lease(tenant=tenant, notes=LEGACY_IMPORT_MARK)
+        charge = self._charge(due_date=date(2026, 4, 14), ip_due=20000, personal_due=5000)
+        charge.lease = lease
+        charge.ip_paid = 20000
+
+        self.assertEqual(update_rent_charge_status(charge, today=date(2026, 4, 15)), "partial")
+        self.assertEqual(float(charge.personal_paid or 0), 0.0)
 
     def test_full_months_lived_uses_payment_periods(self) -> None:
         lease = Lease(start_date=date(2026, 4, 14), payment_day=14)

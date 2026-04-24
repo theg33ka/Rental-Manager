@@ -1978,6 +1978,57 @@ def lease_payment_history(lease_id: int, session: Session = Depends(get_session)
     }
 
 
+@app.post("/api/payment-receipts/manual")
+def create_manual_payment(payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
+    lease = session.get(Lease, int(payload.get("lease_id") or 0))
+    if not lease:
+        raise HTTPException(404, "аренда не найдена")
+    amount = float(payload.get("amount") or 0)
+    if amount <= 0:
+        raise HTTPException(400, "сумма платежа должна быть больше нуля")
+
+    kind = (payload.get("kind") or "rent").strip()
+    source = (payload.get("source") or "manual").strip() or "manual"
+    paid_at = datetime.fromisoformat(payload["paid_at"]) if payload.get("paid_at") else utc_now()
+    notes = (payload.get("notes") or "").strip()
+
+    if kind == "rent":
+        channel = (payload.get("channel") or "").strip()
+        if channel not in {"ip", "personal"}:
+            raise HTTPException(400, "для аренды нужен канал ip или personal")
+        receipts = create_rent_receipts(
+            session,
+            lease,
+            channel,
+            amount,
+            paid_at=paid_at,
+            source=source,
+            status="accepted",
+            notes=notes or "ручной платёж",
+            exact_only=False,
+        )
+    elif kind == "utility":
+        receipts = create_utility_receipts(
+            session,
+            lease,
+            amount,
+            paid_at=paid_at,
+            source=source,
+            status="accepted",
+            notes=notes or "ручной платёж",
+            exact_only=False,
+        )
+    else:
+        raise HTTPException(400, "тип ручного платежа должен быть rent или utility")
+
+    session.commit()
+    return {
+        "ok": True,
+        "lease_id": lease.id,
+        "created": [serialize_payment_receipt(receipt, session) for receipt in receipts],
+    }
+
+
 @app.patch("/api/payment-receipts/{receipt_id}")
 def update_payment_receipt(receipt_id: int, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
     receipt = session.get(PaymentReceipt, receipt_id)

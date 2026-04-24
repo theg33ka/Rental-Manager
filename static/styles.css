@@ -462,26 +462,30 @@ section {
 
 .attention-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 14px;
 }
 
 .attention-card {
-  min-height: 172px;
-  padding: 14px;
+  min-height: 210px;
+  padding: 16px;
   border: 1px solid var(--line);
   border-left-width: 6px;
   border-radius: var(--radius);
   background: var(--surface);
   box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .attention-card h3 {
-  margin: 10px 0 8px;
+  margin: 0;
 }
 
 .attention-card p {
   margin: 0;
+  line-height: 1.45;
 }
 
 .attention-card.warn {
@@ -527,11 +531,27 @@ section {
   margin-top: 8px;
 }
 
+.attention-card__badges {
+  margin-top: 0;
+}
+
+.attention-card__body {
+  display: grid;
+  gap: 10px;
+}
+
+.attention-card__body p {
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+}
+
 .attention-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-top: 12px;
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
 }
 
 .pill {

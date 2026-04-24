@@ -203,6 +203,44 @@
           <p class="muted">{tenant_name}, {apartment}, {object}, {ip_due}, {personal_due}, {total_due}, {debt}, {rent_due_date}, {rent_period}, {utility_total}, {utility_due_date}, {period}, {utility_service}, {custom_text}, {amount}, {channel}, {receipt_status}, {receipt_summary}</p>
         </div>
         <div id="messageTargets" class="table-wrap"></div>
+        <div class="section-title">
+          <h2>Ручной контроль платежей</h2>
+          <span>Для налички, переводов с твоей карты и прочих жизненных кульбитов.</span>
+        </div>
+        <form id="manualPaymentForm" class="form-grid compact">
+          <label>Жилец
+            <select name="lease_id" id="manualPaymentLeaseSelect" required></select>
+          </label>
+          <label>Тип платежа
+            <select name="kind" id="manualPaymentKindSelect">
+              <option value="rent">Аренда</option>
+              <option value="utility">Коммуналка</option>
+            </select>
+          </label>
+          <label>Канал аренды
+            <select name="channel" id="manualPaymentChannelSelect">
+              <option value="personal">Перевод</option>
+              <option value="ip">ИП</option>
+            </select>
+          </label>
+          <label>Источник
+            <select name="source">
+              <option value="cash">Наличные</option>
+              <option value="owner_card">С моей карты</option>
+              <option value="manual">Ручная отметка</option>
+            </select>
+          </label>
+          <label>Дата и время
+            <input type="datetime-local" name="paid_at" id="manualPaymentPaidAtInput" />
+          </label>
+          <label>Сумма
+            <input type="number" min="0" step="0.01" name="amount" required />
+          </label>
+          <label class="wide">Комментарий
+            <textarea name="notes" rows="2" placeholder="Например: наличка, перевод с моей карты, взаимозачёт"></textarea>
+          </label>
+          <button class="primary wide" type="submit">Добавить платёж вручную</button>
+        </form>
         <div id="suspiciousReceiptsPanel" class="stack"></div>
 
         <div class="section-title">

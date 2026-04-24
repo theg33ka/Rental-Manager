@@ -20,6 +20,9 @@ from rental_manager.models import (
     UtilityService,
 )
 
+LEGACY_IMPORT_MARK = "SCREENSHOT_IMPORT"
+LEGACY_PERSONAL_IGNORE_BEFORE = date(2026, 4, 1)
+
 
 def parse_date(value: str | date | None, default: date | None = None) -> date:
     if value is None or value == "":
@@ -49,6 +52,7 @@ def status_for_amount(due: float, paid: float) -> str:
 
 def update_rent_charge_status(charge: RentCharge, today: date | None = None) -> str:
     today = today or date.today()
+    apply_legacy_personal_relief(charge)
     ip_status = status_for_amount(charge.ip_due, charge.ip_paid)
     personal_status = status_for_amount(charge.personal_due, charge.personal_paid)
     ip_paid = float(charge.ip_paid or 0)
@@ -65,6 +69,27 @@ def update_rent_charge_status(charge: RentCharge, today: date | None = None) -> 
     else:
         charge.status = "pending"
     return charge.status
+
+
+def is_legacy_imported_charge(charge: RentCharge) -> bool:
+    lease = getattr(charge, "lease", None)
+    if not lease:
+        return False
+    lease_notes = (lease.notes or "")
+    tenant_notes = (lease.tenant.notes or "") if lease.tenant else ""
+    return LEGACY_IMPORT_MARK in lease_notes or LEGACY_IMPORT_MARK in tenant_notes
+
+
+def apply_legacy_personal_relief(charge: RentCharge) -> None:
+    if charge.due_date >= LEGACY_PERSONAL_IGNORE_BEFORE:
+        return
+    if not is_legacy_imported_charge(charge):
+        return
+    if float(charge.ip_paid or 0) <= 0:
+        return
+    if float(charge.personal_due or 0) <= float(charge.personal_paid or 0):
+        return
+    charge.personal_paid = float(charge.personal_due or 0)
 
 
 def effective_due_date(year: int, month: int, payment_day: int) -> date:
