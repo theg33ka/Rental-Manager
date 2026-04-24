@@ -1836,20 +1836,22 @@ def send_telegram_text(session: Session, chat_id: int | str, text: str, keyboard
 
 def tenant_requisites_text(session: Session) -> str:
     settings = get_settings(session)
-    return "\n".join(
-        [
-            "Реквизиты для перевода на ИП:",
-            f"Наименование: {settings.get('ip_recipient_name') or 'не задано'}",
-            f"ИНН: {settings.get('ip_recipient_inn') or 'не задано'}",
-            f"ОГРНИП: {settings.get('ip_recipient_ogrnip') or 'не задано'}",
-            f"Расчётный счёт: {settings.get('ip_recipient_account') or 'не задано'}",
-            f"Банк: {settings.get('ip_recipient_bank') or 'не задано'}",
-            f"БИК банка: {settings.get('ip_recipient_bik') or 'не задано'}",
-            f"Корр. счёт банка: {settings.get('ip_recipient_correspondent_account') or 'не задано'}",
-            f"ИНН банка: {settings.get('ip_recipient_bank_inn') or 'не задано'}",
-            f"КПП банка: {settings.get('ip_recipient_bank_kpp') or 'не задано'}",
-        ]
-    )
+    lines = [
+        "Реквизиты для перевода на ИП:",
+        f"Наименование: {settings.get('ip_recipient_name') or 'не задано'}",
+        f"ИНН: {settings.get('ip_recipient_inn') or 'не задано'}",
+        f"ОГРНИП: {settings.get('ip_recipient_ogrnip') or 'не задано'}",
+        f"Расчётный счёт: {settings.get('ip_recipient_account') or 'не задано'}",
+        f"Банк: {settings.get('ip_recipient_bank') or 'не задано'}",
+        f"БИК банка: {settings.get('ip_recipient_bik') or 'не задано'}",
+        f"Корр. счёт банка: {settings.get('ip_recipient_correspondent_account') or 'не задано'}",
+        f"ИНН банка: {settings.get('ip_recipient_bank_inn') or 'не задано'}",
+        f"КПП банка: {settings.get('ip_recipient_bank_kpp') or 'не задано'}",
+        "",
+        "Реквизиты для перевода по номеру телефона (доп. платёж):",
+        "89133854441 Сбербанк Эрнест К.",
+    ]
+    return "\n".join(lines)
 
 
 def tenant_help_text() -> str:
@@ -1925,12 +1927,16 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
         return
 
     if command == "/requisites" or text.lower() == "реквизиты":
-        send_telegram_text(
-            session,
-            chat_id,
-            tenant_requisites_text(session),
-            tenant_keyboard() if not is_owner else app_keyboard(base_url),
-        )
+        # Показываем реквизиты только владельцу или привязанным жильцам
+        if is_owner or linked_lease:
+            send_telegram_text(
+                session,
+                chat_id,
+                tenant_requisites_text(session),
+                tenant_keyboard() if not is_owner else app_keyboard(base_url),
+            )
+        else:
+            send_telegram_text(session, chat_id, "Реквизиты доступны только для привязанных жильцов.")
         return
 
     if not owner_id:
