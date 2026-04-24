@@ -1888,6 +1888,9 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
     if not chat_id:
         return
 
+    # DEBUG
+    print(f"[TELEGRAM] message from chat_id={chat_id}, has_document={bool(message.get('document'))}, has_photo={bool(message.get('photo'))}")
+
     linked_lease = maybe_link_tenant_chat(session, message)
     text = (message.get("text") or "").strip()
     command, _args = parse_command(text)
@@ -1941,6 +1944,7 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
 
     # Обработка файлов от жильцов - до проверки owner_id
     if not is_owner and (message.get("document") or message.get("photo")):
+        print(f"[TELEGRAM] handling document from chat_id={chat_id}, linked_lease={linked_lease}")
         handle_tenant_receipt_message(session, message, linked_lease)
         return
 
