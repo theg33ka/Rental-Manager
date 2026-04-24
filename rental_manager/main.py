@@ -907,17 +907,23 @@ def build_dashboard(session: Session) -> dict[str, Any]:
     for line in utility_lines:
         update_utility_line_status(line, today)
 
-    overdue_rent = [serialize_rent_charge(charge, session) for charge in charges if charge.status == "overdue"]
-    partial_rent = [serialize_rent_charge(charge, session) for charge in charges if charge.status == "partial"]
-    today_rent = [serialize_rent_charge(charge, session) for charge in charges if charge.due_date == today and charge.status not in {"paid", "paid_ahead"}]
+    def rent_debt(charge: RentCharge) -> float:
+        return money(max(0, float(charge.ip_due or 0) - float(charge.ip_paid or 0)) + max(0, float(charge.personal_due or 0) - float(charge.personal_paid or 0)))
+
+    def utility_debt(line: UtilityBillLine) -> float:
+        return money(max(0, float(line.total_amount or 0) - float(line.paid_amount or 0)))
+
+    overdue_rent = [serialize_rent_charge(charge, session) for charge in charges if charge.status == "overdue" and rent_debt(charge) > 0]
+    partial_rent = [serialize_rent_charge(charge, session) for charge in charges if charge.status == "partial" and rent_debt(charge) > 0]
+    today_rent = [serialize_rent_charge(charge, session) for charge in charges if charge.due_date == today and charge.status not in {"paid", "paid_ahead"} and rent_debt(charge) > 0]
     deferred = [
         serialize_rent_charge(charge, session)
         for charge in charges
-        if charge.status == "deferred" and charge.deferral_until and charge.deferral_until <= today + timedelta(days=2)
+        if charge.status == "deferred" and charge.deferral_until and charge.deferral_until <= today + timedelta(days=2) and rent_debt(charge) > 0
     ]
 
-    overdue_utilities = [serialize_bill_line(line, session) for line in utility_lines if line.status == "overdue"]
-    partial_utilities = [serialize_bill_line(line, session) for line in utility_lines if line.status == "partial"]
+    overdue_utilities = [serialize_bill_line(line, session) for line in utility_lines if line.status == "overdue" and utility_debt(line) > 0]
+    partial_utilities = [serialize_bill_line(line, session) for line in utility_lines if line.status == "partial" and utility_debt(line) > 0]
 
     pending_expenses = session.scalars(
         select(Expense).where(Expense.source_funds == "personal", Expense.compensation_status != "compensated")
