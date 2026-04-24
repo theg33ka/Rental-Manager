@@ -98,8 +98,23 @@ function setOptions(select, items, getLabel, includeEmpty = false) {
   });
 }
 
+function setValueOptions(select, values, getLabel, placeholder = "Не выбрано") {
+  select.innerHTML = "";
+  select.append(new Option(placeholder, ""));
+  values.forEach((value) => {
+    select.append(new Option(getLabel(value), value));
+  });
+}
+
 function allApartments() {
   return state.bootstrap.objects.flatMap((object) => object.apartments.map((apartment) => ({ ...apartment, object_name: object.name })));
+}
+
+function utilityReadingDates(serviceId) {
+  const dates = state.utilityTimeline
+    .filter((event) => event.kind === "reading" && Number(event.service_id) === Number(serviceId))
+    .map((event) => event.date);
+  return [...new Set(dates)].sort();
 }
 
 function editingLease() {
@@ -317,6 +332,7 @@ function hydrateForms() {
     const input = qs(`#${id}`);
     if (input && !input.value) input.value = value;
   });
+  updateUtilityPeriodControls();
   const cancelBtn = qs("#cancelLeaseEditBtn");
   const submitBtn = qs("#onboardSubmitBtn");
   if (cancelBtn) cancelBtn.hidden = !state.editingLeaseId;
@@ -668,7 +684,7 @@ function renderRentHistory() {
       <td>${formatDateTime(receipt.paid_at)}</td>
       <td>${money(receipt.amount)}</td>
       <td>${receipt.channel}</td>
-      <td>${receipt.source || "manual"}</td>
+      <td>${receipt.source_label || receipt.source || "manual"}</td>
       <td>${receipt.target_label || '<span class="muted">не привязан</span>'}</td>
       <td>${statusPill(receipt.status)}</td>
       <td>${receipt.notes || ""}</td>
@@ -859,6 +875,57 @@ function renderQuickReadingFields() {
   }).join("");
 }
 
+function syncUtilityPeriodInputs() {
+  const form = qs("#utilityCalcForm");
+  if (!form) return;
+  const allowEstimate = Boolean(form.elements.allow_estimate.checked);
+  const startInput = qs("#utilityPeriodStartInput");
+  const endInput = qs("#utilityPeriodEndInput");
+  const startSelect = qs("#utilityPeriodStartSelect");
+  const endSelect = qs("#utilityPeriodEndSelect");
+  if (!startInput || !endInput || !startSelect || !endSelect) return;
+  if (!allowEstimate) {
+    startInput.value = startSelect.value || "";
+    endInput.value = endSelect.value || "";
+  }
+}
+
+function updateUtilityPeriodControls() {
+  const form = qs("#utilityCalcForm");
+  if (!form) return;
+  const startInput = qs("#utilityPeriodStartInput");
+  const endInput = qs("#utilityPeriodEndInput");
+  const startSelect = qs("#utilityPeriodStartSelect");
+  const endSelect = qs("#utilityPeriodEndSelect");
+  if (!startInput || !endInput || !startSelect || !endSelect) return;
+
+  const allowEstimate = Boolean(form.elements.allow_estimate.checked);
+  const serviceId = form.elements.service_id.value;
+  const dates = serviceId ? utilityReadingDates(serviceId) : [];
+  const currentStart = startSelect.value || startInput.value;
+  const currentEnd = endSelect.value || endInput.value;
+
+  setValueOptions(startSelect, dates, (value) => formatDate(value), "Выбери дату");
+  setValueOptions(endSelect, dates, (value) => formatDate(value), "Выбери дату");
+  startSelect.disabled = !dates.length;
+  endSelect.disabled = !dates.length;
+
+  if (currentStart && dates.includes(currentStart)) startSelect.value = currentStart;
+  if (currentEnd && dates.includes(currentEnd)) endSelect.value = currentEnd;
+
+  startSelect.classList.toggle("field-toggle-hidden", allowEstimate);
+  endSelect.classList.toggle("field-toggle-hidden", allowEstimate);
+  startInput.classList.toggle("field-toggle-hidden", !allowEstimate);
+  endInput.classList.toggle("field-toggle-hidden", !allowEstimate);
+
+  if (!allowEstimate) {
+    syncUtilityPeriodInputs();
+  } else {
+    if (startSelect.value && !startInput.value) startInput.value = startSelect.value;
+    if (endSelect.value && !endInput.value) endInput.value = endSelect.value;
+  }
+}
+
 function utilityTimelineActions(event) {
   if (event.kind !== "reading") return "";
   return `
@@ -912,6 +979,7 @@ function renderUtilityTimeline() {
 function renderUtilities() {
   renderQuickReadingFields();
   renderUtilityTimeline();
+  updateUtilityPeriodControls();
   const bills = state.utilityBills.map((bill) => {
     const lines = bill.lines.map((line) => `
       <tr>
@@ -1198,7 +1266,14 @@ function useTimelineReading(serviceId, edge, dateValue) {
   const form = qs("#utilityCalcForm");
   if (!form) return;
   form.elements.service_id.value = String(serviceId);
-  form.elements[edge === "start" ? "period_start" : "period_end"].value = dateValue;
+  updateUtilityPeriodControls();
+  if (form.elements.allow_estimate.checked) {
+    form.elements[edge === "start" ? "period_start" : "period_end"].value = dateValue;
+  } else {
+    const select = qs(edge === "start" ? "#utilityPeriodStartSelect" : "#utilityPeriodEndSelect");
+    if (select) select.value = dateValue;
+    syncUtilityPeriodInputs();
+  }
   form.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
@@ -1380,10 +1455,15 @@ function bindEvents() {
   qs("#utilityCalcForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
+    syncUtilityPeriodInputs();
     const result = await api("/api/utility-bills/calculate", { method: "POST", body: JSON.stringify(formData(form)) });
     toast(`Черновик создан: ${money(result.total_cost)}`);
     await loadAll();
   });
+  qs("#utilityServiceSelect")?.addEventListener("change", updateUtilityPeriodControls);
+  qs('#utilityCalcForm input[name="allow_estimate"]')?.addEventListener("change", updateUtilityPeriodControls);
+  qs("#utilityPeriodStartSelect")?.addEventListener("change", syncUtilityPeriodInputs);
+  qs("#utilityPeriodEndSelect")?.addEventListener("change", syncUtilityPeriodInputs);
 
   qs("#tariffForm").addEventListener("submit", async (event) => {
     event.preventDefault();

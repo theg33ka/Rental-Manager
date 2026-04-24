@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -90,6 +90,28 @@ def ensure_rent_debt_capacity(session: Session, lease: Lease, channel: str, amou
     return rent_charge_candidates(session, lease.id, channel)
 
 
+def rent_channel_paid_amount(charge: RentCharge, channel: str) -> float:
+    return money(float(charge.ip_paid or 0)) if channel == "ip" else money(float(charge.personal_paid or 0))
+
+
+def preferred_rent_charge_for_payment_month(
+    charges: list[RentCharge],
+    channel: str,
+    paid_at: date | datetime | None,
+) -> RentCharge | None:
+    if not paid_at:
+        return None
+    paid_day = paid_at.date() if isinstance(paid_at, datetime) else paid_at
+    for charge in charges:
+        if charge.due_date.year != paid_day.year or charge.due_date.month != paid_day.month:
+            continue
+        if rent_channel_paid_amount(charge, channel) > EPS:
+            return None
+        if rent_charge_debt(charge, channel) > EPS:
+            return charge
+    return None
+
+
 def build_rent_plan(
     session: Session,
     lease: Lease,
@@ -97,8 +119,14 @@ def build_rent_plan(
     amount: float,
     *,
     exact_only: bool,
+    paid_at: date | datetime | None = None,
+    prefer_document_month: bool = False,
 ) -> tuple[list[tuple[RentCharge, float]], float]:
     charges = ensure_rent_debt_capacity(session, lease, channel, amount)
+    if prefer_document_month:
+        preferred = preferred_rent_charge_for_payment_month(charges, channel, paid_at)
+        if preferred:
+            charges = [preferred, *[charge for charge in charges if charge.id != preferred.id]]
     return _build_plan(charges, lambda charge: rent_charge_debt(charge, channel), amount, exact_only=exact_only)
 
 
@@ -127,8 +155,17 @@ def create_rent_receipts(
     notes: str = "",
     file_path: str = "",
     exact_only: bool = False,
+    prefer_document_month: bool = False,
 ) -> list[PaymentReceipt]:
-    plan, remaining = build_rent_plan(session, lease, channel, amount, exact_only=exact_only)
+    plan, remaining = build_rent_plan(
+        session,
+        lease,
+        channel,
+        amount,
+        exact_only=exact_only,
+        paid_at=paid_at,
+        prefer_document_month=prefer_document_month,
+    )
     if not plan or remaining > EPS:
         raise ValueError("Не удалось честно разложить платёж по аренде")
     receipts = [

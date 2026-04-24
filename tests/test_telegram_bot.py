@@ -8,6 +8,7 @@ from rental_manager.services.telegram_bot import (
     build_status_message,
     owner_commands,
     parse_command,
+    tenant_keyboard,
 )
 
 
@@ -51,6 +52,12 @@ class TelegramBotHelpersTests(unittest.TestCase):
 
         self.assertIn({"command": "status", "description": "Сводка по пульту и долгам"}, commands)
         self.assertIn({"command": "reports", "description": "Открытые месячные отчёты"}, commands)
+
+
+    def test_tenant_keyboard_contains_requisites_button(self) -> None:
+        keyboard = tenant_keyboard()
+
+        self.assertEqual(keyboard["keyboard"][0][0]["text"], "Реквизиты")
 
 
 if __name__ == "__main__":

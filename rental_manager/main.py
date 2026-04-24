@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import date, datetime, timedelta
@@ -75,6 +76,7 @@ from rental_manager.services.telegram_bot import (
     owner_commands,
     parse_command,
     send_message,
+    tenant_keyboard,
     telegram_file_info,
     telegram_api_request,
 )
@@ -90,9 +92,15 @@ DEFAULT_SETTINGS = {
     "telegram_owner_chat_id": "",
     "notifications_enabled": False,
     "notification_cutoff_date": "",
-    "ip_recipient_name": "",
-    "ip_recipient_account": "",
-    "ip_recipient_bik": "",
+    "ip_recipient_name": "ИНДИВИДУАЛЬНЫЙ ПРЕДПРИНИМАТЕЛЬ ЧАНТУРИЯ ЭРАСТ МИТРИДАТОВИЧ",
+    "ip_recipient_inn": "540506055229",
+    "ip_recipient_ogrnip": "324508100223397",
+    "ip_recipient_account": "40802810644050156191",
+    "ip_recipient_bank": "СИБИРСКИЙ БАНК ПАО СБЕРБАНК",
+    "ip_recipient_bik": "045004641",
+    "ip_recipient_correspondent_account": "30101810500000000641",
+    "ip_recipient_bank_inn": "7707083893",
+    "ip_recipient_bank_kpp": "540643001",
     "personal_recipient_name": "",
     "personal_recipient_phone": "",
     "personal_recipient_bank": "",
@@ -113,6 +121,17 @@ INTERNAL_SETTINGS = {
     "telegram_tenant_links": "{}",
 }
 BOOLEAN_SETTINGS = {"notifications_enabled"}
+DEFAULT_FALLBACK_KEYS = {
+    "ip_recipient_name",
+    "ip_recipient_inn",
+    "ip_recipient_ogrnip",
+    "ip_recipient_account",
+    "ip_recipient_bank",
+    "ip_recipient_bik",
+    "ip_recipient_correspondent_account",
+    "ip_recipient_bank_inn",
+    "ip_recipient_bank_kpp",
+}
 
 REPORT_START_MONTH = date(2026, 1, 1)
 MONTH_NAMES = [
@@ -224,6 +243,8 @@ def get_settings(session: Session) -> dict[str, str | bool]:
     settings: dict[str, str | bool] = {}
     for key in DEFAULT_SETTINGS:
         raw = get_setting_value(session, key)
+        if key in DEFAULT_FALLBACK_KEYS and raw == "":
+            raw = str(DEFAULT_SETTINGS[key])
         settings[key] = setting_bool_value(raw) if key in BOOLEAN_SETTINGS else raw
     for key in SECRET_SETTINGS:
         settings[f"{key}_configured"] = bool(get_setting_value(session, key))
@@ -515,6 +536,30 @@ def parse_receipt_details(receipt: PaymentReceipt) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def receipt_meta(parsed: dict[str, Any]) -> dict[str, Any]:
+    meta = parsed.get("_meta") if isinstance(parsed, dict) else None
+    return meta if isinstance(meta, dict) else {}
+
+
+def payment_source_label(receipt: PaymentReceipt) -> str:
+    if receipt.source == "manual":
+        base = "ручной"
+    elif receipt.channel == "ip":
+        base = "ИП"
+    elif receipt.channel == "personal":
+        base = "перевод"
+    elif receipt.channel == "utilities":
+        base = "коммуналка"
+    else:
+        base = receipt.source or "платёж"
+    return f"{base} от {receipt.created_at:%d.%m.%Y}"
+
+
+def receipt_sender_name(parsed: dict[str, Any]) -> str:
+    value = (parsed.get("payer_name") or "").strip()
+    return value or "не указан"
+
+
 def serialize_payment_receipt(receipt: PaymentReceipt, session: Session) -> dict[str, Any]:
     parsed = parse_receipt_details(receipt)
     charge = receipt.rent_charge
@@ -542,8 +587,10 @@ def serialize_payment_receipt(receipt: PaymentReceipt, session: Session) -> dict
         "status": receipt.status,
         "paid_at": receipt.paid_at.isoformat(),
         "source": receipt.source,
+        "source_label": payment_source_label(receipt),
         "created_at": receipt.created_at.isoformat(),
         "recipient_name": receipt.recipient_name,
+        "sender_name": receipt_sender_name(parsed),
         "notes": receipt.notes or "",
         "file_path": receipt.file_path or "",
         "target_label": target_label,
@@ -1439,6 +1486,8 @@ def receipt_status_label(value: str) -> str:
     return {
         "accepted": "принят",
         "suspicious": "нужна проверка",
+        "duplicate": "дубликат",
+        "rejected": "отклонён",
     }.get(value, value or "неизвестно")
 
 
@@ -1448,23 +1497,32 @@ def receipt_storage_dir() -> Path:
     return path
 
 
-def telegram_media_descriptor(message: dict[str, Any]) -> tuple[str, str, str]:
+def telegram_media_descriptor(message: dict[str, Any]) -> dict[str, str]:
     document = message.get("document")
     if document:
-        file_id = document.get("file_id") or ""
-        name = Path(document.get("file_name") or "telegram-document.bin").name
-        mime = document.get("mime_type") or ""
-        return file_id, name, mime
+        return {
+            "file_id": document.get("file_id") or "",
+            "file_name": Path(document.get("file_name") or "telegram-document.bin").name,
+            "mime_type": document.get("mime_type") or "",
+            "file_unique_id": document.get("file_unique_id") or "",
+        }
     photos = message.get("photo") or []
     if photos:
         largest = photos[-1]
-        return largest.get("file_id") or "", f"telegram-photo-{largest.get('file_unique_id') or utc_now().timestamp()}.jpg", "image/jpeg"
-    return "", "", ""
+        return {
+            "file_id": largest.get("file_id") or "",
+            "file_name": f"telegram-photo-{largest.get('file_unique_id') or utc_now().timestamp()}.jpg",
+            "mime_type": "image/jpeg",
+            "file_unique_id": largest.get("file_unique_id") or "",
+        }
+    return {"file_id": "", "file_name": "", "mime_type": "", "file_unique_id": ""}
 
 
 def save_telegram_media(session: Session, message: dict[str, Any]) -> Path | None:
     token = telegram_token(session)
-    file_id, name, _mime = telegram_media_descriptor(message)
+    media = telegram_media_descriptor(message)
+    file_id = media["file_id"]
+    name = media["file_name"]
     if not token or not file_id:
         return None
     info = telegram_file_info(token, file_id)
@@ -1485,6 +1543,58 @@ def receipt_candidate_lease(session: Session, message: dict[str, Any], parsed: d
     return None
 
 
+def receipt_operation_fingerprint(parsed: dict[str, Any] | None) -> str:
+    if not parsed:
+        return ""
+    parts = [
+        str(parsed.get("source_bank") or "").strip().lower(),
+        str(parsed.get("receipt_number") or "").strip().lower(),
+        str(parsed.get("paid_at") or "").strip(),
+        f"{float(parsed.get('amount') or 0):.2f}",
+        str(parsed.get("recipient_name") or "").strip().lower(),
+        str(parsed.get("recipient_account") or "").strip(),
+        str(parsed.get("recipient_phone") or "").strip(),
+        str(parsed.get("payer_name") or "").strip().lower(),
+    ]
+    if not any(parts[1:4]):
+        return ""
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def receipt_document_sha256(saved_path: Path) -> str:
+    return hashlib.sha256(saved_path.read_bytes()).hexdigest()
+
+
+def build_receipt_details_payload(message: dict[str, Any], parsed: dict[str, Any] | None, saved_path: Path) -> dict[str, Any]:
+    media = telegram_media_descriptor(message)
+    payload = dict(parsed or {})
+    payload["_meta"] = {
+        "received_at": utc_now().isoformat(),
+        "document_sha256": receipt_document_sha256(saved_path),
+        "operation_fingerprint": receipt_operation_fingerprint(parsed),
+        "telegram_chat_id": str((message.get("chat") or {}).get("id") or ""),
+        "telegram_message_id": str(message.get("message_id") or ""),
+        "telegram_file_id": media.get("file_id") or "",
+        "telegram_file_unique_id": media.get("file_unique_id") or "",
+        "file_name": saved_path.name,
+    }
+    return payload
+
+
+def duplicate_receipt(session: Session, document_sha256: str, operation_fingerprint: str) -> PaymentReceipt | None:
+    if not document_sha256 and not operation_fingerprint:
+        return None
+    receipts = session.scalars(select(PaymentReceipt).where(PaymentReceipt.source == "telegram").order_by(PaymentReceipt.id.desc())).all()
+    for receipt in receipts:
+        parsed = parse_receipt_details(receipt)
+        meta = receipt_meta(parsed)
+        if document_sha256 and meta.get("document_sha256") == document_sha256:
+            return receipt
+        if operation_fingerprint and meta.get("operation_fingerprint") == operation_fingerprint:
+            return receipt
+    return None
+
+
 def apply_receipt_match(session: Session, lease: Lease, parsed: dict[str, Any]) -> tuple[str, str, int | None, list[str]]:
     amount = float(parsed.get("amount") or 0)
     channel = detect_receipt_channel(parsed)
@@ -1493,7 +1603,15 @@ def apply_receipt_match(session: Session, lease: Lease, parsed: dict[str, Any]) 
         issues.append("в чеке не удалось определить положительную сумму")
 
     if channel == "ip":
-        plan, remaining = build_rent_plan(session, lease, "ip", amount, exact_only=False)
+        plan, remaining = build_rent_plan(
+            session,
+            lease,
+            "ip",
+            amount,
+            exact_only=False,
+            paid_at=datetime.fromisoformat(parsed["paid_at"]) if parsed.get("paid_at") else None,
+            prefer_document_month=True,
+        )
         if not plan or remaining > EPS:
             issues.append("не удалось честно разложить платёж по аренде")
         if issues:
@@ -1501,7 +1619,15 @@ def apply_receipt_match(session: Session, lease: Lease, parsed: dict[str, Any]) 
         return "accepted", "rent", plan[0][0].id, []
 
     if channel == "personal":
-        rent_plan, rent_remaining = build_rent_plan(session, lease, "personal", amount, exact_only=True)
+        rent_plan, rent_remaining = build_rent_plan(
+            session,
+            lease,
+            "personal",
+            amount,
+            exact_only=True,
+            paid_at=datetime.fromisoformat(parsed["paid_at"]) if parsed.get("paid_at") else None,
+            prefer_document_month=True,
+        )
         utility_plan, utility_remaining = build_utility_plan(session, lease, amount, exact_only=True)
         rent_exact = bool(rent_plan) and rent_remaining <= EPS
         utility_exact = bool(utility_plan) and utility_remaining <= EPS
@@ -1549,9 +1675,21 @@ def handle_tenant_receipt_message(session: Session, message: dict[str, Any], lin
     chat_id = (message.get("chat") or {}).get("id")
     if not chat_id:
         return
+    owner_id = telegram_owner_chat_id(session)
     saved_path = save_telegram_media(session, message)
     if not saved_path:
-        send_telegram_text(session, chat_id, message_template(session, "message_receipt_review"))
+        if owner_id and message.get("message_id"):
+            try:
+                copy_message(
+                    telegram_token(session),
+                    to_chat_id=owner_id,
+                    from_chat_id=chat_id,
+                    message_id=int(message["message_id"]),
+                    reply_markup=app_keyboard(app_base_url(session)),
+                )
+            except RuntimeError:
+                pass
+        send_telegram_text(session, chat_id, message_template(session, "message_receipt_review"), tenant_keyboard())
         return
 
     parsed: dict[str, Any] | None = None
@@ -1561,19 +1699,29 @@ def handle_tenant_receipt_message(session: Session, message: dict[str, Any], lin
         except Exception:
             parsed = None
 
+    receipt_payload = build_receipt_details_payload(message, parsed, saved_path)
+    meta = receipt_meta(receipt_payload)
+    receipt_details = json.dumps(receipt_payload, ensure_ascii=False)
     lease = receipt_candidate_lease(session, message, parsed, linked_lease)
     status = "suspicious"
     match_type = "review"
     linked_id: int | None = None
     issues = ["чек сохранён, но не удалось ничего распознать"]
-    if parsed and lease:
+    duplicate = duplicate_receipt(
+        session,
+        str(meta.get("document_sha256") or ""),
+        str(meta.get("operation_fingerprint") or ""),
+    )
+    if duplicate:
+        status = "duplicate"
+        issues = [f"этот чек уже есть в системе с {duplicate.created_at:%d.%m.%Y}, повторно не зачитываю"]
+    elif parsed and lease:
         status, match_type, linked_id, issues = apply_receipt_match(session, lease, parsed)
     elif parsed and not lease:
         issues = ["чек разобран, но арендатор по нему пока не определён"]
 
     channel = detect_receipt_channel(parsed or {})
     paid_at = datetime.fromisoformat(parsed["paid_at"]) if parsed and parsed.get("paid_at") else utc_now()
-    receipt_details = json.dumps(parsed or {}, ensure_ascii=False)
     stored_path = str(saved_path.relative_to(ROOT_DIR))
     if status == "accepted" and lease and parsed:
         try:
@@ -1591,6 +1739,7 @@ def handle_tenant_receipt_message(session: Session, message: dict[str, Any], lin
                     notes="автоматически принято из Telegram",
                     file_path=stored_path,
                     exact_only=channel == "personal",
+                    prefer_document_month=True,
                 )
             elif match_type == "utility":
                 create_utility_receipts(
@@ -1624,7 +1773,7 @@ def handle_tenant_receipt_message(session: Session, message: dict[str, Any], lin
                 channel=channel or "unknown",
                 paid_at=paid_at,
                 source="telegram",
-                status="suspicious",
+                status="duplicate" if status == "duplicate" else "suspicious",
                 recipient_name=(parsed or {}).get("recipient_name") or "",
                 recipient_details=receipt_details,
                 file_path=stored_path,
@@ -1633,11 +1782,12 @@ def handle_tenant_receipt_message(session: Session, message: dict[str, Any], lin
         )
 
     if status == "accepted":
-        send_telegram_text(session, chat_id, message_template(session, "message_receipt_received"))
+        send_telegram_text(session, chat_id, message_template(session, "message_receipt_received"), tenant_keyboard())
+    elif status == "duplicate":
+        send_telegram_text(session, chat_id, "Этот чек уже есть в системе. Повторно зачитывать его не буду.", tenant_keyboard())
     else:
-        send_telegram_text(session, chat_id, message_template(session, "message_receipt_review"))
+        send_telegram_text(session, chat_id, message_template(session, "message_receipt_review"), tenant_keyboard())
 
-    owner_id = telegram_owner_chat_id(session)
     if owner_id:
         send_telegram_text(
             session,
@@ -1645,7 +1795,7 @@ def handle_tenant_receipt_message(session: Session, message: dict[str, Any], lin
             owner_receipt_alert_text(session, lease, parsed, status, issues, message_sender_label(message)),
             app_keyboard(app_base_url(session)),
         )
-        if status != "accepted" and message.get("message_id"):
+        if message.get("message_id"):
             try:
                 copy_message(
                     telegram_token(session),
@@ -1668,6 +1818,36 @@ def send_telegram_text(session: Session, chat_id: int | str, text: str, keyboard
         raise HTTPException(502, str(exc)) from exc
 
 
+def tenant_requisites_text(session: Session) -> str:
+    settings = get_settings(session)
+    return "\n".join(
+        [
+            "Реквизиты для перевода на ИП:",
+            f"Наименование: {settings.get('ip_recipient_name') or 'не задано'}",
+            f"ИНН: {settings.get('ip_recipient_inn') or 'не задано'}",
+            f"ОГРНИП: {settings.get('ip_recipient_ogrnip') or 'не задано'}",
+            f"Расчётный счёт: {settings.get('ip_recipient_account') or 'не задано'}",
+            f"Банк: {settings.get('ip_recipient_bank') or 'не задано'}",
+            f"БИК банка: {settings.get('ip_recipient_bik') or 'не задано'}",
+            f"Корр. счёт банка: {settings.get('ip_recipient_correspondent_account') or 'не задано'}",
+            f"ИНН банка: {settings.get('ip_recipient_bank_inn') or 'не задано'}",
+            f"КПП банка: {settings.get('ip_recipient_bank_kpp') or 'не задано'}",
+        ]
+    )
+
+
+def tenant_help_text() -> str:
+    return "\n".join(
+        [
+            "Что умеет бот для жильца:",
+            "• принять чек PDF документом и попытаться зачесть его автоматически;",
+            "• если что-то не понял — передать чек владельцу на ручную проверку;",
+            "• показать реквизиты по кнопке «Реквизиты» или по команде /requisites;",
+            "• подтвердить, что чек уже был получен, чтобы не крутить один и тот же документ по кругу.",
+        ]
+    )
+
+
 def telegram_help_text() -> str:
     return "\n".join(
         [
@@ -1676,6 +1856,7 @@ def telegram_help_text() -> str:
             "/id - показать chat id",
             "/status - статус пульта",
             "/reports - открытые месячные отчёты",
+            "/requisites - показать реквизиты для оплаты",
             "/run_reminders - прогнать напоминания",
             "/app - открыть пульт",
             "/help - подсказка",
@@ -1713,7 +1894,8 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
             send_telegram_text(
                 session,
                 chat_id,
-                f"Привет. Я привязал этот чат к квартире {linked_lease.apartment.name}. Теперь сюда можно присылать чеки и я передам их владельцу.",
+                f"Привет. Я привязал этот чат к квартире {linked_lease.apartment.name}. Теперь сюда можно присылать чеки PDF документом, спрашивать реквизиты и получать ответы по платежам.",
+                tenant_keyboard(),
             )
             return
         send_telegram_text(
@@ -1728,7 +1910,16 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
         if is_owner:
             send_telegram_text(session, chat_id, telegram_help_text(), app_keyboard(base_url))
         else:
-            send_telegram_text(session, chat_id, "Можно прислать чек PDF или фото. Я его сохраню и передам владельцу.")
+            send_telegram_text(session, chat_id, tenant_help_text(), tenant_keyboard())
+        return
+
+    if command == "/requisites" or text.lower() == "реквизиты":
+        send_telegram_text(
+            session,
+            chat_id,
+            tenant_requisites_text(session),
+            tenant_keyboard() if not is_owner else app_keyboard(base_url),
+        )
         return
 
     if not owner_id:
@@ -1746,7 +1937,8 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
         send_telegram_text(
             session,
             chat_id,
-            "Напиши /start или просто пришли чек. Остальное пока оставим без философии.",
+            tenant_help_text(),
+            tenant_keyboard(),
         )
         return
 
@@ -1777,6 +1969,9 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
         return
     if command == "/app":
         send_telegram_text(session, chat_id, "Открываю пульт.", app_keyboard(base_url))
+        return
+    if command == "/requisites":
+        send_telegram_text(session, chat_id, tenant_requisites_text(session), app_keyboard(base_url))
         return
     if message.get("document") or message.get("photo"):
         send_telegram_text(
@@ -2290,6 +2485,7 @@ def moderate_payment_receipt(receipt_id: int, payload: dict[str, Any], session: 
             notes=moderation_note,
             file_path=receipt.file_path,
             exact_only=False,
+            prefer_document_month=receipt.source == "telegram",
         )
         receipt.status = "moderated"
     elif action == "accept_utility":
@@ -2762,6 +2958,63 @@ def report_status_label(status: str, due_date: date | None = None, today: date |
     return label
 
 
+def accepted_receipts_for_charge(charge: RentCharge, channel: str) -> list[PaymentReceipt]:
+    return [receipt for receipt in charge.receipts if receipt.status == "accepted" and receipt.channel == channel]
+
+
+def receipt_amounts_text(receipts: list[PaymentReceipt]) -> str:
+    if not receipts:
+        return ""
+    return "; ".join(f"{receipt.paid_at:%d.%m.%Y} — {money_text(float(receipt.amount or 0))}" for receipt in sorted(receipts, key=lambda item: (item.paid_at, item.id)))
+
+
+def receipt_senders_text(receipts: list[PaymentReceipt]) -> str:
+    senders = []
+    for receipt in receipts:
+        sender = receipt_sender_name(parse_receipt_details(receipt))
+        if sender not in senders:
+            senders.append(sender)
+    return ", ".join(senders)
+
+
+def apartment_month_state(apartment: Apartment, start_date: date, end_date: date) -> dict[str, Any]:
+    total_days = (end_date - start_date).days + 1
+    occupied_days: set[date] = set()
+    overlaps: list[Lease] = []
+    for lease in sorted(apartment.leases, key=lambda item: (item.start_date, item.id)):
+        overlap_start = max(lease.start_date, start_date)
+        overlap_end = min(lease.end_date or end_date, end_date)
+        if overlap_start > overlap_end:
+            continue
+        overlaps.append(lease)
+        for day_index in range((overlap_end - overlap_start).days + 1):
+            occupied_days.add(overlap_start + timedelta(days=day_index))
+
+    tenant_names: list[str] = []
+    for lease in overlaps:
+        if lease.tenant.full_name not in tenant_names:
+            tenant_names.append(lease.tenant.full_name)
+
+    vacant_days = max(total_days - len(occupied_days), 0)
+    flags: list[str] = []
+    if not overlaps:
+        flags.append("пустует весь месяц")
+    else:
+        if len(tenant_names) > 1:
+            flags.append("смена жильца")
+        if vacant_days > 0:
+            flags.append(f"пустует {vacant_days} дн.")
+        if not flags:
+            flags.append("без смены")
+    return {
+        "state": "; ".join(flags),
+        "tenant_names": " -> ".join(tenant_names) if tenant_names else "нет жильца",
+        "vacant_days": vacant_days,
+        "changed": len(tenant_names) > 1,
+        "vacant_full": not overlaps,
+    }
+
+
 @app.get("/api/reports/rent.xlsx")
 def rent_report(start: str | None = None, end: str | None = None, session: Session = Depends(get_session)) -> StreamingResponse:
     start_date, end_date = current_month_range()
@@ -2776,10 +3029,27 @@ def rent_report(start: str | None = None, end: str | None = None, session: Sessi
     ws = setup_sheet(
         wb,
         "Аренда",
-        ["Дата", "Период", "Объект", "Квартира", "Жилец", "ИП начислено", "ИП оплачено", "Личный начислено", "Личный оплачено", "Долг", "Статус"],
+        [
+            "Дата",
+            "Период",
+            "Объект",
+            "Квартира",
+            "Жилец",
+            "Статус квартиры в периоде",
+            "ИП начислено",
+            "ИП оплачено",
+            "ИП платежи",
+            "ИП отправители",
+            "Личный начислено",
+            "Личный оплачено",
+            "Долг",
+            "Статус",
+        ],
     )
     for charge in charges:
         data = serialize_rent_charge(charge)
+        ip_receipts = accepted_receipts_for_charge(charge, "ip")
+        apartment_state = apartment_month_state(charge.lease.apartment, charge.period_start, charge.period_end)
         ws.append(
             [
                 data["due_date"],
@@ -2787,8 +3057,11 @@ def rent_report(start: str | None = None, end: str | None = None, session: Sessi
                 data["object"],
                 data["apartment"],
                 data["tenant"],
+                apartment_state["state"],
                 data["ip_due"],
                 data["ip_paid"],
+                receipt_amounts_text(ip_receipts),
+                receipt_senders_text(ip_receipts),
                 data["personal_due"],
                 data["personal_paid"],
                 data["debt"],
@@ -2890,6 +3163,46 @@ def monthly_report(year: int, month: int, session: Session = Depends(get_session
         raise HTTPException(400, "Некорректный месяц") from exc
 
     summary = monthly_report_status(session, year, month)
+    rent_charges = session.scalars(
+        select(RentCharge).where(RentCharge.due_date >= start_date, RentCharge.due_date <= end_date).order_by(RentCharge.due_date)
+    ).all()
+    bills = session.scalars(
+        select(UtilityBill)
+        .where(UtilityBill.period_start >= start_date, UtilityBill.period_start <= end_date)
+        .order_by(UtilityBill.period_start)
+    ).all()
+    apartments = session.scalars(select(Apartment).where(Apartment.active.is_(True)).order_by(Apartment.object_id, Apartment.sort_order, Apartment.name)).all()
+
+    utility_lines = [line for bill in bills for line in bill.lines]
+    utility_debt_by_apartment: dict[int, float] = {}
+    for line in utility_lines:
+        utility_debt_by_apartment[line.apartment_id] = utility_debt_by_apartment.get(line.apartment_id, 0.0) + max(0.0, float(line.total_amount or 0) - float(line.paid_amount or 0))
+
+    charge_by_apartment = {charge.lease.apartment_id: charge for charge in rent_charges}
+    apartment_rows: list[dict[str, Any]] = []
+    for apartment in apartments:
+        state = apartment_month_state(apartment, start_date, end_date)
+        charge = charge_by_apartment.get(apartment.id)
+        utility_debt = money(utility_debt_by_apartment.get(apartment.id, 0.0))
+        apartment_rows.append(
+            {
+                "object": apartment.object.name,
+                "apartment": apartment.name,
+                "tenant_names": state["tenant_names"],
+                "state": state["state"],
+                "changed": state["changed"],
+                "vacant_full": state["vacant_full"],
+                "rent_status": report_status_label(charge.status, charge.due_date) if charge else "нет начисления",
+                "rent_debt": money(max(0.0, float(charge.ip_due + charge.personal_due) - float(charge.ip_paid + charge.personal_paid))) if charge else 0.0,
+                "utility_debt": utility_debt,
+            }
+        )
+
+    occupied_rows = [row for row in apartment_rows if not row["vacant_full"]]
+    settled_rows = [row for row in occupied_rows if row["rent_debt"] <= EPS and row["utility_debt"] <= EPS]
+    ip_receipts = [receipt for charge in rent_charges for receipt in accepted_receipts_for_charge(charge, "ip")]
+    ip_income = money(sum(float(receipt.amount or 0) for receipt in ip_receipts))
+
     wb = Workbook()
     ws = setup_sheet(wb, "Сводка", ["Показатель", "Значение"])
     ws.append(["Период", f"{start_date} - {end_date}"])
@@ -2897,21 +3210,61 @@ def monthly_report(year: int, month: int, session: Session = Depends(get_session
     ws.append(["Всего проблем", summary["issue_count"]])
     ws.append(["Критических", summary["danger_count"]])
     ws.append(["Предупреждений", summary["warning_count"]])
+    ws.append(["Квартир всего", len(apartment_rows)])
+    ws.append(["Занятых квартир", len(occupied_rows)])
+    ws.append(["Полностью рассчитались", len(settled_rows)])
+    ws.append(["Квартир с долгом по аренде", sum(1 for row in occupied_rows if row["rent_debt"] > EPS)])
+    ws.append(["Квартир с долгом по коммуналке", sum(1 for row in occupied_rows if row["utility_debt"] > EPS)])
+    ws.append(["Квартир пустовало весь месяц", sum(1 for row in apartment_rows if row["vacant_full"])])
+    ws.append(["Квартир со сменой жильца", sum(1 for row in apartment_rows if row["changed"])])
+    ws.append(["Поступления на ИП, зачтённые за месяц", ip_income])
 
     issues_ws = setup_sheet(wb, "Проблемы", ["Важность", "Проблема", "Количество", "Комментарий"])
     for issue in summary["issues"]:
         issues_ws.append([issue["severity"], issue["title"], issue["count"], issue["detail"]])
 
+    apartments_ws = setup_sheet(
+        wb,
+        "Квартиры",
+        ["Объект", "Квартира", "Жильцы за месяц", "Статус месяца", "Аренда", "Долг аренды", "Долг коммуналки"],
+    )
+    for row in apartment_rows:
+        apartments_ws.append(
+            [
+                row["object"],
+                row["apartment"],
+                row["tenant_names"],
+                row["state"],
+                row["rent_status"],
+                row["rent_debt"],
+                row["utility_debt"],
+            ]
+        )
+
     rent_ws = setup_sheet(
         wb,
         "Аренда",
-        ["Дата", "Период", "Объект", "Квартира", "Жилец", "Начислено", "Оплачено", "Долг", "Статус"],
+        [
+            "Дата",
+            "Период",
+            "Объект",
+            "Квартира",
+            "Жилец",
+            "Статус квартиры в месяце",
+            "ИП начислено",
+            "ИП оплачено",
+            "ИП платежи",
+            "ИП отправители",
+            "Личный начислено",
+            "Личный оплачено",
+            "Долг",
+            "Статус",
+        ],
     )
-    rent_charges = session.scalars(
-        select(RentCharge).where(RentCharge.due_date >= start_date, RentCharge.due_date <= end_date).order_by(RentCharge.due_date)
-    ).all()
     for charge in rent_charges:
         data = serialize_rent_charge(charge)
+        ip_charge_receipts = accepted_receipts_for_charge(charge, "ip")
+        apartment_state = apartment_month_state(charge.lease.apartment, start_date, end_date)
         rent_ws.append(
             [
                 data["due_date"],
@@ -2919,23 +3272,45 @@ def monthly_report(year: int, month: int, session: Session = Depends(get_session
                 data["object"],
                 data["apartment"],
                 data["tenant"],
-                data["total_due"],
-                data["total_paid"],
+                apartment_state["state"],
+                data["ip_due"],
+                data["ip_paid"],
+                receipt_amounts_text(ip_charge_receipts),
+                receipt_senders_text(ip_charge_receipts),
+                data["personal_due"],
+                data["personal_paid"],
                 data["debt"],
                 report_status_label(data["status"], charge.due_date),
             ]
         )
+
+    ip_ws = setup_sheet(
+        wb,
+        "ИП платежи",
+        ["Объект", "Квартира", "Жилец", "Месяц зачёта", "Оплачен по чеку", "Добавлен в систему", "Сумма", "Отправитель", "Источник"],
+    )
+    for charge in rent_charges:
+        for receipt in accepted_receipts_for_charge(charge, "ip"):
+            parsed = parse_receipt_details(receipt)
+            ip_ws.append(
+                [
+                    charge.lease.apartment.object.name,
+                    charge.lease.apartment.name,
+                    charge.lease.tenant.full_name,
+                    debt_month_heading(charge.due_date),
+                    receipt.paid_at.strftime("%d.%m.%Y %H:%M"),
+                    receipt.created_at.strftime("%d.%m.%Y %H:%M"),
+                    money(receipt.amount),
+                    receipt_sender_name(parsed),
+                    payment_source_label(receipt),
+                ]
+            )
 
     utilities_ws = setup_sheet(
         wb,
         "Коммуналка",
         ["Период", "Объект", "Услуга", "Квартира", "Жилец", "Сумма", "Оплачено", "Долг", "Статус", "Поставщик оплачен"],
     )
-    bills = session.scalars(
-        select(UtilityBill)
-        .where(UtilityBill.period_start >= start_date, UtilityBill.period_start <= end_date)
-        .order_by(UtilityBill.period_start)
-    ).all()
     for bill in bills:
         for line in bill.lines:
             data = serialize_bill_line(line)

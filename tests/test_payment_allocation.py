@@ -63,6 +63,92 @@ class PaymentAllocationTests(unittest.TestCase):
             self.assertEqual(charges[0].ip_paid, 20000.0)
             self.assertEqual(charges[1].ip_paid, 0.0)
 
+    def test_telegram_rent_payment_prefers_same_month_when_it_is_still_empty(self) -> None:
+        with self.Session() as session:
+            seed_if_empty(session)
+            apartment = session.get(Apartment, 1)
+            tenant = Tenant(full_name="Month Match")
+            session.add(tenant)
+            session.flush()
+            lease = Lease(
+                apartment_id=apartment.id,
+                tenant_id=tenant.id,
+                start_date=date(2026, 1, 14),
+                payment_day=14,
+                ip_amount=20000,
+                personal_amount=3000,
+            )
+            session.add(lease)
+            session.flush()
+            generate_rent_charges(session, until=date(2026, 4, 20))
+            session.flush()
+
+            create_rent_receipts(
+                session,
+                lease,
+                "ip",
+                20000,
+                paid_at=datetime(2026, 4, 5, 12, 0),
+                source="telegram",
+                status="accepted",
+                prefer_document_month=True,
+            )
+            session.commit()
+
+            charges = sorted(lease.rent_charges, key=lambda item: item.due_date)
+            january = next(charge for charge in charges if charge.due_date == date(2026, 1, 14))
+            april = next(charge for charge in charges if charge.due_date == date(2026, 4, 14))
+            self.assertEqual(january.ip_paid, 0.0)
+            self.assertEqual(april.ip_paid, 20000.0)
+
+    def test_telegram_rent_payment_falls_back_to_oldest_debt_after_same_month_was_already_touched(self) -> None:
+        with self.Session() as session:
+            seed_if_empty(session)
+            apartment = session.get(Apartment, 1)
+            tenant = Tenant(full_name="Month Fallback")
+            session.add(tenant)
+            session.flush()
+            lease = Lease(
+                apartment_id=apartment.id,
+                tenant_id=tenant.id,
+                start_date=date(2026, 1, 14),
+                payment_day=14,
+                ip_amount=20000,
+                personal_amount=3000,
+            )
+            session.add(lease)
+            session.flush()
+            generate_rent_charges(session, until=date(2026, 4, 20))
+            session.flush()
+
+            create_rent_receipts(
+                session,
+                lease,
+                "ip",
+                5000,
+                paid_at=datetime(2026, 4, 2, 12, 0),
+                source="telegram",
+                status="accepted",
+                prefer_document_month=True,
+            )
+            create_rent_receipts(
+                session,
+                lease,
+                "ip",
+                20000,
+                paid_at=datetime(2026, 4, 22, 12, 0),
+                source="telegram",
+                status="accepted",
+                prefer_document_month=True,
+            )
+            session.commit()
+
+            charges = sorted(lease.rent_charges, key=lambda item: item.due_date)
+            january = next(charge for charge in charges if charge.due_date == date(2026, 1, 14))
+            april = next(charge for charge in charges if charge.due_date == date(2026, 4, 14))
+            self.assertEqual(april.ip_paid, 5000.0)
+            self.assertEqual(january.ip_paid, 20000.0)
+
     def test_utility_payment_goes_to_oldest_bill_first(self) -> None:
         with self.Session() as session:
             seed_if_empty(session)

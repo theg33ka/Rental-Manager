@@ -645,6 +645,10 @@ section {
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
 }
 
+.field-toggle-hidden {
+  display: none;
+}
+
 .wide {
   grid-column: 1 / -1;
 }

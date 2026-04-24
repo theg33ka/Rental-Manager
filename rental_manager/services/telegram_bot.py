@@ -60,14 +60,26 @@ def app_keyboard(base_url: str, reports: list[dict[str, Any]] | None = None) -> 
     return {"inline_keyboard": rows}
 
 
+def tenant_keyboard() -> dict[str, Any]:
+    return {
+        "keyboard": [
+            [{"text": "Реквизиты"}],
+            [{"text": "/help"}],
+        ],
+        "resize_keyboard": True,
+    }
+
+
 def owner_commands() -> list[dict[str, str]]:
     return [
         {"command": "start", "description": "Короткая справка по owner-командам"},
         {"command": "id", "description": "Показать текущий chat id"},
         {"command": "status", "description": "Сводка по пульту и долгам"},
         {"command": "reports", "description": "Открытые месячные отчёты"},
+        {"command": "requisites", "description": "Показать реквизиты для оплаты"},
         {"command": "run_reminders", "description": "Прогнать напоминания жильцам"},
         {"command": "app", "description": "Кнопка открытия веб-пульта"},
+        {"command": "help", "description": "Что умеет бот"},
     ]
 
 
