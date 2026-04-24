@@ -1939,6 +1939,11 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
             send_telegram_text(session, chat_id, "Реквизиты доступны только для привязанных жильцов.")
         return
 
+    # Обработка файлов от жильцов - до проверки owner_id
+    if not is_owner and (message.get("document") or message.get("photo")):
+        handle_tenant_receipt_message(session, message, linked_lease)
+        return
+
     if not owner_id:
         send_telegram_text(
             session,
@@ -1948,9 +1953,6 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
         return
 
     if not is_owner:
-        if message.get("document") or message.get("photo"):
-            handle_tenant_receipt_message(session, message, linked_lease)
-            return
         send_telegram_text(
             session,
             chat_id,
