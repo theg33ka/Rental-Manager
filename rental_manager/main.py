@@ -99,6 +99,7 @@ DEFAULT_SETTINGS = {
     "message_rent_due": "Здравствуйте. Напоминаю: по квартире {apartment} сегодня ожидается оплата аренды. ИП: {ip_due}. Перевод: {personal_due}. Итого: {total_due}.",
     "message_rent_overdue": "Здравствуйте. По квартире {apartment} сейчас просрочена аренда. Долг: {debt}. ИП: {ip_due}. Перевод: {personal_due}.",
     "message_utility_bill": "Здравствуйте. Коммуналка по квартире {apartment} за период {period} составляет {utility_total}. Срок оплаты до {utility_due_date}.",
+    "message_all_debts": "Здравствуйте. Уведомляем вас о наличии следующих задолженностей:\n{all_debts_breakdown}\n\nОтправьте чеки в этот чат в виде документа, скриншоты больше не принимаются.\n(История платежей в приложении банка -> чек об операции -> сохранить или отправить)",
     "message_receipt_received": "Чек получил и сохранил. Если всё совпало, я это отмечу. Если нет, передам владельцу на ручную проверку.",
     "message_receipt_review": "Чек получил, но там есть вопросы. Я уже отправил его владельцу на проверку.",
     "message_owner_receipt_alert": "Новый чек от {tenant_name}. Квартира: {apartment}. Сумма: {amount}. Канал: {channel}. Статус: {receipt_status}. {receipt_summary}",
@@ -362,6 +363,7 @@ def reminder_label(template_key: str) -> str:
         "message_rent_due": "аренда сегодня",
         "message_rent_overdue": "долг по аренде",
         "message_utility_bill": "коммуналка",
+        "message_all_debts": "все долги",
         "custom": "свой текст",
     }.get(template_key, template_key or "сообщение")
 
@@ -622,6 +624,8 @@ def serialize_bill_line(line: UtilityBillLine, session: Session | None = None) -
         "bill_id": line.bill_id,
         "apartment_id": line.apartment_id,
         "apartment": line.apartment.name,
+        "object": line.bill.service.object.name,
+        "service": line.bill.service.name,
         "lease_id": line.lease_id,
         "tenant": line.lease.tenant.full_name if line.lease else "",
         "personal_consumption": line.personal_consumption,
@@ -633,6 +637,9 @@ def serialize_bill_line(line: UtilityBillLine, session: Session | None = None) -
         "due_date": line.due_date.isoformat() if line.due_date else None,
         "note": line.note,
         "period_label": line.note,
+        "bill_period_start": line.bill.period_start.isoformat(),
+        "bill_period_end": line.bill.period_end.isoformat(),
+        "bill_period_label": f"{line.bill.period_start:%d.%m.%Y} -> {line.bill.period_end:%d.%m.%Y} ({(line.bill.period_end - line.bill.period_start).days} дн.)",
         "reminder": reminder_meta(session, line.lease, line.due_date, utility_line_id=line.id) if line.lease else None,
     }
 
@@ -1027,6 +1034,76 @@ def outstanding_utility_lines(session: Session, lease: Lease, today: date | None
     return result
 
 
+def debt_month_heading(value: date | None) -> str:
+    if not value:
+        return ""
+    current_year = date.today().year
+    month_name = MONTH_NAMES[value.month - 1].capitalize()
+    return month_name if value.year == current_year else f"{month_name} {value.year}"
+
+
+def rent_debt_bullet(charge: RentCharge) -> str:
+    ip_left = money(max(0.0, charge.ip_due - charge.ip_paid))
+    personal_left = money(max(0.0, charge.personal_due - charge.personal_paid))
+    ip_paid = money(charge.ip_paid) > 0.009
+    personal_paid = money(charge.personal_paid) > 0.009
+
+    if ip_left <= 0.009 and personal_left <= 0.009:
+        return "аренда закрыта."
+    if ip_left > 0.009 and personal_left > 0.009:
+        if not ip_paid and not personal_paid:
+            return "аренда не оплачена. ИП не оплачено, перевод по номеру телефона не поступил."
+        if ip_paid and not personal_paid:
+            return f"неполная оплата аренды. По ИП есть оплата, не хватает {money_text(ip_left)}. Перевод по номеру телефона не поступил."
+        if not ip_paid and personal_paid:
+            return f"неполная оплата аренды. ИП не оплачено, по номеру телефона не хватает {money_text(personal_left)}."
+        return f"неполная оплата аренды. По ИП не хватает {money_text(ip_left)}, по номеру телефона не хватает {money_text(personal_left)}."
+    if ip_left > 0.009:
+        if ip_paid:
+            return f"неполная оплата аренды. По ИП не хватает {money_text(ip_left)}, перевод по номеру телефона оплачен полностью."
+        return "неполная оплата аренды. ИП не оплачено, перевод по номеру телефона оплачен полностью."
+    if personal_paid:
+        return f"неполная оплата аренды. ИП оплачено, по номеру телефона не хватает {money_text(personal_left)}."
+    return "неполная оплата аренды. ИП оплачено, перевод по номеру телефона не поступил."
+
+
+def utility_debt_bullet(lines: list[UtilityBillLine]) -> str:
+    total = money(sum(line.total_amount for line in lines))
+    paid = money(sum(line.paid_amount for line in lines))
+    debt = money(max(0.0, total - paid))
+    if paid <= 0.009:
+        return f"неоплачены счета по коммунальным платежам. Всего {money_text(total)}."
+    return f"неоплачены счета по коммунальным платежам. Всего {money_text(total)} — оплачено {money_text(paid)}. Остаток {money_text(debt)}."
+
+
+def build_all_debts_breakdown(session: Session, lease: Lease, today: date | None = None) -> str:
+    today = today or date.today()
+    rent_debts = outstanding_rent_charges(lease, today)
+    utility_debts = outstanding_utility_lines(session, lease, today)
+
+    by_month: dict[tuple[int, int], list[str]] = {}
+    for charge in rent_debts:
+        key = (charge.due_date.year, charge.due_date.month)
+        by_month.setdefault(key, []).append(f"- {rent_debt_bullet(charge)}")
+
+    utility_groups: dict[tuple[int, int], list[UtilityBillLine]] = {}
+    for line in utility_debts:
+        key = (line.bill.period_end.year, line.bill.period_end.month)
+        utility_groups.setdefault(key, []).append(line)
+
+    for key, lines in utility_groups.items():
+        by_month.setdefault(key, []).append(f"- {utility_debt_bullet(lines)}")
+
+    if not by_month:
+        return "Задолженностей на сегодня нет."
+
+    parts: list[str] = []
+    for year, month in sorted(by_month):
+        parts.append(f"{debt_month_heading(date(year, month, 1))}:")
+        parts.extend(by_month[(year, month)])
+    return "\n".join(parts)
+
+
 def build_message_context(
     session: Session,
     lease: Lease,
@@ -1104,6 +1181,7 @@ def build_message_context(
         "utility_debt_count": str(len(utility_items)),
         "utility_debt_details": "; ".join(utility_items),
         "all_debt_total": money_text(total_rent_debt + total_utility_debt),
+        "all_debts_breakdown": build_all_debts_breakdown(session, lease, today),
         "custom_text": custom_text,
     }
 
@@ -1127,12 +1205,16 @@ def render_message_text(
             + "\nПо месяцам: {rent_debt_months_details}."
             + "\nКоммуналка: {utility_debt_total}. Общий долг: {all_debt_total}."
         )
+    if template_key == "message_all_debts" and "{all_debts_breakdown}" not in template:
+        template = template.rstrip() + "\n{all_debts_breakdown}"
     return fill_template(template, context)
 
 
 def serialize_message_target(session: Session, lease: Lease) -> dict[str, Any]:
     charge = first_open_rent_charge(lease)
     line = first_open_utility_line(session, lease)
+    rent_debt = money(max(0.0, (charge.ip_due - charge.ip_paid) if charge else 0.0) + max(0.0, (charge.personal_due - charge.personal_paid) if charge else 0.0))
+    utility_debt = money(max(0.0, (line.total_amount - line.paid_amount) if line else 0.0))
     return {
         "lease_id": lease.id,
         "tenant_id": lease.tenant_id,
@@ -1143,13 +1225,36 @@ def serialize_message_target(session: Session, lease: Lease) -> dict[str, Any]:
         "linked": tenant_chat_linked(session, lease),
         "rent_charge_id": charge.id if charge else None,
         "rent_status": charge.status if charge else "",
-        "rent_debt": money(max(0.0, (charge.ip_due - charge.ip_paid) if charge else 0.0) + max(0.0, (charge.personal_due - charge.personal_paid) if charge else 0.0)),
+        "rent_debt": rent_debt,
         "rent_reminder": reminder_meta(session, lease, charge.due_date, rent_charge_id=charge.id) if charge else None,
         "utility_line_id": line.id if line else None,
         "utility_status": line.status if line else "",
-        "utility_debt": money(max(0.0, (line.total_amount - line.paid_amount) if line else 0.0)),
+        "utility_debt": utility_debt,
         "utility_reminder": reminder_meta(session, lease, line.due_date, utility_line_id=line.id) if line else None,
+        "all_debt_total": money(rent_debt + utility_debt),
     }
+
+
+def resolve_message_request(
+    session: Session,
+    payload: dict[str, Any],
+) -> tuple[Lease, str, RentCharge | None, UtilityBillLine | None, str]:
+    lease = session.get(Lease, int(payload["lease_id"]))
+    if not lease or not lease.active:
+        raise HTTPException(404, "Активный договор не найден")
+
+    template_key = (payload.get("template_key") or "").strip()
+    if template_key not in {"message_rent_due", "message_rent_overdue", "message_utility_bill", "message_all_debts", "custom"}:
+        raise HTTPException(400, "Неизвестный шаблон сообщения")
+
+    charge = session.get(RentCharge, int(payload["charge_id"])) if payload.get("charge_id") else None
+    line = session.get(UtilityBillLine, int(payload["utility_line_id"])) if payload.get("utility_line_id") else None
+    if charge and charge.lease_id != lease.id:
+        raise HTTPException(400, "Этот арендный долг относится к другому жильцу")
+    if line and line.lease_id != lease.id:
+        raise HTTPException(400, "Этот коммунальный счёт относится к другому жильцу")
+    custom_text = (payload.get("custom_text") or "").strip()
+    return lease, template_key, charge, line, custom_text
 
 
 def send_tenant_message(
@@ -1756,29 +1861,41 @@ def message_targets(session: Session = Depends(get_session)) -> list[dict[str, A
     return [serialize_message_target(session, lease) for lease in leases]
 
 
+@app.post("/api/messages/preview")
+def preview_message_to_tenant(payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
+    lease, template_key, charge, line, custom_text = resolve_message_request(session, payload)
+    text = render_message_text(session, template_key, lease, charge, line, custom_text)
+    if not text.strip():
+        raise HTTPException(400, "Текст сообщения пустой")
+    return {
+        "lease_id": lease.id,
+        "tenant": lease.tenant.full_name,
+        "apartment": lease.apartment.name,
+        "object": lease.apartment.object.name,
+        "template_key": template_key,
+        "template_label": reminder_label(template_key),
+        "linked": tenant_chat_linked(session, lease),
+        "text": text,
+        "payload": {
+            "lease_id": lease.id,
+            "template_key": template_key,
+            "charge_id": charge.id if charge else None,
+            "utility_line_id": line.id if line else None,
+            "custom_text": custom_text,
+        },
+    }
+
+
 @app.post("/api/messages/send")
 def send_message_to_tenant(payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
-    lease = session.get(Lease, int(payload["lease_id"]))
-    if not lease or not lease.active:
-        raise HTTPException(404, "Активный договор не найден")
-
-    template_key = (payload.get("template_key") or "").strip()
-    if template_key not in {"message_rent_due", "message_rent_overdue", "message_utility_bill", "custom"}:
-        raise HTTPException(400, "Неизвестный шаблон сообщения")
-
-    charge = session.get(RentCharge, int(payload["charge_id"])) if payload.get("charge_id") else None
-    line = session.get(UtilityBillLine, int(payload["utility_line_id"])) if payload.get("utility_line_id") else None
-    if charge and charge.lease_id != lease.id:
-        raise HTTPException(400, "Этот арендный долг относится к другому жильцу")
-    if line and line.lease_id != lease.id:
-        raise HTTPException(400, "Этот коммунальный счёт относится к другому жильцу")
+    lease, template_key, charge, line, custom_text = resolve_message_request(session, payload)
     result = send_tenant_message(
         session,
         lease,
         template_key,
         charge=charge,
         line=line,
-        custom_text=(payload.get("custom_text") or "").strip(),
+        custom_text=custom_text,
     )
     session.commit()
     return result

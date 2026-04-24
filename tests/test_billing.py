@@ -10,6 +10,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from rental_manager.database import Base
+from rental_manager.main import build_all_debts_breakdown, render_message_text
 from rental_manager.models import Apartment, Lease, Meter, MeterReading, RentalObject, Tenant, UtilityBill, UtilityBillLine, UtilityService
 from rental_manager.services.billing import (
     LEGACY_IMPORT_MARK,
@@ -276,6 +277,94 @@ class UtilityBillingTests(DatabaseTestCase):
         self.assertEqual(warnings[-1], "Пропущено уже выставленных сегментов: 1.")
         self.assertEqual(len(bill.lines), 1)
         self.assertEqual(bill.lines[0].note, "10.04.2026 -> 01.05.2026 (21 дн.)")
+
+    def test_all_debts_message_groups_rent_and_utility_by_month(self) -> None:
+        with self.seed() as session:
+            obj = session.get(RentalObject, 1)
+            apartment = session.get(Apartment, 1)
+            service = session.scalar(select(UtilityService).where(UtilityService.object_id == obj.id, UtilityService.kind == "electricity"))
+            lease = self._lease(session, apartment)
+            from rental_manager.models import RentCharge
+
+            feb_charge = RentCharge(
+                lease_id=lease.id,
+                period_start=date(2026, 2, 1),
+                period_end=date(2026, 2, 28),
+                due_date=date(2026, 2, 14),
+                ip_due=20000,
+                personal_due=2200,
+                ip_paid=20000,
+                personal_paid=0,
+                status="partial",
+            )
+            mar_charge = RentCharge(
+                lease_id=lease.id,
+                period_start=date(2026, 3, 1),
+                period_end=date(2026, 3, 31),
+                due_date=date(2026, 3, 14),
+                ip_due=20000,
+                personal_due=2200,
+                ip_paid=0,
+                personal_paid=2200,
+                status="partial",
+            )
+            feb_bill = UtilityBill(
+                service_id=service.id,
+                period_start=date(2026, 1, 15),
+                period_end=date(2026, 2, 15),
+                status="issued",
+                total_consumption=0,
+                apartment_consumption=0,
+                odn_consumption=0,
+                total_cost=14535,
+                average_unit_price=0,
+            )
+            feb_bill.lines.append(
+                UtilityBillLine(
+                    apartment_id=apartment.id,
+                    lease_id=lease.id,
+                    total_amount=14535,
+                    paid_amount=0,
+                    status="overdue",
+                    due_date=date(2026, 2, 20),
+                    note="15.01.2026 -> 15.02.2026 (31 дн.)",
+                )
+            )
+            mar_bill = UtilityBill(
+                service_id=service.id,
+                period_start=date(2026, 2, 15),
+                period_end=date(2026, 3, 15),
+                status="issued",
+                total_consumption=0,
+                apartment_consumption=0,
+                odn_consumption=0,
+                total_cost=11560,
+                average_unit_price=0,
+            )
+            mar_bill.lines.append(
+                UtilityBillLine(
+                    apartment_id=apartment.id,
+                    lease_id=lease.id,
+                    total_amount=11560,
+                    paid_amount=10000,
+                    status="partial",
+                    due_date=date(2026, 3, 20),
+                    note="15.02.2026 -> 15.03.2026 (28 дн.)",
+                )
+            )
+            session.add_all([feb_charge, mar_charge, feb_bill, mar_bill])
+            session.flush()
+
+            breakdown = build_all_debts_breakdown(session, lease, today=date(2026, 4, 24))
+            text = render_message_text(session, "message_all_debts", lease)
+
+        self.assertIn("Февраль:", breakdown)
+        self.assertIn("ИП оплачено", breakdown)
+        self.assertIn("перевод по номеру телефона не поступил", breakdown)
+        self.assertIn("Март:", breakdown)
+        self.assertIn("ИП не оплачено", breakdown)
+        self.assertIn("Остаток", breakdown)
+        self.assertIn("Отправьте чеки в этот чат в виде документа", text)
 
     @staticmethod
     def _lease(session, apartment: Apartment, start_date: date = date(2026, 4, 1), end_date: date | None = None, full_name: str | None = None) -> Lease:

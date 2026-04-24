@@ -204,9 +204,10 @@
         </div>
         <div class="card muted-box">
           <strong>Плейсхолдеры</strong>
-          <p class="muted">{tenant_name}, {apartment}, {object}, {ip_due}, {personal_due}, {total_due}, {debt}, {rent_due_date}, {rent_period}, {utility_total}, {utility_due_date}, {period}, {utility_service}, {custom_text}, {amount}, {channel}, {receipt_status}, {receipt_summary}</p>
+          <p class="muted">{tenant_name}, {apartment}, {object}, {ip_due}, {personal_due}, {total_due}, {debt}, {rent_due_date}, {rent_period}, {utility_total}, {utility_due_date}, {period}, {utility_service}, {rent_debt_months}, {rent_debt_months_details}, {utility_debt_details}, {all_debts_breakdown}, {all_debt_total}, {custom_text}, {amount}, {channel}, {receipt_status}, {receipt_summary}</p>
         </div>
         <div id="messageTargets" class="table-wrap"></div>
+        <div id="messagePreviewPanel" class="stack"></div>
         <div class="section-title">
           <h2>Ручной контроль платежей</h2>
           <span>Для налички, переводов с твоей карты и прочих жизненных кульбитов.</span>
@@ -260,6 +261,9 @@
           </label>
           <label class="wide">Коммуналка
             <textarea name="message_utility_bill" id="messageUtilityBillInput" rows="3"></textarea>
+          </label>
+          <label class="wide">Все долги
+            <textarea name="message_all_debts" id="messageAllDebtsInput" rows="8"></textarea>
           </label>
           <label class="wide">Ответ жильцу: чек принят
             <textarea name="message_receipt_received" id="messageReceiptReceivedInput" rows="3"></textarea>

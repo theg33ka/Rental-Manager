@@ -570,9 +570,33 @@ section {
   gap: 10px;
 }
 
-.attention-card__body p {
+.attention-card__copy {
+  display: grid;
+  gap: 8px;
+}
+
+.attention-card__copy p {
   padding-top: 10px;
   border-top: 1px dashed var(--line);
+  margin: 0;
+}
+
+.attention-list {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+}
+
+.message-preview {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  font: inherit;
 }
 
 .attention-actions {

@@ -6,6 +6,7 @@ const state = {
   expenses: [],
   tariffs: [],
   messageTargets: [],
+  messagePreview: null,
   suspiciousReceipts: [],
   paymentHistory: null,
   settings: {},
@@ -32,6 +33,11 @@ const statusText = {
 
 const money = (value) => new Intl.NumberFormat("ru-RU", { style: "currency", currency: "RUB", maximumFractionDigits: 2 }).format(value || 0);
 const today = () => new Date().toISOString().slice(0, 10);
+const daysAgo = (days) => {
+  const value = new Date();
+  value.setDate(value.getDate() - days);
+  return new Date(value.getTime() - value.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+};
 const monthNames = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
 const monthNamesNominative = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"];
 
@@ -197,6 +203,7 @@ function applySettings(settings = {}) {
     "#messageRentDueInput": "message_rent_due",
     "#messageRentOverdueInput": "message_rent_overdue",
     "#messageUtilityBillInput": "message_utility_bill",
+    "#messageAllDebtsInput": "message_all_debts",
     "#messageReceiptReceivedInput": "message_receipt_received",
     "#messageReceiptReviewInput": "message_receipt_review",
     "#messageOwnerReceiptAlertInput": "message_owner_receipt_alert",
@@ -290,14 +297,26 @@ function hydrateForms() {
   qsa('select[name="meter_id"]').forEach((select) => setOptions(select, state.bootstrap.meters, (m) => `${m.object}: ${m.name}`));
   qsa('select[name="service_id"]').forEach((select) => setOptions(select, services, (s) => `${s.object}: ${s.name}`));
   qsa('select[name="lease_id"]').forEach((select) => setOptions(select, activeLeases, (lease) => `${lease.object}: ${lease.apartment} — ${lease.tenant}`));
+  const rangeInputIds = new Set(["rentStart", "rentEnd", "reportStart", "reportEnd"]);
   const dateInputs = qsa('input[type="date"]');
   dateInputs.forEach((input) => {
+    if (rangeInputIds.has(input.id)) return;
     if (!input.value) input.value = today();
   });
   const paidAtInput = qs("#manualPaymentPaidAtInput");
   if (paidAtInput && !paidAtInput.value) {
     paidAtInput.value = localDateTimeNow();
   }
+  const rangedDefaults = {
+    rentStart: daysAgo(30),
+    rentEnd: today(),
+    reportStart: daysAgo(30),
+    reportEnd: today(),
+  };
+  Object.entries(rangedDefaults).forEach(([id, value]) => {
+    const input = qs(`#${id}`);
+    if (input && !input.value) input.value = value;
+  });
   const cancelBtn = qs("#cancelLeaseEditBtn");
   const submitBtn = qs("#onboardSubmitBtn");
   if (cancelBtn) cancelBtn.hidden = !state.editingLeaseId;
@@ -316,6 +335,7 @@ function renderAll() {
   renderTariffs();
   renderExpenses();
   renderMessages();
+  renderMessagePreview();
   renderSuspiciousReceipts();
   setReportLinks();
 }
@@ -325,6 +345,109 @@ function formatDateTime(value) {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return value;
   return parsed.toLocaleString("ru-RU", { day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" });
+}
+
+function rentChannelSummary(item) {
+  const ipDone = item.ip_status === "paid" || item.ip_status === "paid_ahead";
+  const personalDone = item.personal_status === "paid" || item.personal_status === "paid_ahead";
+  if (ipDone && personalDone) return "всё оплачено";
+  if (ipDone && !personalDone) return "ИП оплачен, перевод нет";
+  if (!ipDone && personalDone) return "ИП нет, перевод оплачен";
+  return "ИП нет, перевода нет";
+}
+
+function rentIssueLine(item, issueKind) {
+  const month = formatMonth(item.due_date);
+  if (issueKind === "rent_today") return `Сегодня срок аренды за ${month}`;
+  if (issueKind === "rent_deferred") return `Отсрочка по аренде за ${month} до ${formatDate(item.deferral_until)}`;
+  if (issueKind === "rent_partial") return `Частичная оплата аренды за ${month} (${rentChannelSummary(item)})`;
+  if (item.total_paid <= 0.009) return `Нет аренды за ${month}`;
+  return `Просрочена аренда за ${month} (${rentChannelSummary(item)})`;
+}
+
+function utilityIssueLine(item) {
+  const prefix = item.paid_amount > 0 ? "Частично оплачен счёт за коммуналку" : "Не оплачен счёт за коммуналку";
+  return `${prefix} (${item.bill_period_label || item.period_label})`;
+}
+
+function issueSeverity(issueKind) {
+  return ["rent_overdue", "utility_overdue"].includes(issueKind) ? 2 : 1;
+}
+
+function collectTenantAttentionGroups(dashboard) {
+  const groups = new Map();
+  const addIssue = (issueKind, item) => {
+    if (!item.lease_id) return;
+    if (!groups.has(item.lease_id)) {
+      groups.set(item.lease_id, {
+        leaseId: item.lease_id,
+        tenant: item.tenant,
+        object: item.object,
+        apartment: item.apartment,
+        issues: [],
+        rentItems: [],
+        utilityItems: [],
+        maxSeverity: 0,
+      });
+    }
+    const group = groups.get(item.lease_id);
+    group.maxSeverity = Math.max(group.maxSeverity, issueSeverity(issueKind));
+    if (issueKind.startsWith("rent")) {
+      group.rentItems.push(item);
+      group.issues.push({ kind: issueKind, text: rentIssueLine(item, issueKind), reminder: item.reminder, date: item.due_date });
+    } else {
+      group.utilityItems.push(item);
+      group.issues.push({ kind: issueKind, text: utilityIssueLine(item), reminder: item.reminder, date: item.bill_period_end || item.due_date });
+    }
+  };
+
+  dashboard.rent_today.forEach((item) => addIssue("rent_today", item));
+  dashboard.rent_overdue.forEach((item) => addIssue("rent_overdue", item));
+  dashboard.rent_partial.forEach((item) => addIssue("rent_partial", item));
+  dashboard.rent_deferred.forEach((item) => addIssue("rent_deferred", item));
+  dashboard.utility_overdue.forEach((item) => addIssue("utility_overdue", item));
+  dashboard.utility_partial.forEach((item) => addIssue("utility_partial", item));
+  return [...groups.values()].sort((left, right) => right.maxSeverity - left.maxSeverity || `${left.object} ${left.apartment}`.localeCompare(`${right.object} ${right.apartment}`, "ru"));
+}
+
+function tenantAttentionBadges(group) {
+  const earliest = [...group.issues].sort((left, right) => String(left.date).localeCompare(String(right.date)))[0];
+  const rentReminder = group.rentItems[0]?.reminder;
+  const utilityReminder = group.utilityItems[0]?.reminder;
+  return [
+    earliest ? monthMeta(earliest.date) : "",
+    rentReminder ? labeledReminderBadge("аренда", rentReminder) : "",
+    utilityReminder ? labeledReminderBadge("коммуналка", utilityReminder) : "",
+  ].join("");
+}
+
+function tenantAttentionActions(group) {
+  const rentItem = group.rentItems.find((item) => item.status === "overdue") || group.rentItems[0];
+  const utilityItem = group.utilityItems.find((item) => item.status === "overdue") || group.utilityItems[0];
+  return `
+    <button class="mini primary" onclick="previewTemplateMessage(${group.leaseId}, 'message_all_debts')">Все долги</button>
+    ${rentItem ? `<button class="mini" onclick="previewTemplateMessage(${group.leaseId}, 'message_rent_overdue', ${rentItem.id}, null)">Аренда</button>` : ""}
+    ${utilityItem ? `<button class="mini" onclick="previewTemplateMessage(${group.leaseId}, 'message_utility_bill', null, ${utilityItem.id})">Коммуналка</button>` : ""}
+    ${rentItem ? rentActions(rentItem) : ""}
+    ${utilityItem ? utilityActions(utilityItem) : ""}
+  `;
+}
+
+function tenantAttentionCard(group) {
+  const issueList = `<ul class="attention-list">${group.issues.map((issue) => `<li>${issue.text}</li>`).join("")}</ul>`;
+  const lead = group.utilityItems.length && group.rentItems.length
+    ? "Есть долг по аренде и коммуналке."
+    : group.rentItems.length
+      ? "Есть долг по аренде."
+      : "Есть долг по коммуналке.";
+  const type = group.maxSeverity >= 2 ? "danger" : "warn";
+  return attentionCard(
+    type,
+    `${group.object}, ${group.apartment}<br><span class="muted">${group.tenant}</span>`,
+    `<p>${lead}</p>${issueList}`,
+    tenantAttentionActions(group),
+    tenantAttentionBadges(group),
+  );
 }
 
 function renderDashboard() {
@@ -341,13 +464,8 @@ function renderDashboard() {
   qs("#summaryGrid").innerHTML = metrics.map(([label, value]) => `<div class="metric"><strong>${value}</strong><span>${label}</span></div>`).join("");
   renderMonthlyReportTray(dashboard.monthly_reports);
 
-  const cards = [];
-  dashboard.rent_today.forEach((item) => cards.push(attentionCard("warn", "Сегодня оплата аренды", `${item.object}, ${item.apartment}, ${item.tenant}. К оплате ${money(item.debt)}.`, rentAttentionActions(item), attentionBadges(item.due_date, item.reminder, `срок ${formatDate(item.due_date)}`))));
-  dashboard.rent_overdue.forEach((item) => cards.push(attentionCard("danger", "Просрочена аренда", `${item.object}, ${item.apartment}, ${item.tenant}. Долг ${money(item.debt)}. ИП ${money(Math.max(0, item.ip_due - item.ip_paid))}, перевод ${money(Math.max(0, item.personal_due - item.personal_paid))}.`, rentAttentionActions(item, true), attentionBadges(item.due_date, item.reminder, `срок ${formatDate(item.due_date)}`))));
-  dashboard.rent_partial.forEach((item) => cards.push(attentionCard("warn", "Аренда оплачена частично", `${item.object}, ${item.apartment}, ${item.tenant}. Осталось ${money(item.debt)}.`, rentAttentionActions(item, item.due_date <= appToday()), attentionBadges(item.due_date, item.reminder, `срок ${formatDate(item.due_date)}`))));
-  dashboard.rent_deferred.forEach((item) => cards.push(attentionCard("warn", "Скоро конец отсрочки", `${item.object}, ${item.apartment}, ${item.tenant}. Осталось ${item.deferral_days_left} дн., до ${formatDate(item.deferral_until)}.${item.deferral_note ? ` ${item.deferral_note}` : ""}`, rentAttentionActions(item, true), attentionBadges(item.due_date, item.reminder, `срок ${formatDate(item.due_date)}`))));
-  dashboard.utility_overdue.forEach((item) => cards.push(attentionCard("danger", "Просрочена коммуналка", `${item.apartment}, ${item.tenant}. Долг ${money(item.debt)}.`, utilityAttentionActions(item), attentionBadges(item.due_date, item.reminder, `срок ${formatDate(item.due_date)}`))));
-  dashboard.utility_partial.forEach((item) => cards.push(attentionCard("warn", "Коммуналка оплачена частично", `${item.apartment}, ${item.tenant}. Осталось ${money(item.debt)}.`, utilityAttentionActions(item), attentionBadges(item.due_date, item.reminder, `срок ${formatDate(item.due_date)}`))));
+  const tenantCards = collectTenantAttentionGroups(dashboard).map(tenantAttentionCard);
+  const cards = [...tenantCards];
   dashboard.provider_debts.forEach((item) => cards.push(attentionCard("danger", "Поставщик не отмечен как оплаченный", `${item.object}: ${item.service} за ${formatDateRange(item.period_start, item.period_end)}. Сумма ${money(item.total_cost)}.`, `<button class="mini primary" onclick="providerPaid(${item.id})">Поставщик оплачен</button><button class="mini" onclick="openUtilitiesTab()">Открыть коммуналку</button>`, attentionBadges(item.period_end, null, "деньги у поставщика ещё не закрыты"))));
   dashboard.stale_readings.forEach((item) => cards.push(attentionCard("warn", "Давно нет показаний", `${item.object}: ${item.service}. Последнее: ${item.last_date ? formatDate(item.last_date) : "нет"}.`, `<button class="mini" onclick="openMetersTab()">Открыть счётчики</button><button class="mini" onclick="openUtilitiesTab()">Быстрая передача</button>`, attentionBadges(item.last_date || appToday(), null, item.days ? `${item.days} дн. без обновления` : "пока пусто"))));
   dashboard.suspicious_receipts.forEach((item) => cards.push(attentionCard("danger", "Подозрительный чек", `${money(item.amount)}. ${item.recipient_name || "получатель не распознан"}. ${item.notes || ""}`, `<button class="mini" onclick="openMessagesTab()">Открыть сообщения</button>`, attentionBadges(item.created_at, null, "нужна ручная проверка"))));
@@ -391,17 +509,24 @@ function attentionBadges(monthValue, reminder, extra = "") {
   return [monthMeta(monthValue), reminderBadge(reminder), extra ? `<span class="pill">${extra}</span>` : ""].join("");
 }
 
+function labeledReminderBadge(label, reminder) {
+  if (!reminder) return `<span class="pill">${label}: без напоминаний</span>`;
+  if (reminder.latest) return `<span class="pill ok">${label}: ${reminder.latest.label}</span>`;
+  if (reminder.block_reason) return `<span class="pill warn">${label}: ${reminder.block_reason}</span>`;
+  return `<span class="pill">${label}: без напоминаний</span>`;
+}
+
 function rentAttentionActions(charge, overdueMode = false) {
   const template = overdueMode ? "message_rent_overdue" : "message_rent_due";
   return `
-    <button class="mini" onclick="sendTemplateMessage(${charge.lease_id}, '${template}', ${charge.id}, null)">Напомнить</button>
+    <button class="mini" onclick="previewTemplateMessage(${charge.lease_id}, '${template}', ${charge.id}, null)">Напомнить</button>
     ${rentActions(charge)}
   `;
 }
 
 function utilityAttentionActions(line) {
   return `
-    <button class="mini" onclick="sendTemplateMessage(${line.lease_id}, 'message_utility_bill', null, ${line.id})">Напомнить</button>
+    <button class="mini" onclick="previewTemplateMessage(${line.lease_id}, 'message_utility_bill', null, ${line.id})">Напомнить</button>
     ${utilityActions(line)}
   `;
 }
@@ -419,7 +544,7 @@ function attentionCard(type, title, text, actions, badges) {
       <div class="pill-row attention-card__badges">${badges || ""}</div>
       <div class="attention-card__body">
         <h3>${title}</h3>
-        <p>${text}</p>
+        <div class="attention-card__copy">${text}</div>
       </div>
       <div class="attention-actions">${actions || ""}</div>
     </article>
@@ -892,15 +1017,45 @@ function renderMessages() {
       <td>${target.rent_charge_id ? `${statusPill(target.rent_status)}<br><span class="muted">${money(target.rent_debt)}</span><br>${compactReminderText(target.rent_reminder)}` : '<span class="muted">нет</span>'}</td>
       <td>${target.utility_line_id ? `${statusPill(target.utility_status)}<br><span class="muted">${money(target.utility_debt)}</span><br>${compactReminderText(target.utility_reminder)}` : '<span class="muted">нет</span>'}</td>
       <td class="actions">
-        ${target.rent_charge_id ? `<button class="mini primary" onclick="sendTemplateMessage(${target.lease_id}, 'message_rent_due', ${target.rent_charge_id}, null)">Аренда</button>` : ""}
-        ${target.rent_charge_id ? `<button class="mini" onclick="sendTemplateMessage(${target.lease_id}, 'message_rent_overdue', ${target.rent_charge_id}, null)">Просрочка</button>` : ""}
-        ${target.utility_line_id ? `<button class="mini primary" onclick="sendTemplateMessage(${target.lease_id}, 'message_utility_bill', null, ${target.utility_line_id})">Коммуналка</button>` : ""}
-        <button class="mini" onclick="sendCustomMessage(${target.lease_id})">Свой текст</button>
+        ${target.rent_charge_id ? `<button class="mini primary" onclick="previewTemplateMessage(${target.lease_id}, 'message_rent_due', ${target.rent_charge_id}, null)">Аренда</button>` : ""}
+        ${target.rent_charge_id ? `<button class="mini" onclick="previewTemplateMessage(${target.lease_id}, 'message_rent_overdue', ${target.rent_charge_id}, null)">Просрочка</button>` : ""}
+        ${target.utility_line_id ? `<button class="mini primary" onclick="previewTemplateMessage(${target.lease_id}, 'message_utility_bill', null, ${target.utility_line_id})">Коммуналка</button>` : ""}
+        <button class="mini" onclick="previewTemplateMessage(${target.lease_id}, 'message_all_debts')">Все долги</button>
+        <button class="mini" onclick="previewCustomMessage(${target.lease_id})">Свой текст</button>
       </td>
     </tr>
   `).join("");
   root.innerHTML = table(["Объект", "Квартира", "Жилец", "Связка", "Аренда", "Коммуналка", "Действия"], rows);
   updateManualPaymentKind();
+}
+
+function renderMessagePreview() {
+  const root = qs("#messagePreviewPanel");
+  if (!root) return;
+  if (!state.messagePreview) {
+    root.innerHTML = "";
+    return;
+  }
+  const preview = state.messagePreview;
+  root.innerHTML = `
+    <article class="card">
+      <div class="section-title">
+        <div>
+          <h3>Предпросмотр сообщения</h3>
+          <span>${preview.object}, ${preview.apartment}, ${preview.tenant}</span>
+        </div>
+        ${preview.linked ? '<span class="pill ok">бот может отправить</span>' : '<span class="pill warn">ждём /start от жильца</span>'}
+      </div>
+      <div class="pill-row">
+        <span class="pill">${preview.template_label}</span>
+      </div>
+      <pre class="message-preview">${preview.text}</pre>
+      <div class="attention-actions">
+        <button class="mini primary" onclick="sendPreviewedMessage()">Отправить</button>
+        <button class="mini" onclick="clearMessagePreview()">Скрыть</button>
+      </div>
+    </article>
+  `;
 }
 
 function table(headers, rows) {
@@ -971,32 +1126,42 @@ async function compensateExpense(id) {
   await loadAll();
 }
 
-async function sendTemplateMessage(leaseId, templateKey, chargeId = null, utilityLineId = null) {
-  await api("/api/messages/send", {
+async function previewTemplateMessage(leaseId, templateKey, chargeId = null, utilityLineId = null, customText = "") {
+  openMessagesTab();
+  state.messagePreview = await api("/api/messages/preview", {
     method: "POST",
     body: JSON.stringify({
       lease_id: leaseId,
       template_key: templateKey,
       charge_id: chargeId,
       utility_line_id: utilityLineId,
-    }),
-  });
-  toast("Сообщение отправлено через бота");
-  await loadAll();
-}
-
-async function sendCustomMessage(leaseId) {
-  const customText = prompt("Текст сообщения");
-  if (!customText) return;
-  await api("/api/messages/send", {
-    method: "POST",
-    body: JSON.stringify({
-      lease_id: leaseId,
-      template_key: "custom",
       custom_text: customText,
     }),
   });
+  renderMessagePreview();
+  qs("#messagePreviewPanel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function previewCustomMessage(leaseId) {
+  const customText = prompt("Текст сообщения");
+  if (!customText) return;
+  await previewTemplateMessage(leaseId, "custom", null, null, customText);
+}
+
+function clearMessagePreview() {
+  state.messagePreview = null;
+  renderMessagePreview();
+}
+
+async function sendPreviewedMessage() {
+  if (!state.messagePreview?.payload) return;
+  await api("/api/messages/send", {
+    method: "POST",
+    body: JSON.stringify(state.messagePreview.payload),
+  });
   toast("Сообщение отправлено через бота");
+  state.messagePreview = null;
+  renderMessagePreview();
   await loadAll();
 }
 
