@@ -306,6 +306,23 @@ def notification_cutoff_date(session: Session) -> date:
     return date.today()
 
 
+def configured_notification_cutoff_date(session: Session) -> date | None:
+    setting = session.get(AppSetting, "notification_cutoff_date")
+    raw = (setting.value or "").strip() if setting else ""
+    if not raw:
+        return None
+    try:
+        return parse_date(raw, date.today())
+    except ValueError:
+        return None
+
+
+def debt_visible_by_cutoff(due_date: date | None, cutoff: date | None) -> bool:
+    if not cutoff or not due_date:
+        return True
+    return due_date >= cutoff
+
+
 def message_template(session: Session, key: str) -> str:
     return get_setting_value(session, key)
 
@@ -989,6 +1006,7 @@ def build_monthly_reports(session: Session, today: date | None = None) -> list[d
 
 def build_dashboard(session: Session) -> dict[str, Any]:
     today = date.today()
+    cutoff = configured_notification_cutoff_date(session)
     charges = session.scalars(select(RentCharge).join(Lease).join(Apartment).where(Apartment.active.is_(True)).order_by(RentCharge.due_date)).all()
     for charge in charges:
         update_rent_charge_status(charge, today)
@@ -1002,17 +1020,41 @@ def build_dashboard(session: Session) -> dict[str, Any]:
     def utility_debt(line: UtilityBillLine) -> float:
         return money(max(0, float(line.total_amount or 0) - float(line.paid_amount or 0)))
 
-    overdue_rent = [serialize_rent_charge(charge, session) for charge in charges if charge.status == "overdue" and rent_debt(charge) > 0]
-    partial_rent = [serialize_rent_charge(charge, session) for charge in charges if charge.status == "partial" and rent_debt(charge) > 0]
-    today_rent = [serialize_rent_charge(charge, session) for charge in charges if charge.due_date == today and charge.status not in {"paid", "paid_ahead"} and rent_debt(charge) > 0]
+    overdue_rent = [
+        serialize_rent_charge(charge, session)
+        for charge in charges
+        if charge.status == "overdue" and rent_debt(charge) > 0 and debt_visible_by_cutoff(charge.due_date, cutoff)
+    ]
+    partial_rent = [
+        serialize_rent_charge(charge, session)
+        for charge in charges
+        if charge.status == "partial" and rent_debt(charge) > 0 and debt_visible_by_cutoff(charge.due_date, cutoff)
+    ]
+    today_rent = [
+        serialize_rent_charge(charge, session)
+        for charge in charges
+        if charge.due_date == today and charge.status not in {"paid", "paid_ahead"} and rent_debt(charge) > 0 and debt_visible_by_cutoff(charge.due_date, cutoff)
+    ]
     deferred = [
         serialize_rent_charge(charge, session)
         for charge in charges
-        if charge.status == "deferred" and charge.deferral_until and charge.deferral_until <= today + timedelta(days=2) and rent_debt(charge) > 0
+        if charge.status == "deferred"
+        and charge.deferral_until
+        and charge.deferral_until <= today + timedelta(days=2)
+        and rent_debt(charge) > 0
+        and debt_visible_by_cutoff(charge.due_date, cutoff)
     ]
 
-    overdue_utilities = [serialize_bill_line(line, session) for line in utility_lines if line.status == "overdue" and utility_debt(line) > 0]
-    partial_utilities = [serialize_bill_line(line, session) for line in utility_lines if line.status == "partial" and utility_debt(line) > 0]
+    overdue_utilities = [
+        serialize_bill_line(line, session)
+        for line in utility_lines
+        if line.status == "overdue" and utility_debt(line) > 0 and debt_visible_by_cutoff(line.due_date, cutoff)
+    ]
+    partial_utilities = [
+        serialize_bill_line(line, session)
+        for line in utility_lines
+        if line.status == "partial" and utility_debt(line) > 0 and debt_visible_by_cutoff(line.due_date, cutoff)
+    ]
 
     pending_expenses = session.scalars(
         select(Expense).where(Expense.source_funds == "personal", Expense.compensation_status != "compensated")
@@ -1035,7 +1077,9 @@ def build_dashboard(session: Session) -> dict[str, Any]:
     provider_debts = [
         serialize_bill(bill)
         for bill in session.scalars(select(UtilityBill).where(UtilityBill.provider_paid.is_(False))).all()
-        if bill.status in {"issued", "draft"} and any(line.status != "paid" for line in bill.lines)
+        if bill.status in {"issued", "draft"}
+        and debt_visible_by_cutoff(bill.due_date or bill.period_end, cutoff)
+        and any(line.status != "paid" for line in bill.lines)
     ]
 
     suspicious_receipts = session.scalars(select(PaymentReceipt).where(PaymentReceipt.status == "suspicious")).all()
@@ -1060,20 +1104,24 @@ def money_text(value: float) -> str:
     return f"{money(value):,.2f}".replace(",", " ").replace(".", ",") + " ₽"
 
 
-def first_open_rent_charge(lease: Lease) -> RentCharge | None:
+def first_open_rent_charge(lease: Lease, cutoff: date | None = None) -> RentCharge | None:
     charges = sorted(lease.rent_charges, key=lambda item: item.due_date)
     for charge in charges:
         update_rent_charge_status(charge)
+        if not debt_visible_by_cutoff(charge.due_date, cutoff):
+            continue
         if charge.status not in {"paid", "paid_ahead"}:
             return charge
     return None
 
 
-def first_open_utility_line(session: Session, lease: Lease) -> UtilityBillLine | None:
+def first_open_utility_line(session: Session, lease: Lease, cutoff: date | None = None) -> UtilityBillLine | None:
     lines = session.scalars(select(UtilityBillLine).where(UtilityBillLine.lease_id == lease.id)).all()
     lines = sorted(lines, key=lambda item: (item.due_date or date.max, item.id))
     for line in lines:
         update_utility_line_status(line)
+        if not debt_visible_by_cutoff(line.due_date, cutoff):
+            continue
         if line.status not in {"paid", "paid_ahead"}:
             return line
     return None
@@ -1085,25 +1133,30 @@ def month_title(value: date | None) -> str:
     return f"{MONTH_NAMES[value.month - 1]} {value.year}"
 
 
-def outstanding_rent_charges(lease: Lease, today: date | None = None) -> list[RentCharge]:
+def outstanding_rent_charges(lease: Lease, today: date | None = None, cutoff: date | None = None) -> list[RentCharge]:
     today = today or date.today()
     result: list[RentCharge] = []
     for charge in sorted(lease.rent_charges, key=lambda item: (item.due_date, item.id)):
         update_rent_charge_status(charge, today)
         debt = max(0.0, charge.ip_due - charge.ip_paid) + max(0.0, charge.personal_due - charge.personal_paid)
-        if debt > 0.009 and charge.due_date <= today:
+        if debt > 0.009 and charge.due_date <= today and debt_visible_by_cutoff(charge.due_date, cutoff):
             result.append(charge)
     return result
 
 
-def outstanding_utility_lines(session: Session, lease: Lease, today: date | None = None) -> list[UtilityBillLine]:
+def outstanding_utility_lines(
+    session: Session,
+    lease: Lease,
+    today: date | None = None,
+    cutoff: date | None = None,
+) -> list[UtilityBillLine]:
     today = today or date.today()
     result: list[UtilityBillLine] = []
     lines = session.scalars(select(UtilityBillLine).where(UtilityBillLine.lease_id == lease.id)).all()
     for line in sorted(lines, key=lambda item: (item.due_date or date.max, item.id)):
         update_utility_line_status(line, today)
         debt = max(0.0, line.total_amount - line.paid_amount)
-        if debt > 0.009 and line.due_date and line.due_date <= today:
+        if debt > 0.009 and line.due_date and line.due_date <= today and debt_visible_by_cutoff(line.due_date, cutoff):
             result.append(line)
     return result
 
@@ -1164,11 +1217,12 @@ def selected_utility_lines(
     utility_lines_override: list[UtilityBillLine] | None = None,
     today: date | None = None,
 ) -> list[UtilityBillLine]:
+    cutoff = configured_notification_cutoff_date(session)
     if utility_lines_override is not None:
-        lines = utility_lines_override
+        lines = [item for item in utility_lines_override if debt_visible_by_cutoff(item.due_date, cutoff)]
     else:
-        lines = outstanding_utility_lines(session, lease, today)
-        if line and all(existing.id != line.id for existing in lines):
+        lines = outstanding_utility_lines(session, lease, today, cutoff)
+        if line and debt_visible_by_cutoff(line.due_date, cutoff) and all(existing.id != line.id for existing in lines):
             lines = [*lines, line]
     unique: dict[int, UtilityBillLine] = {}
     for item in sorted(lines, key=lambda current: (current.bill.period_end, current.id)):
@@ -1180,8 +1234,9 @@ def selected_utility_lines(
 
 def build_all_debts_breakdown(session: Session, lease: Lease, today: date | None = None) -> str:
     today = today or date.today()
-    rent_debts = outstanding_rent_charges(lease, today)
-    utility_debts = outstanding_utility_lines(session, lease, today)
+    cutoff = configured_notification_cutoff_date(session)
+    rent_debts = outstanding_rent_charges(lease, today, cutoff)
+    utility_debts = outstanding_utility_lines(session, lease, today, cutoff)
 
     by_month: dict[tuple[int, int], list[str]] = {}
     for charge in rent_debts:
@@ -1216,8 +1271,9 @@ def build_message_context(
     utility_due_date_override: date | None = None,
 ) -> dict[str, str]:
     today = date.today()
-    charge = charge or first_open_rent_charge(lease)
-    line = line or first_open_utility_line(session, lease)
+    cutoff = configured_notification_cutoff_date(session)
+    charge = charge or first_open_rent_charge(lease, cutoff)
+    line = line or first_open_utility_line(session, lease, cutoff)
     current_rent_debt = 0.0
     ip_due = 0.0
     personal_due = 0.0
@@ -1249,8 +1305,8 @@ def build_message_context(
                 for item in utility_lines
             )
 
-    rent_debts = outstanding_rent_charges(lease, today)
-    utility_debts = outstanding_utility_lines(session, lease, today)
+    rent_debts = outstanding_rent_charges(lease, today, cutoff)
+    utility_debts = outstanding_utility_lines(session, lease, today, cutoff)
     total_rent_debt = sum(max(0.0, item.ip_due - item.ip_paid) + max(0.0, item.personal_due - item.personal_paid) for item in rent_debts)
     total_utility_debt = sum(max(0.0, item.total_amount - item.paid_amount) for item in utility_debts)
 
@@ -1336,8 +1392,9 @@ def render_message_text(
 
 
 def serialize_message_target(session: Session, lease: Lease) -> dict[str, Any]:
-    charge = first_open_rent_charge(lease)
-    line = first_open_utility_line(session, lease)
+    cutoff = configured_notification_cutoff_date(session)
+    charge = first_open_rent_charge(lease, cutoff)
+    line = first_open_utility_line(session, lease, cutoff)
     rent_debt = money(max(0.0, (charge.ip_due - charge.ip_paid) if charge else 0.0) + max(0.0, (charge.personal_due - charge.personal_paid) if charge else 0.0))
     utility_debt = money(max(0.0, (line.total_amount - line.paid_amount) if line else 0.0))
     return {

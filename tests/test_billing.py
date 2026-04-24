@@ -10,8 +10,8 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from rental_manager.database import Base
-from rental_manager.main import build_all_debts_breakdown, render_message_text
-from rental_manager.models import Apartment, Lease, Meter, MeterReading, RentalObject, Tenant, UtilityBill, UtilityBillLine, UtilityService
+from rental_manager.main import build_all_debts_breakdown, build_dashboard, render_message_text
+from rental_manager.models import AppSetting, Apartment, Lease, Meter, MeterReading, RentalObject, RentCharge, Tenant, UtilityBill, UtilityBillLine, UtilityService
 from rental_manager.services.billing import (
     LEGACY_IMPORT_MARK,
     allocate_odn,
@@ -495,6 +495,59 @@ class UtilityBillingTests(DatabaseTestCase):
             session.add(MeterReading(meter_id=meter.id, reading_date=date(2026, 4, 1), value=start_value))
             session.add(MeterReading(meter_id=meter.id, reading_date=date(2026, 5, 1), value=end_value))
         session.flush()
+
+
+class DashboardCutoffTests(DatabaseTestCase):
+    def test_dashboard_ignores_debts_before_cutoff_date(self) -> None:
+        with self.Session() as session:
+            rental_object = RentalObject(name="Тестовый дом", short_code="ТД")
+            tenant = Tenant(full_name="Старый хвост")
+            session.add_all([rental_object, tenant, AppSetting(key="notification_cutoff_date", value="2026-01-01")])
+            session.flush()
+
+            apartment = Apartment(object_id=rental_object.id, name="ТД1", sort_order=1, odn_share_percent=100, active=True)
+            session.add(apartment)
+            session.flush()
+
+            lease = Lease(
+                apartment_id=apartment.id,
+                tenant_id=tenant.id,
+                start_date=date(2025, 1, 1),
+                payment_day=14,
+                ip_amount=20000,
+                personal_amount=3000,
+            )
+            session.add(lease)
+            session.flush()
+
+            session.add_all(
+                [
+                    RentCharge(
+                        lease_id=lease.id,
+                        period_start=date(2025, 12, 14),
+                        period_end=date(2026, 1, 13),
+                        due_date=date(2025, 12, 14),
+                        ip_due=20000,
+                        personal_due=3000,
+                        status="overdue",
+                    ),
+                    RentCharge(
+                        lease_id=lease.id,
+                        period_start=date(2026, 1, 14),
+                        period_end=date(2026, 2, 13),
+                        due_date=date(2026, 1, 14),
+                        ip_due=20000,
+                        personal_due=3000,
+                        status="overdue",
+                    ),
+                ]
+            )
+            session.commit()
+
+            dashboard = build_dashboard(session)
+
+        self.assertEqual(len(dashboard["rent_overdue"]), 1)
+        self.assertEqual(dashboard["rent_overdue"][0]["due_date"], "2026-01-14")
 
 
 class StatusHelperTests(unittest.TestCase):
