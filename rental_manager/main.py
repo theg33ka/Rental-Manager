@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from rental_manager.database import ROOT_DIR, SessionLocal, get_session, init_db
@@ -49,8 +49,17 @@ from rental_manager.services.billing import (
     update_rent_charge_status,
     update_utility_line_status,
 )
+from rental_manager.services.payment_allocation import (
+    EPS,
+    build_rent_plan,
+    build_utility_plan,
+    create_rent_receipts,
+    create_utility_receipts,
+    recalculate_lease_balances,
+    rent_charge_candidates,
+    utility_line_candidates,
+)
 from rental_manager.services.receipt_matching import (
-    choose_exact_receipt_match,
     detect_receipt_channel,
     normalize_telegram_handle,
     receipt_validation_issues,
@@ -61,6 +70,7 @@ from rental_manager.services.telegram_bot import (
     app_keyboard,
     build_reports_message,
     build_status_message,
+    copy_message,
     download_telegram_file,
     owner_commands,
     parse_command,
@@ -492,6 +502,54 @@ def serialize_lease(lease: Lease) -> dict[str, Any]:
     }
 
 
+def parse_receipt_details(receipt: PaymentReceipt) -> dict[str, Any]:
+    raw = receipt.recipient_details or ""
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def serialize_payment_receipt(receipt: PaymentReceipt, session: Session) -> dict[str, Any]:
+    parsed = parse_receipt_details(receipt)
+    charge = receipt.rent_charge
+    utility_line = session.get(UtilityBillLine, receipt.utility_line_id) if receipt.utility_line_id else None
+    lease = charge.lease if charge else utility_line.lease if utility_line else None
+    apartment = lease.apartment.name if lease else ""
+    tenant = lease.tenant.full_name if lease else ""
+    target_label = ""
+    target_month = ""
+    if charge:
+        target_label = f"аренда {format_date(charge.due_date)}"
+        target_month = charge.due_date.isoformat()
+    elif utility_line:
+        target_label = f"коммуналка {format_date(utility_line.bill.period_end)}"
+        target_month = utility_line.bill.period_end.isoformat()
+    return {
+        "id": receipt.id,
+        "lease_id": receipt.lease_id,
+        "rent_charge_id": receipt.rent_charge_id,
+        "utility_line_id": receipt.utility_line_id,
+        "apartment": apartment,
+        "tenant": tenant,
+        "amount": money(receipt.amount),
+        "channel": receipt.channel,
+        "status": receipt.status,
+        "paid_at": receipt.paid_at.isoformat(),
+        "source": receipt.source,
+        "created_at": receipt.created_at.isoformat(),
+        "recipient_name": receipt.recipient_name,
+        "notes": receipt.notes or "",
+        "file_path": receipt.file_path or "",
+        "target_label": target_label,
+        "target_month": target_month,
+        "parsed": parsed,
+    }
+
+
 def serialize_rent_charge(charge: RentCharge, session: Session | None = None) -> dict[str, Any]:
     update_rent_charge_status(charge)
     deferral_days_left = None
@@ -664,6 +722,42 @@ def api_get_settings(session: Session = Depends(get_session)) -> dict[str, str |
 @app.post("/api/settings")
 def api_save_settings(payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, str | bool]:
     return save_settings(session, payload)
+
+
+def import_release_baseline(session: Session) -> dict[str, int]:
+    for model in [MessageLog, PaymentReceipt, UtilityBillLine, UtilityBill, RentCharge, Lease, Tenant, Expense, MeterReading, Tariff]:
+        session.execute(delete(model))
+    session.flush()
+    seed_if_empty(session)
+    scripts_dir = ROOT_DIR / "scripts"
+    import sys
+
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    import seed_from_screenshots as legacy_seed  # type: ignore
+
+    legacy_seed.seed_tariffs(session)
+    leases = legacy_seed.seed_leases(session)
+    legacy_seed.generate_rent_charges(session, until=date(2026, 5, 31))
+    legacy_seed.mark_old_rent_paid(session)
+    legacy_seed.seed_rent_payments(session, leases)
+    legacy_seed.seed_utility_payments(session, leases)
+    legacy_seed.seed_meter_readings(session)
+    legacy_seed.seed_expenses(session)
+    session.flush()
+    return {
+        "tenants": session.scalar(select(func.count(Tenant.id))) or 0,
+        "leases": session.scalar(select(func.count(Lease.id))) or 0,
+        "receipts": session.scalar(select(func.count(PaymentReceipt.id))) or 0,
+        "readings": session.scalar(select(func.count(MeterReading.id))) or 0,
+    }
+
+
+@app.post("/api/admin/import-release-baseline")
+def api_import_release_baseline(session: Session = Depends(get_session)) -> dict[str, int]:
+    result = import_release_baseline(session)
+    session.commit()
+    return result
 
 
 def add_report_issue(issues: list[dict[str, Any]], severity: str, title: str, count: int = 1, detail: str = "") -> None:
@@ -863,17 +957,7 @@ def build_dashboard(session: Session) -> dict[str, Any]:
         "pending_personal_expenses": [serialize_expense(expense) for expense in pending_expenses],
         "stale_readings": stale_readings,
         "provider_debts": provider_debts,
-        "suspicious_receipts": [
-            {
-                "id": receipt.id,
-                "amount": receipt.amount,
-                "channel": receipt.channel,
-                "recipient_name": receipt.recipient_name,
-                "created_at": receipt.created_at.isoformat(),
-                "notes": receipt.notes,
-            }
-            for receipt in suspicious_receipts
-        ],
+        "suspicious_receipts": [serialize_payment_receipt(receipt, session) for receipt in suspicious_receipts],
     }
 
 
@@ -900,6 +984,35 @@ def first_open_utility_line(session: Session, lease: Lease) -> UtilityBillLine |
     return None
 
 
+def month_title(value: date | None) -> str:
+    if not value:
+        return ""
+    return f"{MONTH_NAMES[value.month - 1]} {value.year}"
+
+
+def outstanding_rent_charges(lease: Lease, today: date | None = None) -> list[RentCharge]:
+    today = today or date.today()
+    result: list[RentCharge] = []
+    for charge in sorted(lease.rent_charges, key=lambda item: (item.due_date, item.id)):
+        update_rent_charge_status(charge, today)
+        debt = max(0.0, charge.ip_due - charge.ip_paid) + max(0.0, charge.personal_due - charge.personal_paid)
+        if debt > 0.009 and charge.due_date <= today:
+            result.append(charge)
+    return result
+
+
+def outstanding_utility_lines(session: Session, lease: Lease, today: date | None = None) -> list[UtilityBillLine]:
+    today = today or date.today()
+    result: list[UtilityBillLine] = []
+    lines = session.scalars(select(UtilityBillLine).where(UtilityBillLine.lease_id == lease.id)).all()
+    for line in sorted(lines, key=lambda item: (item.due_date or date.max, item.id)):
+        update_utility_line_status(line, today)
+        debt = max(0.0, line.total_amount - line.paid_amount)
+        if debt > 0.009 and line.due_date and line.due_date <= today:
+            result.append(line)
+    return result
+
+
 def build_message_context(
     session: Session,
     lease: Lease,
@@ -907,9 +1020,10 @@ def build_message_context(
     line: UtilityBillLine | None = None,
     custom_text: str = "",
 ) -> dict[str, str]:
+    today = date.today()
     charge = charge or first_open_rent_charge(lease)
     line = line or first_open_utility_line(session, lease)
-    rent_debt = 0.0
+    current_rent_debt = 0.0
     ip_due = 0.0
     personal_due = 0.0
     rent_due_date = ""
@@ -918,20 +1032,38 @@ def build_message_context(
         update_rent_charge_status(charge)
         ip_due = max(0.0, charge.ip_due - charge.ip_paid)
         personal_due = max(0.0, charge.personal_due - charge.personal_paid)
-        rent_debt = ip_due + personal_due
+        current_rent_debt = ip_due + personal_due
         rent_due_date = format_date(charge.due_date)
         rent_period = f"{format_date(charge.period_start)} - {format_date(charge.period_end)}"
 
-    utility_total = 0.0
+    current_utility_total = 0.0
     utility_due_date = ""
     utility_period = ""
     utility_service = ""
     if line:
         update_utility_line_status(line)
-        utility_total = max(0.0, line.total_amount - line.paid_amount)
+        current_utility_total = max(0.0, line.total_amount - line.paid_amount)
         utility_due_date = format_date(line.due_date) if line.due_date else ""
         utility_period = f"{format_date(line.bill.period_start)} - {format_date(line.bill.period_end)}"
         utility_service = line.bill.service.name
+
+    rent_debts = outstanding_rent_charges(lease, today)
+    utility_debts = outstanding_utility_lines(session, lease, today)
+    total_rent_debt = sum(max(0.0, item.ip_due - item.ip_paid) + max(0.0, item.personal_due - item.personal_paid) for item in rent_debts)
+    total_utility_debt = sum(max(0.0, item.total_amount - item.paid_amount) for item in utility_debts)
+
+    rent_months = [month_title(item.due_date) for item in rent_debts]
+    utility_items = [
+        f"{item.bill.service.name} за {month_title(item.bill.period_end)} — {money_text(max(0.0, item.total_amount - item.paid_amount))}"
+        for item in utility_debts
+    ]
+    rent_details = [
+        f"{month_title(item.due_date)} — {money_text(max(0.0, item.ip_due - item.ip_paid) + max(0.0, item.personal_due - item.personal_paid))}"
+        for item in rent_debts
+    ]
+
+    rent_debt = total_rent_debt if total_rent_debt > 0 else current_rent_debt
+    utility_total = total_utility_debt if total_utility_debt > 0 else current_utility_total
 
     return {
         "tenant_name": lease.tenant.full_name,
@@ -950,6 +1082,14 @@ def build_message_context(
         "utility_due_date": utility_due_date,
         "period": utility_period or rent_period,
         "utility_service": utility_service,
+        "rent_debt_total": money_text(total_rent_debt),
+        "rent_debt_months_count": str(len(rent_months)),
+        "rent_debt_months": ", ".join(rent_months),
+        "rent_debt_months_details": "; ".join(rent_details),
+        "utility_debt_total": money_text(total_utility_debt),
+        "utility_debt_count": str(len(utility_items)),
+        "utility_debt_details": "; ".join(utility_items),
+        "all_debt_total": money_text(total_rent_debt + total_utility_debt),
         "custom_text": custom_text,
     }
 
@@ -964,7 +1104,16 @@ def render_message_text(
 ) -> str:
     if template_key == "custom":
         return custom_text.strip()
-    return fill_template(message_template(session, template_key), build_message_context(session, lease, charge, line, custom_text))
+    context = build_message_context(session, lease, charge, line, custom_text)
+    template = message_template(session, template_key)
+    if template_key == "message_rent_overdue" and "{rent_debt_months" not in template:
+        template = (
+            template.rstrip()
+            + "\nДолги по аренде: {rent_debt_months_count} мес. ({rent_debt_months})."
+            + "\nПо месяцам: {rent_debt_months_details}."
+            + "\nКоммуналка: {utility_debt_total}. Общий долг: {all_debt_total}."
+        )
+    return fill_template(template, context)
 
 
 def serialize_message_target(session: Session, lease: Lease) -> dict[str, Any]:
@@ -1212,50 +1361,36 @@ def receipt_candidate_lease(session: Session, message: dict[str, Any], parsed: d
 
 
 def apply_receipt_match(session: Session, lease: Lease, parsed: dict[str, Any]) -> tuple[str, str, int | None, list[str]]:
+    amount = float(parsed.get("amount") or 0)
     channel = detect_receipt_channel(parsed)
     issues = receipt_validation_issues(parsed, get_settings(session), channel)
+    if amount <= 0:
+        issues.append("? ???? ?? ??????? ???????? ????????????? ?????")
 
-    rent_candidates: list[dict[str, Any]] = []
-    for charge in sorted(lease.rent_charges, key=lambda item: item.due_date):
-        update_rent_charge_status(charge)
-        if channel == "ip":
-            debt = max(0.0, charge.ip_due - charge.ip_paid)
-        else:
-            debt = max(0.0, charge.personal_due - charge.personal_paid)
-        if debt > 0:
-            rent_candidates.append({"id": charge.id, "debt": money(debt)})
+    if channel == "ip":
+        plan, remaining = build_rent_plan(session, lease, "ip", amount, exact_only=False)
+        if not plan or remaining > EPS:
+            issues.append("?? ??????? ????????? ??????? ?? ?? ?? ??????")
+        if issues:
+            return "suspicious", "review", None, issues
+        return "accepted", "rent", plan[0][0].id, []
 
-    utility_candidates: list[dict[str, Any]] = []
     if channel == "personal":
-        for line in session.scalars(select(UtilityBillLine).where(UtilityBillLine.lease_id == lease.id)).all():
-            update_utility_line_status(line)
-            debt = max(0.0, line.total_amount - line.paid_amount)
-            if debt > 0:
-                utility_candidates.append({"id": line.id, "debt": money(debt)})
+        rent_plan, rent_remaining = build_rent_plan(session, lease, "personal", amount, exact_only=True)
+        utility_plan, utility_remaining = build_utility_plan(session, lease, amount, exact_only=True)
+        rent_exact = bool(rent_plan) and rent_remaining <= EPS
+        utility_exact = bool(utility_plan) and utility_remaining <= EPS
+        if issues:
+            return "suspicious", "review", None, issues
+        if rent_exact and not utility_exact:
+            return "accepted", "rent", rent_plan[0][0].id, []
+        if utility_exact and not rent_exact:
+            return "accepted", "utility", utility_plan[0][0].id, []
+        if rent_exact and utility_exact:
+            return "suspicious", "review", None, ["????? ????????? ???????? ? ??? ??????, ? ??? ??????????"]
+        return "suspicious", "review", None, ["????? ?? ????????? ????? ????? ?? ?? ??????, ?? ?? ??????????"]
 
-    match_type, match_id, match_issues = choose_exact_receipt_match(float(parsed.get("amount") or 0), channel, rent_candidates, utility_candidates)
-    issues.extend(match_issues)
-    if issues:
-        return "suspicious", "review", None, issues
-
-    if match_type == "rent" and match_id:
-        charge = session.get(RentCharge, match_id)
-        if charge:
-            if channel == "ip":
-                charge.ip_paid = money(charge.ip_paid + float(parsed.get("amount") or 0))
-            else:
-                charge.personal_paid = money(charge.personal_paid + float(parsed.get("amount") or 0))
-            update_rent_charge_status(charge)
-        return "accepted", "rent", charge.id if charge else None, []
-
-    if match_type == "utility" and match_id:
-        line = session.get(UtilityBillLine, match_id)
-        if line:
-            line.paid_amount = money(line.paid_amount + float(parsed.get("amount") or 0))
-            update_utility_line_status(line)
-        return "accepted", "utility", line.id if line else None, []
-
-    return "suspicious", "review", None, ["не удалось автоматически привязать чек"]
+    return "suspicious", "review", None, ["??? ???????? ???? ?? ??????? ??????????"]
 
 
 def owner_receipt_alert_text(
@@ -1305,29 +1440,72 @@ def handle_tenant_receipt_message(session: Session, message: dict[str, Any], lin
     status = "suspicious"
     match_type = "review"
     linked_id: int | None = None
-    issues = ["чек сохранён, но требует ручной проверки"]
+    issues = ["??? ????????, ?? ??????? ?????? ????????"]
     if parsed and lease:
         status, match_type, linked_id, issues = apply_receipt_match(session, lease, parsed)
     elif parsed and not lease:
-        issues = ["не удалось понять, к какому жильцу относится чек"]
+        issues = ["?? ??????? ??????, ? ?????? ?????? ????????? ???"]
 
     channel = detect_receipt_channel(parsed or {})
-    receipt = PaymentReceipt(
-        lease_id=lease.id if lease else None,
-        rent_charge_id=linked_id if status == "accepted" and match_type == "rent" else None,
-        utility_line_id=linked_id if status == "accepted" and match_type == "utility" else None,
-        apartment_id=lease.apartment_id if lease else None,
-        amount=float((parsed or {}).get("amount") or 0),
-        channel=channel or "unknown",
-        paid_at=datetime.fromisoformat(parsed["paid_at"]) if parsed and parsed.get("paid_at") else utc_now(),
-        source="telegram",
-        status=status,
-        recipient_name=(parsed or {}).get("recipient_name") or "",
-        recipient_details=json.dumps(parsed or {}, ensure_ascii=False),
-        file_path=str(saved_path.relative_to(ROOT_DIR)),
-        notes="; ".join(issues),
-    )
-    session.add(receipt)
+    paid_at = datetime.fromisoformat(parsed["paid_at"]) if parsed and parsed.get("paid_at") else utc_now()
+    receipt_details = json.dumps(parsed or {}, ensure_ascii=False)
+    stored_path = str(saved_path.relative_to(ROOT_DIR))
+    if status == "accepted" and lease and parsed:
+        try:
+            if match_type == "rent":
+                create_rent_receipts(
+                    session,
+                    lease,
+                    "ip" if channel == "ip" else "personal",
+                    float(parsed.get("amount") or 0),
+                    paid_at=paid_at,
+                    source="telegram",
+                    status="accepted",
+                    recipient_name=parsed.get("recipient_name") or "",
+                    recipient_details=receipt_details,
+                    notes="????????????? ??????? ?? Telegram",
+                    file_path=stored_path,
+                    exact_only=channel == "personal",
+                )
+            elif match_type == "utility":
+                create_utility_receipts(
+                    session,
+                    lease,
+                    float(parsed.get("amount") or 0),
+                    paid_at=paid_at,
+                    source="telegram",
+                    status="accepted",
+                    recipient_name=parsed.get("recipient_name") or "",
+                    recipient_details=receipt_details,
+                    notes="????????????? ??????? ?? Telegram",
+                    file_path=stored_path,
+                    exact_only=True,
+                )
+            else:
+                status = "suspicious"
+                issues = ["??? ?? ???? ???????, ???? ??????? ??????"]
+        except ValueError as exc:
+            status = "suspicious"
+            match_type = "review"
+            linked_id = None
+            issues = [str(exc)]
+
+    if status != "accepted":
+        session.add(
+            PaymentReceipt(
+                lease_id=lease.id if lease else None,
+                apartment_id=lease.apartment_id if lease else None,
+                amount=float((parsed or {}).get("amount") or 0),
+                channel=channel or "unknown",
+                paid_at=paid_at,
+                source="telegram",
+                status="suspicious",
+                recipient_name=(parsed or {}).get("recipient_name") or "",
+                recipient_details=receipt_details,
+                file_path=stored_path,
+                notes="; ".join(issues),
+            )
+        )
 
     if status == "accepted":
         send_telegram_text(session, chat_id, message_template(session, "message_receipt_received"))
@@ -1342,6 +1520,17 @@ def handle_tenant_receipt_message(session: Session, message: dict[str, Any], lin
             owner_receipt_alert_text(session, lease, parsed, status, issues, message_sender_label(message)),
             app_keyboard(app_base_url(session)),
         )
+        if status != "accepted" and message.get("message_id"):
+            try:
+                copy_message(
+                    telegram_token(session),
+                    to_chat_id=owner_id,
+                    from_chat_id=chat_id,
+                    message_id=int(message["message_id"]),
+                    reply_markup=app_keyboard(app_base_url(session)),
+                )
+            except RuntimeError:
+                pass
 
 
 def send_telegram_text(session: Session, chat_id: int | str, text: str, keyboard: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1745,36 +1934,153 @@ def generate_charges(payload: dict[str, Any] | None = None, session: Session = D
 def add_rent_payment(charge_id: int, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
     charge = session.get(RentCharge, charge_id)
     if not charge:
-        raise HTTPException(404, "Начисление не найдено")
+        raise HTTPException(404, "?????????? ?? ???????")
     channel = payload.get("channel")
     if channel not in {"ip", "personal"}:
-        raise HTTPException(400, "Канал должен быть ip или personal")
+        raise HTTPException(400, "????? ?????? ???? ip ??? personal")
     amount = float(payload.get("amount") or 0)
     if amount <= 0:
-        raise HTTPException(400, "Сумма должна быть больше нуля")
+        raise HTTPException(400, "????? ?????? ???? ?????? ????")
 
-    if channel == "ip":
-        charge.ip_paid = money(charge.ip_paid + amount)
-    else:
-        charge.personal_paid = money(charge.personal_paid + amount)
-    update_rent_charge_status(charge)
-    receipt = PaymentReceipt(
-        lease_id=charge.lease_id,
-        rent_charge_id=charge.id,
-        apartment_id=charge.lease.apartment_id,
-        amount=amount,
-        channel=channel,
+    create_rent_receipts(
+        session,
+        charge.lease,
+        channel,
+        amount,
         paid_at=datetime.fromisoformat(payload["paid_at"]) if payload.get("paid_at") else utc_now(),
         source=payload.get("source") or "manual",
         status=payload.get("status") or "accepted",
         recipient_name=payload.get("recipient_name") or "",
         recipient_details=payload.get("recipient_details") or "",
         notes=payload.get("notes") or "",
+        exact_only=False,
     )
-    session.add(receipt)
     session.commit()
     session.refresh(charge)
     return serialize_rent_charge(charge, session)
+
+
+@app.get("/api/leases/{lease_id}/payment-history")
+def lease_payment_history(lease_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
+    lease = session.get(Lease, lease_id)
+    if not lease:
+        raise HTTPException(404, "??????? ?? ??????")
+    receipts = session.scalars(
+        select(PaymentReceipt)
+        .where(PaymentReceipt.lease_id == lease_id)
+        .order_by(PaymentReceipt.paid_at.desc(), PaymentReceipt.id.desc())
+    ).all()
+    return {
+        "lease_id": lease.id,
+        "tenant": lease.tenant.full_name,
+        "apartment": lease.apartment.name,
+        "receipts": [serialize_payment_receipt(receipt, session) for receipt in receipts],
+    }
+
+
+@app.patch("/api/payment-receipts/{receipt_id}")
+def update_payment_receipt(receipt_id: int, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
+    receipt = session.get(PaymentReceipt, receipt_id)
+    if not receipt:
+        raise HTTPException(404, "?????? ?? ??????")
+    old_lease_id = receipt.lease_id
+    if "amount" in payload:
+        amount = float(payload.get("amount") or 0)
+        if amount <= 0:
+            raise HTTPException(400, "????? ?????? ???? ?????? ????")
+        receipt.amount = amount
+    if payload.get("paid_at"):
+        receipt.paid_at = datetime.fromisoformat(payload["paid_at"])
+    if "notes" in payload:
+        receipt.notes = str(payload.get("notes") or "")
+    if payload.get("channel") and receipt.rent_charge_id:
+        channel = payload.get("channel")
+        if channel not in {"ip", "personal"}:
+            raise HTTPException(400, "??? ?????? ????? ?????? ???? ip ??? personal")
+        receipt.channel = channel
+    if receipt.status == "accepted" and old_lease_id:
+        recalculate_lease_balances(session, old_lease_id)
+    session.commit()
+    return serialize_payment_receipt(receipt, session)
+
+
+@app.delete("/api/payment-receipts/{receipt_id}")
+def delete_payment_receipt(receipt_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
+    receipt = session.get(PaymentReceipt, receipt_id)
+    if not receipt:
+        raise HTTPException(404, "?????? ?? ??????")
+    lease_id = receipt.lease_id
+    status = receipt.status
+    session.delete(receipt)
+    session.flush()
+    if lease_id and status == "accepted":
+        recalculate_lease_balances(session, lease_id)
+    session.commit()
+    return {"ok": True}
+
+
+@app.get("/api/payment-receipts/suspicious")
+def suspicious_receipts(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    receipts = session.scalars(
+        select(PaymentReceipt)
+        .where(PaymentReceipt.status == "suspicious")
+        .order_by(PaymentReceipt.paid_at.desc(), PaymentReceipt.id.desc())
+    ).all()
+    return [serialize_payment_receipt(receipt, session) for receipt in receipts]
+
+
+@app.post("/api/payment-receipts/{receipt_id}/moderate")
+def moderate_payment_receipt(receipt_id: int, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
+    receipt = session.get(PaymentReceipt, receipt_id)
+    if not receipt:
+        raise HTTPException(404, "?????? ?? ??????")
+    action = (payload.get("action") or "").strip()
+    note = (payload.get("note") or "").strip()
+    parsed = parse_receipt_details(receipt)
+    channel = receipt.channel if receipt.channel in {"ip", "personal"} else detect_receipt_channel(parsed)
+    lease = session.get(Lease, receipt.lease_id) if receipt.lease_id else None
+    if action in {"accept_rent", "accept_utility"} and not lease:
+        raise HTTPException(400, "?????? ??????? ??? ??? ???????????? ??????")
+
+    moderation_note = f"????????? owner{': ' + note if note else ''}"
+    if action == "accept_rent":
+        create_rent_receipts(
+            session,
+            lease,
+            "ip" if channel == "ip" else "personal",
+            float(receipt.amount or 0),
+            paid_at=receipt.paid_at,
+            source=receipt.source,
+            status="accepted",
+            recipient_name=receipt.recipient_name,
+            recipient_details=receipt.recipient_details,
+            notes=moderation_note,
+            file_path=receipt.file_path,
+            exact_only=False,
+        )
+        receipt.status = "moderated"
+    elif action == "accept_utility":
+        create_utility_receipts(
+            session,
+            lease,
+            float(receipt.amount or 0),
+            paid_at=receipt.paid_at,
+            source=receipt.source,
+            status="accepted",
+            recipient_name=receipt.recipient_name,
+            recipient_details=receipt.recipient_details,
+            notes=moderation_note,
+            file_path=receipt.file_path,
+            exact_only=False,
+        )
+        receipt.status = "moderated"
+    elif action == "reject":
+        receipt.status = "rejected"
+    else:
+        raise HTTPException(400, "???????? ???????? ?????????")
+    receipt.notes = "; ".join(part for part in [receipt.notes, moderation_note] if part)
+    session.commit()
+    return serialize_payment_receipt(receipt, session)
 
 
 @app.post("/api/rent-charges/{charge_id}/defer")
@@ -2006,26 +2312,23 @@ def mark_provider_paid(bill_id: int, session: Session = Depends(get_session)) ->
 def add_utility_payment(line_id: int, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
     line = session.get(UtilityBillLine, line_id)
     if not line:
-        raise HTTPException(404, "Строка коммуналки не найдена")
+        raise HTTPException(404, "?????? ?????????? ?? ???????")
     amount = float(payload.get("amount") or 0)
     if amount <= 0:
-        raise HTTPException(400, "Сумма должна быть больше нуля")
-    line.paid_amount = money(line.paid_amount + amount)
-    update_utility_line_status(line)
-    session.add(
-        PaymentReceipt(
-            lease_id=line.lease_id,
-            utility_line_id=line.id,
-            apartment_id=line.apartment_id,
-            amount=amount,
-            channel="utilities",
-            paid_at=datetime.fromisoformat(payload["paid_at"]) if payload.get("paid_at") else utc_now(),
-            source=payload.get("source") or "manual",
-            status=payload.get("status") or "accepted",
-            recipient_name=payload.get("recipient_name") or "",
-            recipient_details=payload.get("recipient_details") or "",
-            notes=payload.get("notes") or "",
-        )
+        raise HTTPException(400, "????? ?????? ???? ?????? ????")
+    if not line.lease:
+        raise HTTPException(400, "? ???? ?????? ??? ????????? ??????")
+    create_utility_receipts(
+        session,
+        line.lease,
+        amount,
+        paid_at=datetime.fromisoformat(payload["paid_at"]) if payload.get("paid_at") else utc_now(),
+        source=payload.get("source") or "manual",
+        status=payload.get("status") or "accepted",
+        recipient_name=payload.get("recipient_name") or "",
+        recipient_details=payload.get("recipient_details") or "",
+        notes=payload.get("notes") or "",
+        exact_only=False,
     )
     session.commit()
     return serialize_bill_line(line, session)

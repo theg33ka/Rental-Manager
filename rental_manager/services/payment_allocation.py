@@ -1,0 +1,218 @@
+from __future__ import annotations
+
+from datetime import date, timedelta
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from rental_manager.models import Lease, PaymentReceipt, RentCharge, UtilityBillLine
+from rental_manager.services.billing import generate_rent_charges, money, update_rent_charge_status, update_utility_line_status
+
+EPS = 0.009
+
+
+def recalculate_lease_balances(session: Session, lease_id: int) -> None:
+    charges = session.scalars(select(RentCharge).where(RentCharge.lease_id == lease_id)).all()
+    lines = session.scalars(select(UtilityBillLine).where(UtilityBillLine.lease_id == lease_id)).all()
+
+    charge_map = {charge.id: charge for charge in charges}
+    line_map = {line.id: line for line in lines}
+
+    for charge in charges:
+        charge.ip_paid = 0.0
+        charge.personal_paid = 0.0
+    for line in lines:
+        line.paid_amount = 0.0
+
+    receipts = session.scalars(
+        select(PaymentReceipt)
+        .where(PaymentReceipt.lease_id == lease_id, PaymentReceipt.status == "accepted")
+        .order_by(PaymentReceipt.paid_at, PaymentReceipt.id)
+    ).all()
+    for receipt in receipts:
+        if receipt.utility_line_id and receipt.utility_line_id in line_map:
+            line = line_map[receipt.utility_line_id]
+            line.paid_amount = money(line.paid_amount + float(receipt.amount or 0))
+            continue
+        if receipt.rent_charge_id and receipt.rent_charge_id in charge_map:
+            charge = charge_map[receipt.rent_charge_id]
+            if receipt.channel == "ip":
+                charge.ip_paid = money(charge.ip_paid + float(receipt.amount or 0))
+            else:
+                charge.personal_paid = money(charge.personal_paid + float(receipt.amount or 0))
+
+    for charge in charges:
+        update_rent_charge_status(charge)
+    for line in lines:
+        update_utility_line_status(line)
+
+
+def rent_charge_candidates(session: Session, lease_id: int, channel: str) -> list[RentCharge]:
+    charges = session.scalars(
+        select(RentCharge).where(RentCharge.lease_id == lease_id).order_by(RentCharge.due_date, RentCharge.id)
+    ).all()
+    for charge in charges:
+        update_rent_charge_status(charge)
+    return [charge for charge in charges if rent_charge_debt(charge, channel) > EPS]
+
+
+def utility_line_candidates(session: Session, lease_id: int) -> list[UtilityBillLine]:
+    lines = session.scalars(
+        select(UtilityBillLine)
+        .where(UtilityBillLine.lease_id == lease_id)
+        .order_by(UtilityBillLine.due_date, UtilityBillLine.id)
+    ).all()
+    for line in lines:
+        update_utility_line_status(line)
+    return [line for line in lines if utility_line_debt(line) > EPS]
+
+
+def rent_charge_debt(charge: RentCharge, channel: str) -> float:
+    if channel == "ip":
+        return money(max(0.0, float(charge.ip_due or 0) - float(charge.ip_paid or 0)))
+    return money(max(0.0, float(charge.personal_due or 0) - float(charge.personal_paid or 0)))
+
+
+def utility_line_debt(line: UtilityBillLine) -> float:
+    return money(max(0.0, float(line.total_amount or 0) - float(line.paid_amount or 0)))
+
+
+def ensure_rent_debt_capacity(session: Session, lease: Lease, channel: str, amount: float) -> list[RentCharge]:
+    horizon = date.today() + timedelta(days=365)
+    for _ in range(3):
+        generate_rent_charges(session, until=horizon)
+        charges = rent_charge_candidates(session, lease.id, channel)
+        total = sum(rent_charge_debt(charge, channel) for charge in charges)
+        if total + EPS >= amount:
+            return charges
+        horizon += timedelta(days=365)
+    return rent_charge_candidates(session, lease.id, channel)
+
+
+def build_rent_plan(
+    session: Session,
+    lease: Lease,
+    channel: str,
+    amount: float,
+    *,
+    exact_only: bool,
+) -> tuple[list[tuple[RentCharge, float]], float]:
+    charges = ensure_rent_debt_capacity(session, lease, channel, amount)
+    return _build_plan(charges, lambda charge: rent_charge_debt(charge, channel), amount, exact_only=exact_only)
+
+
+def build_utility_plan(
+    session: Session,
+    lease: Lease,
+    amount: float,
+    *,
+    exact_only: bool,
+) -> tuple[list[tuple[UtilityBillLine, float]], float]:
+    lines = utility_line_candidates(session, lease.id)
+    return _build_plan(lines, utility_line_debt, amount, exact_only=exact_only)
+
+
+def create_rent_receipts(
+    session: Session,
+    lease: Lease,
+    channel: str,
+    amount: float,
+    *,
+    paid_at,
+    source: str,
+    status: str,
+    recipient_name: str = "",
+    recipient_details: str = "",
+    notes: str = "",
+    file_path: str = "",
+    exact_only: bool = False,
+) -> list[PaymentReceipt]:
+    plan, remaining = build_rent_plan(session, lease, channel, amount, exact_only=exact_only)
+    if not plan or remaining > EPS:
+        raise ValueError("Не удалось честно разложить платёж по аренде")
+    receipts = [
+        PaymentReceipt(
+            lease_id=lease.id,
+            rent_charge_id=charge.id,
+            apartment_id=lease.apartment_id,
+            amount=portion,
+            channel=channel,
+            paid_at=paid_at,
+            source=source,
+            status=status,
+            recipient_name=recipient_name,
+            recipient_details=recipient_details,
+            file_path=file_path,
+            notes=notes,
+        )
+        for charge, portion in plan
+    ]
+    session.add_all(receipts)
+    session.flush()
+    recalculate_lease_balances(session, lease.id)
+    return receipts
+
+
+def create_utility_receipts(
+    session: Session,
+    lease: Lease,
+    amount: float,
+    *,
+    paid_at,
+    source: str,
+    status: str,
+    recipient_name: str = "",
+    recipient_details: str = "",
+    notes: str = "",
+    file_path: str = "",
+    exact_only: bool = False,
+) -> list[PaymentReceipt]:
+    plan, remaining = build_utility_plan(session, lease, amount, exact_only=exact_only)
+    if not plan or remaining > EPS:
+        raise ValueError("Не удалось честно разложить платёж по коммуналке")
+    receipts = [
+        PaymentReceipt(
+            lease_id=lease.id,
+            utility_line_id=line.id,
+            apartment_id=lease.apartment_id,
+            amount=portion,
+            channel="utilities",
+            paid_at=paid_at,
+            source=source,
+            status=status,
+            recipient_name=recipient_name,
+            recipient_details=recipient_details,
+            file_path=file_path,
+            notes=notes,
+        )
+        for line, portion in plan
+    ]
+    session.add_all(receipts)
+    session.flush()
+    recalculate_lease_balances(session, lease.id)
+    return receipts
+
+
+def _build_plan(
+    items: list[Any],
+    debt_getter,
+    amount: float,
+    *,
+    exact_only: bool,
+) -> tuple[list[tuple[Any, float]], float]:
+    remaining = money(amount)
+    plan: list[tuple[Any, float]] = []
+    for item in items:
+        debt = money(float(debt_getter(item) or 0))
+        if debt <= EPS:
+            continue
+        portion = min(remaining, debt)
+        if portion > EPS:
+            plan.append((item, money(portion)))
+            remaining = money(remaining - portion)
+        if remaining <= EPS:
+            break
+    if exact_only and remaining > EPS:
+        return [], money(remaining)
+    return plan, money(remaining)

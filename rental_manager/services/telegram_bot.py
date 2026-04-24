@@ -94,6 +94,24 @@ def send_message(token: str, chat_id: int | str, text: str, reply_markup: dict[s
     return telegram_api_request(token, "sendMessage", payload)
 
 
+def copy_message(
+    token: str,
+    *,
+    to_chat_id: int | str,
+    from_chat_id: int | str,
+    message_id: int,
+    reply_markup: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "chat_id": to_chat_id,
+        "from_chat_id": from_chat_id,
+        "message_id": message_id,
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    return telegram_api_request(token, "copyMessage", payload)
+
+
 def telegram_file_info(token: str, file_id: str) -> dict[str, Any]:
     response = telegram_api_request(token, "getFile", {"file_id": file_id})
     return response.get("result") or {}

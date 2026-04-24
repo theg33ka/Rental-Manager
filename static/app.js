@@ -5,6 +5,8 @@ const state = {
   expenses: [],
   tariffs: [],
   messageTargets: [],
+  suspiciousReceipts: [],
+  paymentHistory: null,
   settings: {},
   quickReadingArmedUntil: 0,
 };
@@ -215,7 +217,7 @@ function renderTelegramStatus() {
 async function loadAll() {
   state.bootstrap = await api("/api/bootstrap");
   applySettings(state.bootstrap.settings);
-  await Promise.all([loadRent(), loadUtilityBills(), loadExpenses(), loadTariffs(), loadMessageTargets()]);
+  await Promise.all([loadRent(), loadUtilityBills(), loadExpenses(), loadTariffs(), loadMessageTargets(), loadSuspiciousReceipts()]);
   hydrateForms();
   renderAll();
 }
@@ -241,6 +243,10 @@ async function loadTariffs() {
 
 async function loadMessageTargets() {
   state.messageTargets = await api("/api/messages/targets");
+}
+
+async function loadSuspiciousReceipts() {
+  state.suspiciousReceipts = await api("/api/payment-receipts/suspicious");
 }
 
 function hydrateForms() {
@@ -273,11 +279,13 @@ function renderAll() {
   renderObjects();
   renderLeases();
   renderRent();
+  renderRentHistory();
   renderMeters();
   renderUtilities();
   renderTariffs();
   renderExpenses();
   renderMessages();
+  renderSuspiciousReceipts();
   setReportLinks();
 }
 
@@ -843,6 +851,7 @@ function bindEvents() {
 
   qs("#refreshBtn").addEventListener("click", loadAll);
   qs("#runRemindersBtn").addEventListener("click", runRemindersNow);
+  qs("#importBaselineBtn")?.addEventListener("click", importBaseline);
   qs("#openTariffsBtn").addEventListener("click", () => {
     const tab = qs('.tab[data-tab="tariffs"]');
     if (tab) tab.click();
