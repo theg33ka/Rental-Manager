@@ -8,9 +8,10 @@ charge-generation routine created new empty records on the 28th while the
 original records (with real payment data) remained on the 29th.
 
 This script finds every such pair — same lease_id, same billing period,
-one record on the 28th and one on the 29th — and copies the payment fields
-(personal_due, ip_paid, personal_paid, status) from the 29th record into
-the 28th record.  After the copy the 29th record is deleted.
+one record on the 28th and one on the 29th — and copies the charge and
+payment fields (ip_due, personal_due, ip_paid, personal_paid) from the
+29th record into the 28th record, then recomputes the status.  After the
+copy the 29th record is deleted.
 
 Idempotency
 -----------
@@ -121,15 +122,20 @@ def run_migration(apply: bool, keep_old: bool) -> None:
             print(
                 f"  lease_id={c28.lease_id}  period_start={c28.period_start}"
                 f"\n    28th record (id={c28.id}): "
-                f"personal_due={c28.personal_due}, ip_paid={c28.ip_paid}, "
-                f"personal_paid={c28.personal_paid}, status={c28.status!r}"
+                f"ip_due={c28.ip_due}, personal_due={c28.personal_due}, "
+                f"ip_paid={c28.ip_paid}, personal_paid={c28.personal_paid}, status={c28.status!r}"
                 f"\n    29th record (id={c29.id}): "
-                f"personal_due={c29.personal_due}, ip_paid={c29.ip_paid}, "
-                f"personal_paid={c29.personal_paid}, status={c29.status!r}"
+                f"ip_due={c29.ip_due}, personal_due={c29.personal_due}, "
+                f"ip_paid={c29.ip_paid}, personal_paid={c29.personal_paid}, status={c29.status!r}"
             )
 
             if apply:
-                # Copy payment fields from the 29th to the 28th record.
+                # Copy all charge and payment fields from the 29th to the 28th
+                # record.  ip_due and personal_due are included because the 29th
+                # record holds the amounts that were originally agreed upon; the
+                # auto-generated 28th record may carry different values if the
+                # lease amounts changed between the two record-creation dates.
+                c28.ip_due = c29.ip_due
                 c28.personal_due = c29.personal_due
                 c28.ip_paid = c29.ip_paid
                 c28.personal_paid = c29.personal_paid
