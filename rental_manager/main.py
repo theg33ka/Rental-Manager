@@ -333,7 +333,13 @@ def debt_visible_by_cutoff(due_date: date | None, cutoff: date | None) -> bool:
     return due_date >= cutoff
 
 
-def reminder_cadence(session: Session, template_key: str) -> str:
+def reminder_cadence(session: Session, template_key: str, lease_id: int | None = None) -> str:
+    # Сначала проверяем per-lease настройку
+    if lease_id:
+        lease_cadence = get_lease_cadence(session, lease_id, template_key)
+        if lease_cadence:
+            return lease_cadence
+    # Иначе используем глобальную настройку
     key = REMINDER_CADENCE_KEYS.get(template_key, "")
     if not key:
         return "twice_daily"
@@ -341,6 +347,33 @@ def reminder_cadence(session: Session, template_key: str) -> str:
     if value in {"twice_daily", "daily_evening", "every_two_days"}:
         return value
     return str(DEFAULT_SETTINGS[key])
+
+
+def get_lease_cadence(session: Session, lease_id: int, template_key: str) -> str | None:
+    """Получить индивидуальную настройку cadence для арендатора."""
+    key = f"lease_{lease_id}_cadence_{template_key}"
+    value = get_setting_value(session, key)
+    if value and value.strip() in {"twice_daily", "daily_evening", "every_two_days"}:
+        return value.strip()
+    return None
+
+
+def set_lease_cadence(session: Session, lease_id: int, template_key: str, cadence: str) -> None:
+    """Сохранить индивидуальную настройку cadence для арендатора."""
+    key = f"lease_{lease_id}_cadence_{template_key}"
+    setting = session.get(AppSetting, key)
+    if not setting:
+        setting = AppSetting(key=key)
+        session.add(setting)
+    setting.value = cadence
+
+
+def clear_lease_cadence(session: Session, lease_id: int, template_key: str) -> None:
+    """Удалить индивидуальную настройку cadence (сбросить на значение по умолчанию)."""
+    key = f"lease_{lease_id}_cadence_{template_key}"
+    setting = session.get(AppSetting, key)
+    if setting:
+        session.delete(setting)
 
 
 def cadence_label(value: str) -> str:
@@ -402,8 +435,8 @@ def cadence_allows_send(cadence: str, latest: datetime | None, now: datetime | N
     return slot <= now
 
 
-def reminder_schedule_meta(session: Session, template_key: str, latest: MessageLog | None) -> dict[str, Any]:
-    cadence = reminder_cadence(session, template_key)
+def reminder_schedule_meta(session: Session, template_key: str, latest: MessageLog | None, lease_id: int | None = None) -> dict[str, Any]:
+    cadence = reminder_cadence(session, template_key, lease_id)
     next_slot = next_reminder_slot(cadence, latest.created_at if latest else None)
     return {
         "cadence": cadence,
@@ -562,7 +595,7 @@ def reminder_meta(
         block_reason = "старый долг до запуска"
     elif not auto_enabled:
         block_reason = "авто выключено"
-    schedule = reminder_schedule_meta(session, template_key, latest) if session and template_key else None
+    schedule = reminder_schedule_meta(session, template_key, latest, lease.id) if session and template_key else None
     return {
         "linked": bool(chat_id),
         "auto_enabled": auto_enabled,
@@ -928,6 +961,31 @@ def api_get_settings(session: Session = Depends(get_session)) -> dict[str, str |
 @app.post("/api/settings")
 def api_save_settings(payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, str | bool]:
     return save_settings(session, payload)
+
+
+@app.get("/api/leases/{lease_id}/cadence")
+def api_get_lease_cadence(lease_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
+    return {"cadence": get_lease_cadence(session, lease_id)}
+
+
+@app.post("/api/leases/{lease_id}/cadence")
+def api_set_lease_cadence(lease_id: int, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
+    cadence = payload.get("cadence")
+    if cadence is not None and cadence not in ("daily", "weekly", "monthly", "never"):
+        raise HTTPException(status_code=400, detail="Invalid cadence value")
+    if cadence:
+        set_lease_cadence(session, lease_id, cadence)
+    else:
+        clear_lease_cadence(session, lease_id)
+    session.commit()
+    return {"cadence": cadence}
+
+
+@app.delete("/api/leases/{lease_id}/cadence")
+def api_clear_lease_cadence(lease_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
+    clear_lease_cadence(session, lease_id)
+    session.commit()
+    return {"cadence": None}
 
 
 def import_release_baseline(session: Session) -> dict[str, int]:
