@@ -780,6 +780,30 @@ td.actions .button {
   align-items: end;
 }
 
+.expense-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.expense-summary article {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  padding: 12px;
+  display: grid;
+  gap: 4px;
+}
+
+.expense-summary span {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.expense-summary strong {
+  font-size: 1.2rem;
+}
+
 .mini {
   min-height: 32px;
   padding: 6px 8px;
@@ -854,13 +878,20 @@ td.actions .button {
   color: var(--receipt-ink);
 }
 
+.attention-card.expense-fund {
+  border-left-color: #a855f7;
+  background: #2a123d;
+  color: #f3e8ff;
+}
+
 .attention-card.rent-critical .muted,
 .attention-card.utility-overdue .muted,
 .attention-card.utility-partial .muted,
 .attention-card.utility-issued .muted,
 .attention-card.provider .muted,
 .attention-card.reading .muted,
-.attention-card.receipt .muted {
+.attention-card.receipt .muted,
+.attention-card.expense-fund .muted {
   color: color-mix(in srgb, currentColor 72%, transparent);
 }
 

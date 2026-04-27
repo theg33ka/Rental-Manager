@@ -66,6 +66,7 @@ def tenant_keyboard() -> dict[str, Any]:
         "keyboard": [
             [{"text": "Реквизиты"}],
             [{"text": "Все долги"}],
+            [{"text": "Привязать по телефону", "request_contact": True}],
             [{"text": "/help"}],
         ],
         "resize_keyboard": True,

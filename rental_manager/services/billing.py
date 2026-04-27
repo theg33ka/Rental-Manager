@@ -21,7 +21,9 @@ from rental_manager.models import (
 )
 
 LEGACY_IMPORT_MARK = "SCREENSHOT_IMPORT"
+IGNORE_LEASE_MARK = "IGNORE_LEASE_CONTROL"
 LEGACY_PERSONAL_IGNORE_BEFORE = date(2026, 4, 1)
+RENT_GENERATION_START = date(2025, 1, 1)
 
 
 def parse_date(value: str | date | None, default: date | None = None) -> date:
@@ -121,8 +123,12 @@ def generate_rent_charges(session: Session, until: date | None = None) -> int:
     created = 0
     leases = session.scalars(select(Lease).join(Apartment).where(Lease.active.is_(True), Apartment.active.is_(True))).all()
     for lease in leases:
+        if IGNORE_LEASE_MARK in (lease.notes or ""):
+            continue
         due = effective_due_date(lease.start_date.year, lease.start_date.month, lease.payment_day)
         if due < lease.start_date:
+            due = next_due_after(due, lease.payment_day)
+        while due < RENT_GENERATION_START:
             due = next_due_after(due, lease.payment_day)
         while due <= until and (lease.end_date is None or due <= lease.end_date):
             exists = session.scalar(
@@ -144,6 +150,11 @@ def generate_rent_charges(session: Session, until: date | None = None) -> int:
                     )
                 )
                 created += 1
+            else:
+                if money(exists.ip_due) <= 0 and money(lease.ip_amount) > 0:
+                    exists.ip_due = money(lease.ip_amount)
+                if money(exists.personal_due) <= 0 and money(lease.personal_amount) > 0:
+                    exists.personal_due = money(lease.personal_amount)
             due = next_due
     session.flush()
     for charge in session.scalars(select(RentCharge)).all():
@@ -293,7 +304,7 @@ def calculate_tiered_cost(consumption: float, tiers_json: str) -> float:
 
 
 def active_lease_for_apartment(session: Session, apartment_id: int, start: date, end: date) -> Lease | None:
-    return session.scalar(
+    leases = session.scalars(
         select(Lease)
         .where(
             Lease.apartment_id == apartment_id,
@@ -301,8 +312,8 @@ def active_lease_for_apartment(session: Session, apartment_id: int, start: date,
             or_(Lease.end_date.is_(None), Lease.end_date >= start),
         )
         .order_by(Lease.start_date.desc())
-        .limit(1)
-    )
+    ).all()
+    return next((lease for lease in leases if IGNORE_LEASE_MARK not in (lease.notes or "")), None)
 
 
 def occupied_on(lease: Lease | None, day: date) -> bool:
@@ -392,15 +403,19 @@ def calculate_utility_bill(
     ).all()
 
     apartment_leases: dict[int, list[Lease]] = {
-        apartment.id: session.scalars(
-            select(Lease)
-            .where(
-                Lease.apartment_id == apartment.id,
-                Lease.start_date < period_end,
-                or_(Lease.end_date.is_(None), Lease.end_date >= period_start),
-            )
-            .order_by(Lease.start_date)
-        ).all()
+        apartment.id: [
+            lease
+            for lease in session.scalars(
+                select(Lease)
+                .where(
+                    Lease.apartment_id == apartment.id,
+                    Lease.start_date < period_end,
+                    or_(Lease.end_date.is_(None), Lease.end_date >= period_start),
+                )
+                .order_by(Lease.start_date)
+            ).all()
+            if IGNORE_LEASE_MARK not in (lease.notes or "")
+        ]
         for apartment in apartments
     }
     vacant_apartment_names = [apartment.name for apartment in apartments if not apartment_leases.get(apartment.id) and apartment.leases]

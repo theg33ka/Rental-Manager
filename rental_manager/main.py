@@ -6,6 +6,8 @@ import re
 from datetime import date, datetime, time, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
+import threading
+import time as time_module
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -37,6 +39,8 @@ from rental_manager.models import (
     AppSetting,
 )
 from rental_manager.services.billing import (
+    IGNORE_LEASE_MARK,
+    RENT_GENERATION_START,
     active_lease_for_apartment,
     calculate_utility_bill,
     effective_due_date,
@@ -125,13 +129,19 @@ SECRET_SETTINGS = {
 ALL_SETTINGS = {**DEFAULT_SETTINGS, **SECRET_SETTINGS}
 INTERNAL_SETTINGS = {
     "telegram_tenant_links": "{}",
+    "ignored_lease_ids": "[]",
 }
 BOOLEAN_SETTINGS = {"notifications_enabled"}
+VALID_REMINDER_CADENCES = {"twice_daily", "daily_evening", "every_two_days", "never"}
 REMINDER_CADENCE_KEYS = {
     "message_rent_due": "automation_rent_due_cadence",
     "message_rent_overdue": "automation_rent_overdue_cadence",
     "message_utility_bill": "automation_utility_cadence",
 }
+LEASE_AUTOMATION_TEMPLATES = ("message_rent_due", "message_rent_overdue", "message_utility_bill")
+EXPENSE_FUND_RECEIPT_MARK = "PAYMENT_RECEIPT:"
+REMINDER_WORKER_STARTED = False
+REMINDER_WORKER_INTERVAL_SECONDS = 900
 LOCAL_TZ = ZoneInfo("Asia/Novosibirsk")
 DEFAULT_FALLBACK_KEYS = {
     "ip_recipient_name",
@@ -172,6 +182,29 @@ def startup() -> None:
         ensure_runtime_defaults(session)
         generate_rent_charges(session)
         session.commit()
+    start_reminder_worker()
+
+
+def reminder_worker_loop() -> None:
+    # Первый сон нужен, чтобы редеплой не отправлял пачку сообщений в ту же секунду.
+    time_module.sleep(60)
+    while True:
+        try:
+            with SessionLocal() as session:
+                run_due_reminders(session)
+                session.commit()
+        except Exception as exc:
+            print(f"[REMINDERS] background worker failed: {exc}")
+        time_module.sleep(REMINDER_WORKER_INTERVAL_SECONDS)
+
+
+def start_reminder_worker() -> None:
+    global REMINDER_WORKER_STARTED
+    if REMINDER_WORKER_STARTED:
+        return
+    REMINDER_WORKER_STARTED = True
+    thread = threading.Thread(target=reminder_worker_loop, name="rental-reminders", daemon=True)
+    thread.start()
 
 
 @app.get("/")
@@ -241,13 +274,16 @@ def ensure_runtime_defaults(session: Session) -> None:
 
 
 def get_setting_value(session: Session, key: str) -> str:
-    if key not in ALL_SETTINGS and key not in INTERNAL_SETTINGS:
+    dynamic_key = key.startswith("lease_") and "_cadence_" in key
+    if key not in ALL_SETTINGS and key not in INTERNAL_SETTINGS and not dynamic_key:
         return ""
     row = session.get(AppSetting, key)
     if row:
         return row.value
     if key in ALL_SETTINGS:
         return str(ALL_SETTINGS[key])
+    if dynamic_key:
+        return ""
     return str(INTERNAL_SETTINGS[key])
 
 
@@ -333,6 +369,65 @@ def debt_visible_by_cutoff(due_date: date | None, cutoff: date | None) -> bool:
     return due_date >= cutoff
 
 
+def allocation_cutoff_date(session: Session) -> date:
+    cutoff = configured_notification_cutoff_date(session)
+    if not cutoff or cutoff < RENT_GENERATION_START:
+        return RENT_GENERATION_START
+    return cutoff
+
+
+def ignored_lease_ids(session: Session) -> set[int]:
+    raw = get_setting_value(session, "ignored_lease_ids") or "[]"
+    try:
+        values = json.loads(raw)
+    except json.JSONDecodeError:
+        return set()
+    if not isinstance(values, list):
+        return set()
+    result: set[int] = set()
+    for value in values:
+        try:
+            result.add(int(value))
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def save_ignored_lease_ids(session: Session, values: set[int]) -> None:
+    setting = session.get(AppSetting, "ignored_lease_ids")
+    if not setting:
+        setting = AppSetting(key="ignored_lease_ids")
+        session.add(setting)
+    setting.value = json.dumps(sorted(values), ensure_ascii=False)
+
+
+def lease_ignored(session: Session | None, lease_id: int | None) -> bool:
+    if not session or not lease_id:
+        return False
+    lease = session.get(Lease, int(lease_id))
+    return int(lease_id) in ignored_lease_ids(session) or bool(lease and IGNORE_LEASE_MARK in (lease.notes or ""))
+
+
+def set_lease_ignored(session: Session, lease_id: int, ignored: bool) -> None:
+    values = ignored_lease_ids(session)
+    if ignored:
+        values.add(int(lease_id))
+    else:
+        values.discard(int(lease_id))
+    save_ignored_lease_ids(session, values)
+    lease = session.get(Lease, lease_id)
+    if lease:
+        notes = lease.notes or ""
+        if ignored and IGNORE_LEASE_MARK not in notes:
+            lease.notes = (notes + "\n" + IGNORE_LEASE_MARK).strip()
+        if not ignored and IGNORE_LEASE_MARK in notes:
+            lease.notes = "\n".join(line for line in notes.splitlines() if line.strip() != IGNORE_LEASE_MARK).strip()
+
+
+def operational_lease(session: Session, lease: Lease | None) -> bool:
+    return bool(lease and lease.active and lease.apartment.active and not lease_ignored(session, lease.id))
+
+
 def reminder_cadence(session: Session, template_key: str, lease_id: int | None = None) -> str:
     # Сначала проверяем per-lease настройку
     if lease_id:
@@ -344,7 +439,7 @@ def reminder_cadence(session: Session, template_key: str, lease_id: int | None =
     if not key:
         return "twice_daily"
     value = str(get_setting_value(session, key) or "").strip()
-    if value in {"twice_daily", "daily_evening", "every_two_days"}:
+    if value in VALID_REMINDER_CADENCES:
         return value
     return str(DEFAULT_SETTINGS[key])
 
@@ -353,7 +448,7 @@ def get_lease_cadence(session: Session, lease_id: int, template_key: str) -> str
     """Получить индивидуальную настройку cadence для арендатора."""
     key = f"lease_{lease_id}_cadence_{template_key}"
     value = get_setting_value(session, key)
-    if value and value.strip() in {"twice_daily", "daily_evening", "every_two_days"}:
+    if value and value.strip() in VALID_REMINDER_CADENCES:
         return value.strip()
     return None
 
@@ -376,11 +471,31 @@ def clear_lease_cadence(session: Session, lease_id: int, template_key: str) -> N
         session.delete(setting)
 
 
+def get_lease_automation(session: Session, lease_id: int) -> dict[str, str]:
+    return {
+        template_key: get_lease_cadence(session, lease_id, template_key) or "inherit"
+        for template_key in LEASE_AUTOMATION_TEMPLATES
+    }
+
+
+def save_lease_automation(session: Session, lease_id: int, payload: dict[str, Any]) -> dict[str, str]:
+    for template_key in LEASE_AUTOMATION_TEMPLATES:
+        value = str(payload.get(template_key) or "inherit").strip()
+        if value in {"", "inherit"}:
+            clear_lease_cadence(session, lease_id, template_key)
+            continue
+        if value not in VALID_REMINDER_CADENCES:
+            raise HTTPException(400, "Некорректная частота уведомлений")
+        set_lease_cadence(session, lease_id, template_key, value)
+    return get_lease_automation(session, lease_id)
+
+
 def cadence_label(value: str) -> str:
     return {
         "twice_daily": "2 раза в день",
         "daily_evening": "вечером каждый день",
         "every_two_days": "раз в два дня",
+        "never": "выключено",
     }.get(value, value)
 
 
@@ -407,6 +522,8 @@ def cadence_slots_for_day(day: date, cadence: str) -> list[datetime]:
 
 def next_reminder_slot(cadence: str, latest: datetime | None, now: datetime | None = None) -> datetime:
     now = now or local_now()
+    if cadence == "never":
+        return datetime.max.replace(tzinfo=LOCAL_TZ)
     latest_local = to_local_time(latest)
     check_day = now.date()
     for _ in range(8):
@@ -430,6 +547,8 @@ def next_reminder_slot(cadence: str, latest: datetime | None, now: datetime | No
 
 
 def cadence_allows_send(cadence: str, latest: datetime | None, now: datetime | None = None) -> bool:
+    if cadence == "never":
+        return False
     now = now or local_now()
     slot = next_reminder_slot(cadence, latest, now)
     return slot <= now
@@ -437,6 +556,12 @@ def cadence_allows_send(cadence: str, latest: datetime | None, now: datetime | N
 
 def reminder_schedule_meta(session: Session, template_key: str, latest: MessageLog | None, lease_id: int | None = None) -> dict[str, Any]:
     cadence = reminder_cadence(session, template_key, lease_id)
+    if cadence == "never":
+        return {
+            "cadence": cadence,
+            "cadence_label": cadence_label(cadence),
+            "next_auto_at": None,
+        }
     next_slot = next_reminder_slot(cadence, latest.created_at if latest else None)
     return {
         "cadence": cadence,
@@ -481,6 +606,15 @@ def normalize_apartment_code(value: str) -> str:
     return re.sub(r"[^a-zа-я0-9]+", "", (value or "").lower().replace("ё", "е"))
 
 
+def normalize_phone(value: str) -> str:
+    digits = re.sub(r"\D+", "", value or "")
+    if len(digits) == 11 and digits.startswith("8"):
+        digits = "7" + digits[1:]
+    if len(digits) == 10:
+        digits = "7" + digits
+    return digits
+
+
 def lease_by_chat_id(session: Session, chat_id: int | str | None) -> Lease | None:
     if not chat_id:
         return None
@@ -499,6 +633,17 @@ def maybe_link_tenant_chat(session: Session, message: dict[str, Any]) -> Lease |
     linked = lease_by_chat_id(session, chat_id)
     if linked:
         return linked
+    contact = message.get("contact") or {}
+    contact_phone = normalize_phone(contact.get("phone_number") or "")
+    contact_user_id = str(contact.get("user_id") or "")
+    sender_user_id = str(sender.get("id") or "")
+    if chat_id and contact_phone and contact_user_id and contact_user_id == sender_user_id:
+        for lease in session.scalars(select(Lease).where(Lease.active.is_(True))).all():
+            if normalize_phone(lease.tenant.phone) == contact_phone:
+                links = get_tenant_links(session)
+                links[str(lease.tenant_id)] = str(chat_id)
+                save_tenant_links(session, links)
+                return lease
     handles = {
         normalize_telegram_handle(sender.get("username") or ""),
         normalize_telegram_handle(chat.get("username") or ""),
@@ -627,6 +772,7 @@ def current_active_lease(apartment: Apartment, today: date | None = None) -> Lea
             lease
             for lease in leases
             if lease.active and lease.start_date <= today and (lease.end_date is None or lease.end_date >= today)
+            and IGNORE_LEASE_MARK not in (lease.notes or "")
         ),
         None,
     )
@@ -659,7 +805,7 @@ def serialize_tenant(tenant: Tenant) -> dict[str, Any]:
     }
 
 
-def serialize_lease(lease: Lease) -> dict[str, Any]:
+def serialize_lease(lease: Lease, session: Session | None = None) -> dict[str, Any]:
     return {
         "id": lease.id,
         "apartment_id": lease.apartment_id,
@@ -679,8 +825,10 @@ def serialize_lease(lease: Lease) -> dict[str, Any]:
         "deposit_amount": lease.deposit_amount,
         "deposit_location": lease.deposit_location,
         "deposit_terms": lease.deposit_terms,
-        "notes": lease.notes,
+        "notes": "\n".join(line for line in (lease.notes or "").splitlines() if line.strip() != IGNORE_LEASE_MARK),
         "active": lease.active,
+        "ignored": lease_ignored(session, lease.id),
+        "automation": get_lease_automation(session, lease.id) if session else {},
     }
 
 
@@ -707,6 +855,8 @@ def payment_source_label(receipt: PaymentReceipt) -> str:
         base = "ИП"
     elif receipt.channel == "personal":
         base = "перевод"
+    elif receipt.channel == "expense_fund":
+        base = "на расходы"
     elif receipt.channel == "utilities":
         base = "коммуналка"
     else:
@@ -760,6 +910,44 @@ def serialize_payment_receipt(receipt: PaymentReceipt, session: Session) -> dict
         "target_month_number": target_month_number,
         "target_year": target_year,
         "parsed": parsed,
+    }
+
+
+def lease_payment_target_options(session: Session, lease: Lease) -> dict[str, list[dict[str, Any]]]:
+    rent_charges = session.scalars(
+        select(RentCharge)
+        .where(RentCharge.lease_id == lease.id, RentCharge.due_date >= RENT_GENERATION_START)
+        .order_by(RentCharge.due_date.desc(), RentCharge.id.desc())
+    ).all()
+    utility_lines = session.scalars(
+        select(UtilityBillLine)
+        .where(UtilityBillLine.lease_id == lease.id)
+        .order_by(UtilityBillLine.id.desc())
+    ).all()
+    return {
+        "rent": [
+            {
+                "id": charge.id,
+                "label": f"аренда {format_date(charge.due_date)}",
+                "month": charge.due_date.month,
+                "year": charge.due_date.year,
+                "due_date": charge.due_date.isoformat(),
+                "debt": money(max(0.0, charge.ip_due - charge.ip_paid) + max(0.0, charge.personal_due - charge.personal_paid)),
+            }
+            for charge in rent_charges
+        ],
+        "utility": [
+            {
+                "id": line.id,
+                "label": f"ком. услуги {line.bill.period_start:%d.%m.%Y} -> {line.bill.period_end:%d.%m.%Y}",
+                "period_start": line.bill.period_start.isoformat(),
+                "period_end": line.bill.period_end.isoformat(),
+                "debt": money(max(0.0, line.total_amount - line.paid_amount)),
+                "status": line.status,
+                "service": line.bill.service.name,
+            }
+            for line in utility_lines
+        ],
     }
 
 
@@ -917,6 +1105,56 @@ def serialize_expense(expense: Expense) -> dict[str, Any]:
     }
 
 
+def expense_fund_receipt_marker(receipt_id: int) -> str:
+    return f"{EXPENSE_FUND_RECEIPT_MARK}{receipt_id}"
+
+
+def linked_expense_fund_record(session: Session, receipt_id: int) -> Expense | None:
+    marker = expense_fund_receipt_marker(receipt_id)
+    return session.scalar(select(Expense).where(Expense.notes.contains(marker)).limit(1))
+
+
+def sync_expense_fund_receipt(session: Session, receipt: PaymentReceipt) -> None:
+    existing = linked_expense_fund_record(session, receipt.id)
+    eligible = (
+        receipt.status == "accepted"
+        and receipt.channel == "expense_fund"
+        and receipt.rent_charge_id is not None
+        and receipt.lease_id is not None
+    )
+    if not eligible:
+        if existing:
+            session.delete(existing)
+        return
+
+    lease = receipt.rent_charge.lease if receipt.rent_charge else session.get(Lease, receipt.lease_id)
+    if not lease:
+        if existing:
+            session.delete(existing)
+        return
+
+    marker = expense_fund_receipt_marker(receipt.id)
+    expense = existing or Expense(notes=marker)
+    expense.expense_date = receipt.paid_at.date()
+    expense.object_id = lease.apartment.object_id
+    expense.apartment_id = lease.apartment_id
+    expense.category = "Пополнение на расходы"
+    expense.amount = money(receipt.amount)
+    expense.source_funds = "expense_fund_income"
+    expense.payment_method = receipt.source or "manual"
+    expense.description = f"Пополнение на расходы от {lease.tenant.full_name}"
+    expense.compensation_status = "not_required"
+    expense.file_path = receipt.file_path or ""
+    if marker not in (expense.notes or ""):
+        expense.notes = "; ".join(part for part in [expense.notes, marker] if part)
+    session.add(expense)
+
+
+def sync_expense_fund_receipts(session: Session, receipts: list[PaymentReceipt]) -> None:
+    for receipt in receipts:
+        sync_expense_fund_receipt(session, receipt)
+
+
 def build_object_summary(session: Session) -> dict[str, Any]:
     apartments = session.scalars(select(Apartment).where(Apartment.active.is_(True))).all()
     occupied = [apartment for apartment in apartments if current_active_lease(apartment)]
@@ -945,7 +1183,7 @@ def bootstrap(session: Session = Depends(get_session)) -> dict[str, Any]:
     return {
         "today": date.today().isoformat(),
         "objects": [serialize_object(obj) for obj in session.scalars(select(RentalObject).order_by(RentalObject.name)).all()],
-        "leases": [serialize_lease(lease) for lease in session.scalars(select(Lease).order_by(Lease.active.desc(), Lease.start_date.desc())).all()],
+        "leases": [serialize_lease(lease, session) for lease in session.scalars(select(Lease).order_by(Lease.active.desc(), Lease.start_date.desc())).all()],
         "meters": [serialize_meter(meter) for meter in session.scalars(select(Meter).order_by(Meter.object_id, Meter.scope, Meter.name)).all()],
         "services": [serialize_service(service) for service in session.scalars(select(UtilityService).order_by(UtilityService.object_id, UtilityService.kind)).all()],
         "settings": get_settings(session),
@@ -965,27 +1203,51 @@ def api_save_settings(payload: dict[str, Any], session: Session = Depends(get_se
 
 @app.get("/api/leases/{lease_id}/cadence")
 def api_get_lease_cadence(lease_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
-    return {"cadence": get_lease_cadence(session, lease_id)}
+    lease = session.get(Lease, lease_id)
+    if not lease:
+        raise HTTPException(404, "Договор не найден")
+    return {"automation": get_lease_automation(session, lease_id)}
 
 
 @app.post("/api/leases/{lease_id}/cadence")
 def api_set_lease_cadence(lease_id: int, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
-    cadence = payload.get("cadence")
-    if cadence is not None and cadence not in ("daily", "weekly", "monthly", "never"):
-        raise HTTPException(status_code=400, detail="Invalid cadence value")
-    if cadence:
-        set_lease_cadence(session, lease_id, cadence)
-    else:
-        clear_lease_cadence(session, lease_id)
+    lease = session.get(Lease, lease_id)
+    if not lease:
+        raise HTTPException(404, "Договор не найден")
+    automation = save_lease_automation(session, lease_id, payload)
     session.commit()
-    return {"cadence": cadence}
+    return {"automation": automation}
 
 
 @app.delete("/api/leases/{lease_id}/cadence")
 def api_clear_lease_cadence(lease_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
-    clear_lease_cadence(session, lease_id)
+    lease = session.get(Lease, lease_id)
+    if not lease:
+        raise HTTPException(404, "Договор не найден")
+    for template_key in LEASE_AUTOMATION_TEMPLATES:
+        clear_lease_cadence(session, lease_id, template_key)
     session.commit()
-    return {"cadence": None}
+    return {"automation": get_lease_automation(session, lease_id)}
+
+
+@app.patch("/api/leases/{lease_id}/automation")
+def api_update_lease_automation(lease_id: int, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
+    lease = session.get(Lease, lease_id)
+    if not lease:
+        raise HTTPException(404, "Договор не найден")
+    automation = save_lease_automation(session, lease_id, payload)
+    session.commit()
+    return {"automation": automation}
+
+
+@app.patch("/api/leases/{lease_id}/ignore")
+def api_update_lease_ignore(lease_id: int, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
+    lease = session.get(Lease, lease_id)
+    if not lease:
+        raise HTTPException(404, "Договор не найден")
+    set_lease_ignored(session, lease_id, setting_bool_value(payload.get("ignored")))
+    session.commit()
+    return serialize_lease(lease, session)
 
 
 def import_release_baseline(session: Session) -> dict[str, int]:
@@ -1170,10 +1432,18 @@ def build_monthly_reports(session: Session, today: date | None = None) -> list[d
 def build_dashboard(session: Session) -> dict[str, Any]:
     today = date.today()
     cutoff = configured_notification_cutoff_date(session)
-    charges = session.scalars(select(RentCharge).join(Lease).join(Apartment).where(Apartment.active.is_(True)).order_by(RentCharge.due_date)).all()
+    charges = session.scalars(
+        select(RentCharge)
+        .join(Lease)
+        .join(Apartment)
+        .where(Lease.active.is_(True), Apartment.active.is_(True))
+        .order_by(RentCharge.due_date)
+    ).all()
+    charges = [charge for charge in charges if not lease_ignored(session, charge.lease_id)]
     for charge in charges:
         update_rent_charge_status(charge, today)
     utility_lines = session.scalars(select(UtilityBillLine).join(Apartment).where(Apartment.active.is_(True))).all()
+    utility_lines = [line for line in utility_lines if line.lease_id and not lease_ignored(session, line.lease_id)]
     for line in utility_lines:
         update_utility_line_status(line, today)
 
@@ -1227,6 +1497,19 @@ def build_dashboard(session: Session) -> dict[str, Any]:
     pending_expenses = session.scalars(
         select(Expense).where(Expense.source_funds == "personal", Expense.compensation_status != "compensated")
     ).all()
+    expense_fund_received = money(
+        session.scalar(select(func.coalesce(func.sum(Expense.amount), 0)).where(Expense.source_funds == "expense_fund_income")) or 0
+    )
+    expense_fund_spent = money(
+        session.scalar(
+            select(func.coalesce(func.sum(Expense.amount), 0)).where(
+                Expense.source_funds != "expense_fund_income",
+                Expense.compensation_status != "compensated",
+            )
+        )
+        or 0
+    )
+    expense_fund_balance = money(expense_fund_received - expense_fund_spent)
 
     stale_readings = []
     for service in session.scalars(select(UtilityService).where(UtilityService.active.is_(True))).all():
@@ -1263,6 +1546,12 @@ def build_dashboard(session: Session) -> dict[str, Any]:
         "utility_partial": partial_utilities,
         "utility_issued": issued_utilities,
         "pending_personal_expenses": [serialize_expense(expense) for expense in pending_expenses],
+        "expense_fund": {
+            "received": expense_fund_received,
+            "spent": expense_fund_spent,
+            "balance": expense_fund_balance,
+            "has_mismatch": expense_fund_balance > 0.009,
+        },
         "stale_readings": stale_readings,
         "provider_debts": provider_debts,
         "suspicious_receipts": [serialize_payment_receipt(receipt, session) for receipt in suspicious_receipts],
@@ -1604,6 +1893,7 @@ def serialize_message_target(session: Session, lease: Lease) -> dict[str, Any]:
         "apartment": lease.apartment.name,
         "telegram": lease.tenant.telegram,
         "linked": tenant_chat_linked(session, lease),
+        "automation": get_lease_automation(session, lease.id),
         "rent_charge_id": charge.id if charge else None,
         "rent_status": charge.status if charge else "",
         "rent_debt": rent_debt,
@@ -1737,7 +2027,7 @@ def utility_issue_targets(session: Session, bill: UtilityBill) -> list[dict[str,
     previews: list[dict[str, Any]] = []
     for lease_id, selected_lines in sorted(by_lease.items()):
         lease = session.get(Lease, lease_id)
-        if not lease:
+        if not lease or lease_ignored(session, lease.id):
             continue
         existing_lines = [
             item
@@ -1829,6 +2119,9 @@ def run_due_reminders(session: Session, today: date | None = None) -> dict[str, 
     for charge in charges:
         update_rent_charge_status(charge, today)
         template_key = ""
+        if lease_ignored(session, charge.lease_id):
+            summary["skipped_disabled"] += 1
+            continue
         if charge.due_date < cutoff:
             summary["skipped_legacy"] += 1
             continue
@@ -1842,7 +2135,8 @@ def run_due_reminders(session: Session, today: date | None = None) -> dict[str, 
         if not template_key:
             continue
         latest = latest_message_log(session, rent_charge_id=charge.id)
-        if not cadence_allows_send(reminder_cadence(session, template_key), latest.created_at if latest else None, now):
+        cadence = get_lease_cadence(session, charge.lease_id, template_key) or reminder_cadence(session, template_key)
+        if not cadence_allows_send(cadence, latest.created_at if latest else None, now):
             summary["skipped_duplicate"] += 1
             continue
         try:
@@ -1860,6 +2154,9 @@ def run_due_reminders(session: Session, today: date | None = None) -> dict[str, 
     ).all()
     for line in lines:
         update_utility_line_status(line, today)
+        if lease_ignored(session, line.lease_id):
+            summary["skipped_disabled"] += 1
+            continue
         if not line.due_date:
             continue
         if line.due_date < cutoff:
@@ -1871,7 +2168,8 @@ def run_due_reminders(session: Session, today: date | None = None) -> dict[str, 
         if not (line.status in {"issued", "overdue", "partial"} and line.due_date <= today):
             continue
         latest = latest_message_log(session, utility_line_id=line.id)
-        if not cadence_allows_send(reminder_cadence(session, "message_utility_bill"), latest.created_at if latest else None, now):
+        cadence = get_lease_cadence(session, line.lease_id or 0, "message_utility_bill") or reminder_cadence(session, "message_utility_bill")
+        if not cadence_allows_send(cadence, latest.created_at if latest else None, now):
             summary["skipped_duplicate"] += 1
             continue
         try:
@@ -1918,6 +2216,7 @@ def receipt_channel_label(value: str) -> str:
     return {
         "ip": "ИП",
         "personal": "По номеру",
+        "expense_fund": "Мне на расходы",
         "utilities": "коммуналка",
         "unknown": "неизвестно",
     }.get(value, value or "неизвестно")
@@ -2066,13 +2365,16 @@ def create_personal_priority_receipts(
 ) -> list[PaymentReceipt]:
     receipts: list[PaymentReceipt] = []
     remaining = money(amount)
-    utility_candidates_now = utility_line_candidates(session, lease.id)
+    cutoff = allocation_cutoff_date(session)
+    utility_candidates_now = [line for line in utility_line_candidates(session, lease.id) if debt_visible_by_cutoff(line.due_date, cutoff)]
     generate_rent_charges(session, until=(paid_at.date() if isinstance(paid_at, datetime) else paid_at) + timedelta(days=40))
     personal_candidates_now: list[RentCharge] = []
     current_charge: RentCharge | None = None
     paid_day = paid_at.date() if isinstance(paid_at, datetime) else paid_at
     all_charges = session.scalars(
-        select(RentCharge).where(RentCharge.lease_id == lease.id).order_by(RentCharge.due_date, RentCharge.id)
+        select(RentCharge)
+        .where(RentCharge.lease_id == lease.id, RentCharge.due_date >= cutoff)
+        .order_by(RentCharge.due_date.desc(), RentCharge.id.desc())
     ).all()
     for charge in all_charges:
         personal_debt = money(max(0.0, charge.personal_due - charge.personal_paid))
@@ -2086,8 +2388,11 @@ def create_personal_priority_receipts(
         personal_candidates_now.insert(0, current_charge)
 
     if utility_candidates_now:
-        utility_plan, utility_remaining = build_utility_plan(session, lease, remaining, exact_only=False)
-        for line, portion in utility_plan:
+        for line in utility_candidates_now:
+            debt = money(max(0.0, line.total_amount - line.paid_amount))
+            portion = min(remaining, debt)
+            if portion <= EPS:
+                continue
             receipts.append(
                 PaymentReceipt(
                     lease_id=lease.id,
@@ -2104,7 +2409,9 @@ def create_personal_priority_receipts(
                     notes=notes,
                 )
             )
-        remaining = utility_remaining
+            remaining = money(remaining - portion)
+            if remaining <= EPS:
+                break
         if receipts and remaining > EPS and not personal_candidates_now:
             receipts[-1].amount = money(receipts[-1].amount + remaining)
             remaining = 0.0
@@ -2153,6 +2460,7 @@ def apply_receipt_match(session: Session, lease: Lease, parsed: dict[str, Any]) 
     issues = receipt_validation_issues(parsed, get_settings(session), channel)
     allocation_comment = ""
     paid_at = datetime.fromisoformat(parsed["paid_at"]) if parsed.get("paid_at") else None
+    cutoff = allocation_cutoff_date(session)
     if amount <= 0:
         issues.append("в чеке не удалось определить положительную сумму")
 
@@ -2165,6 +2473,7 @@ def apply_receipt_match(session: Session, lease: Lease, parsed: dict[str, Any]) 
             exact_only=False,
             paid_at=paid_at,
             prefer_document_month=True,
+            cutoff=cutoff,
         )
         allocation_comment = describe_rent_allocation_decision(decision)
         if not plan or remaining > EPS:
@@ -2178,13 +2487,17 @@ def apply_receipt_match(session: Session, lease: Lease, parsed: dict[str, Any]) 
             return "rejected", "review", None, issues, ""
         if issues:
             return "suspicious", "review", None, issues, ""
-        utility_candidates_now = utility_line_candidates(session, lease.id)
+        utility_candidates_now = [line for line in utility_line_candidates(session, lease.id) if debt_visible_by_cutoff(line.due_date, cutoff)]
         if utility_candidates_now:
             return "accepted", "utility", utility_candidates_now[0].id, [], "зачёт перевода по приоритету ушёл в коммуналку"
         paid_day = paid_at.date() if isinstance(paid_at, datetime) else paid_at.date() if paid_at else date.today()
         generate_rent_charges(session, until=paid_day + timedelta(days=40))
         personal_candidates_now = []
-        for charge in session.scalars(select(RentCharge).where(RentCharge.lease_id == lease.id).order_by(RentCharge.due_date, RentCharge.id)).all():
+        for charge in session.scalars(
+            select(RentCharge)
+            .where(RentCharge.lease_id == lease.id, RentCharge.due_date >= cutoff)
+            .order_by(RentCharge.due_date.desc(), RentCharge.id.desc())
+        ).all():
             personal_debt = money(max(0.0, charge.personal_due - charge.personal_paid))
             if personal_debt <= EPS:
                 continue
@@ -2314,6 +2627,7 @@ def handle_tenant_receipt_message(session: Session, message: dict[str, Any], lin
                     file_path=stored_path,
                     exact_only=channel == "personal",
                     prefer_document_month=True,
+                    cutoff=allocation_cutoff_date(session),
                 )
             elif match_type == "utility":
                 create_utility_receipts(
@@ -2449,9 +2763,6 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
     if not chat_id:
         return
 
-    # DEBUG
-    print(f"[TELEGRAM] message from chat_id={chat_id}, has_document={bool(message.get('document'))}, has_photo={bool(message.get('photo'))}")
-
     linked_lease = maybe_link_tenant_chat(session, message)
     text = (message.get("text") or "").strip()
     command, _args = parse_command(text)
@@ -2459,6 +2770,18 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
     reports = build_monthly_reports(session)
     owner_id = telegram_owner_chat_id(session)
     is_owner = owner_chat_allowed(session, chat_id)
+
+    if message.get("contact") and not is_owner:
+        if linked_lease:
+            send_telegram_text(
+                session,
+                chat_id,
+                f"Готово, привязал этот чат к квартире {linked_lease.apartment.name}.",
+                tenant_keyboard(),
+            )
+        else:
+            send_telegram_text(session, chat_id, "Не нашёл активного жильца с таким телефоном в базе.")
+        return
 
     if command in {"/start", "/id"}:
         if command == "/id":
@@ -2480,7 +2803,12 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
                 tenant_keyboard(),
             )
             return
-        # Не отвечаем неавторизованным пользователям — просто игнорируем /start
+        send_telegram_text(
+            session,
+            chat_id,
+            "Если вы жилец без @username, нажмите «Привязать по телефону». Пульт владельца через бота не выдаётся.",
+            tenant_keyboard(),
+        )
         return
 
     if command == "/help":
@@ -2519,7 +2847,6 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
 
     # Обработка файлов от жильцов - до проверки owner_id
     if not is_owner and (message.get("document") or message.get("photo")):
-        print(f"[TELEGRAM] handling document from chat_id={chat_id}, linked_lease={linked_lease}")
         if linked_lease:
             handle_tenant_receipt_message(session, message, linked_lease)
         return
@@ -2657,7 +2984,7 @@ def message_targets(session: Session = Depends(get_session)) -> list[dict[str, A
     leases = session.scalars(
         select(Lease).join(Apartment).where(Lease.active.is_(True), Apartment.active.is_(True)).order_by(Lease.start_date.desc())
     ).all()
-    return [serialize_message_target(session, lease) for lease in leases]
+    return [serialize_message_target(session, lease) for lease in leases if not lease_ignored(session, lease.id)]
 
 
 @app.post("/api/messages/preview")
@@ -2771,7 +3098,7 @@ def list_tenants(session: Session = Depends(get_session)) -> list[dict[str, Any]
 
 @app.get("/api/leases")
 def list_leases(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
-    return [serialize_lease(lease) for lease in session.scalars(select(Lease).order_by(Lease.active.desc(), Lease.start_date.desc())).all()]
+    return [serialize_lease(lease, session) for lease in session.scalars(select(Lease).order_by(Lease.active.desc(), Lease.start_date.desc())).all()]
 
 
 @app.post("/api/leases/onboard")
@@ -2782,7 +3109,14 @@ def onboard_tenant(payload: dict[str, Any], session: Session = Depends(get_sessi
     apartment = session.get(Apartment, apartment_id)
     if not apartment:
         raise HTTPException(404, "Квартира не найдена")
-    active_lease = session.scalar(select(Lease).where(Lease.apartment_id == apartment.id, Lease.active.is_(True)))
+    active_lease = next(
+        (
+            lease
+            for lease in session.scalars(select(Lease).where(Lease.apartment_id == apartment.id, Lease.active.is_(True))).all()
+            if not lease_ignored(session, lease.id)
+        ),
+        None,
+    )
     if active_lease:
         raise HTTPException(400, "В квартире уже есть активный жилец. Сначала оформите выезд.")
 
@@ -2811,10 +3145,12 @@ def onboard_tenant(payload: dict[str, Any], session: Session = Depends(get_sessi
     )
     session.add(lease)
     session.flush()
+    if "ignored" in payload:
+        set_lease_ignored(session, lease.id, setting_bool_value(payload.get("ignored")))
     generate_rent_charges(session)
     session.commit()
     session.refresh(lease)
-    return serialize_lease(lease)
+    return serialize_lease(lease, session)
 
 
 @app.patch("/api/leases/{lease_id}")
@@ -2823,6 +3159,7 @@ def update_lease(lease_id: int, payload: dict[str, Any], session: Session = Depe
     if not lease:
         raise HTTPException(404, "Договор не найден")
 
+    was_ignored = lease_ignored(session, lease.id)
     apartment_id = int(payload.get("apartment_id") or lease.apartment_id)
     apartment = session.get(Apartment, apartment_id)
     if not apartment:
@@ -2844,6 +3181,15 @@ def update_lease(lease_id: int, payload: dict[str, Any], session: Session = Depe
     lease.deposit_location = payload.get("deposit_location") or ""
     lease.deposit_terms = payload.get("deposit_terms") or ""
     lease.notes = payload.get("notes") or ""
+    if was_ignored and IGNORE_LEASE_MARK not in lease.notes:
+        lease.notes = (lease.notes + "\n" + IGNORE_LEASE_MARK).strip()
+    if "end_date" in payload:
+        raw_end = str(payload.get("end_date") or "").strip()
+        lease.end_date = parse_date(raw_end) if raw_end else None
+        lease.active = not (lease.end_date and lease.end_date <= date.today())
+        lease.tenant.active = lease.active
+    if "ignored" in payload:
+        set_lease_ignored(session, lease.id, setting_bool_value(payload.get("ignored")))
 
     lease.tenant.full_name = (payload.get("full_name") or "Без имени").strip()
     lease.tenant.phone = payload.get("phone") or ""
@@ -2857,7 +3203,32 @@ def update_lease(lease_id: int, payload: dict[str, Any], session: Session = Depe
     generate_rent_charges(session)
     session.commit()
     session.refresh(lease)
-    return serialize_lease(lease)
+    return serialize_lease(lease, session)
+
+
+@app.delete("/api/leases/{lease_id}")
+def delete_lease(lease_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
+    lease = session.get(Lease, lease_id)
+    if not lease:
+        raise HTTPException(404, "Договор не найден")
+    tenant = lease.tenant
+    session.execute(delete(MessageLog).where(MessageLog.lease_id == lease.id))
+    for receipt in session.scalars(select(PaymentReceipt).where(PaymentReceipt.lease_id == lease.id)).all():
+        linked_expense = linked_expense_fund_record(session, receipt.id)
+        if linked_expense:
+            session.delete(linked_expense)
+        session.delete(receipt)
+    for line in session.scalars(select(UtilityBillLine).where(UtilityBillLine.lease_id == lease.id)).all():
+        line.lease_id = None
+        line.status = "not_required"
+    session.execute(delete(RentCharge).where(RentCharge.lease_id == lease.id))
+    set_lease_ignored(session, lease.id, False)
+    session.delete(lease)
+    session.flush()
+    if tenant and not session.scalar(select(Lease.id).where(Lease.tenant_id == tenant.id).limit(1)):
+        session.delete(tenant)
+    session.commit()
+    return {"ok": True}
 
 
 @app.post("/api/leases/{lease_id}/move-out")
@@ -2887,7 +3258,7 @@ def move_out(lease_id: int, payload: dict[str, Any], session: Session = Depends(
 
     session.commit()
     return {
-        "lease": serialize_lease(lease),
+        "lease": serialize_lease(lease, session),
         "summary": {
             "full_months_lived": full_months_lived(lease, end),
             "last_paid_day": last_paid_day.isoformat(),
@@ -2917,10 +3288,11 @@ def list_rent_charges(
         select(RentCharge)
         .join(Lease)
         .join(Apartment)
-        .where(Apartment.active.is_(True))
+        .where(Lease.active.is_(True), Apartment.active.is_(True))
         .where(RentCharge.due_date >= start_date, RentCharge.due_date <= end_date)
         .order_by(RentCharge.due_date, RentCharge.id)
     ).all()
+    charges = [charge for charge in charges if not lease_ignored(session, charge.lease_id)]
     session.commit()
     return [serialize_rent_charge(charge, session) for charge in charges]
 
@@ -2939,13 +3311,13 @@ def add_rent_payment(charge_id: int, payload: dict[str, Any], session: Session =
     if not charge:
         raise HTTPException(404, "начисление не найдено")
     channel = payload.get("channel")
-    if channel not in {"ip", "personal"}:
-        raise HTTPException(400, "канал платежа должен быть ip или personal")
+    if channel not in {"ip", "personal", "expense_fund"}:
+        raise HTTPException(400, "канал платежа должен быть ip, personal или expense_fund")
     amount = float(payload.get("amount") or 0)
     if amount <= 0:
         raise HTTPException(400, "сумма платежа должна быть больше нуля")
 
-    create_rent_receipts(
+    receipts = create_rent_receipts(
         session,
         charge.lease,
         channel,
@@ -2957,7 +3329,9 @@ def add_rent_payment(charge_id: int, payload: dict[str, Any], session: Session =
         recipient_details=payload.get("recipient_details") or "",
         notes=payload.get("notes") or "",
         exact_only=False,
+        cutoff=allocation_cutoff_date(session),
     )
+    sync_expense_fund_receipts(session, receipts)
     session.commit()
     session.refresh(charge)
     return serialize_rent_charge(charge, session)
@@ -2978,6 +3352,7 @@ def lease_payment_history(lease_id: int, session: Session = Depends(get_session)
         "tenant": lease.tenant.full_name,
         "apartment": lease.apartment.name,
         "current_year": date.today().year,
+        "targets": lease_payment_target_options(session, lease),
         "receipts": [serialize_payment_receipt(receipt, session) for receipt in receipts],
     }
 
@@ -2986,6 +3361,8 @@ def ensure_rent_charge_for_month(session: Session, lease: Lease, year: int, mont
     if month < 1 or month > 12:
         raise HTTPException(400, "Месяц зачёта должен быть от 1 до 12")
     start, end = month_range(year, month)
+    if start < RENT_GENERATION_START:
+        raise HTTPException(400, "Начисления раньше января 2025 не создаются")
     generate_rent_charges(session, until=end + timedelta(days=40))
     session.flush()
     charge = session.scalar(
@@ -3026,8 +3403,8 @@ def create_manual_payment(payload: dict[str, Any], session: Session = Depends(ge
 
     if kind == "rent":
         channel = (payload.get("channel") or "").strip()
-        if channel not in {"ip", "personal"}:
-            raise HTTPException(400, "для аренды нужен канал ip или personal")
+        if channel not in {"ip", "personal", "expense_fund"}:
+            raise HTTPException(400, "для аренды нужен канал ip, personal или expense_fund")
         target_charge_id = int(payload.get("rent_charge_id") or 0)
         target_month = int(payload.get("target_month") or 0)
         target_year = int(payload.get("target_year") or date.today().year)
@@ -3049,6 +3426,7 @@ def create_manual_payment(payload: dict[str, Any], session: Session = Depends(ge
             session.add(receipt)
             session.flush()
             recalculate_lease_balances(session, lease.id)
+            sync_expense_fund_receipt(session, receipt)
             receipts = [receipt]
         elif target_month:
             target_charge = ensure_rent_charge_for_month(session, lease, target_year, target_month)
@@ -3066,6 +3444,7 @@ def create_manual_payment(payload: dict[str, Any], session: Session = Depends(ge
             session.add(receipt)
             session.flush()
             recalculate_lease_balances(session, lease.id)
+            sync_expense_fund_receipt(session, receipt)
             receipts = [receipt]
         else:
             receipts = create_rent_receipts(
@@ -3078,7 +3457,9 @@ def create_manual_payment(payload: dict[str, Any], session: Session = Depends(ge
                 status="accepted",
                 notes=notes or "ручной платёж",
                 exact_only=False,
+                cutoff=allocation_cutoff_date(session),
             )
+            sync_expense_fund_receipts(session, receipts)
     elif kind == "utility":
         target_line_id = int(payload.get("utility_line_id") or 0)
         if target_line_id:
@@ -3135,12 +3516,37 @@ def update_payment_receipt(receipt_id: int, payload: dict[str, Any], session: Se
         receipt.paid_at = datetime.fromisoformat(payload["paid_at"])
     if "notes" in payload:
         receipt.notes = str(payload.get("notes") or "")
-    if payload.get("channel") and receipt.rent_charge_id:
+    target_kind = (payload.get("target_kind") or "").strip()
+    if target_kind:
+        if target_kind == "rent":
+            target_charge = session.get(RentCharge, int(payload.get("rent_charge_id") or 0))
+            if not target_charge:
+                raise HTTPException(404, "Арендный месяц не найден")
+            channel = (payload.get("channel") or receipt.channel or "ip").strip()
+            if channel not in {"ip", "personal", "expense_fund"}:
+                raise HTTPException(400, "для аренды канал платежа должен быть ip, personal или expense_fund")
+            receipt.rent_charge_id = target_charge.id
+            receipt.utility_line_id = None
+            receipt.lease_id = target_charge.lease_id
+            receipt.apartment_id = target_charge.lease.apartment_id
+            receipt.channel = channel
+        elif target_kind == "utility":
+            target_line = session.get(UtilityBillLine, int(payload.get("utility_line_id") or 0))
+            if not target_line or not target_line.lease_id:
+                raise HTTPException(404, "Коммунальный счёт не найден")
+            receipt.rent_charge_id = None
+            receipt.utility_line_id = target_line.id
+            receipt.lease_id = target_line.lease_id
+            receipt.apartment_id = target_line.apartment_id
+            receipt.channel = "utilities"
+        else:
+            raise HTTPException(400, "неизвестная цель зачёта")
+    elif payload.get("channel") and receipt.rent_charge_id:
         channel = payload.get("channel")
-        if channel not in {"ip", "personal"}:
-            raise HTTPException(400, "для аренды канал платежа должен быть ip или personal")
+        if channel not in {"ip", "personal", "expense_fund"}:
+            raise HTTPException(400, "для аренды канал платежа должен быть ip, personal или expense_fund")
         receipt.channel = channel
-    if receipt.rent_charge_id and ("target_month" in payload or "target_year" in payload):
+    if not target_kind and receipt.rent_charge_id and ("target_month" in payload or "target_year" in payload):
         lease = receipt.rent_charge.lease if receipt.rent_charge else session.get(Lease, receipt.lease_id)
         if not lease:
             raise HTTPException(400, "Не удалось определить аренду для этого платежа")
@@ -3153,9 +3559,12 @@ def update_payment_receipt(receipt_id: int, payload: dict[str, Any], session: Se
         receipt.lease_id = lease.id
         receipt.utility_line_id = None
         receipt.apartment_id = lease.apartment_id
-    if receipt.status == "accepted" and old_lease_id:
-        session.flush()
-        recalculate_lease_balances(session, old_lease_id)
+    session.flush()
+    sync_expense_fund_receipt(session, receipt)
+    if receipt.status == "accepted":
+        affected_ids = {item for item in [old_lease_id, receipt.lease_id] if item}
+        for lease_id in affected_ids:
+            recalculate_lease_balances(session, int(lease_id))
     session.commit()
     return serialize_payment_receipt(receipt, session)
 
@@ -3167,6 +3576,9 @@ def delete_payment_receipt(receipt_id: int, session: Session = Depends(get_sessi
         raise HTTPException(404, "платёж не найден")
     lease_id = receipt.lease_id
     status = receipt.status
+    linked_expense = linked_expense_fund_record(session, receipt.id)
+    if linked_expense:
+        session.delete(linked_expense)
     session.delete(receipt)
     session.flush()
     if lease_id and status == "accepted":
@@ -3194,17 +3606,17 @@ def moderate_payment_receipt(receipt_id: int, payload: dict[str, Any], session: 
     note = (payload.get("note") or "").strip()
     parsed = parse_receipt_details(receipt)
     channel_override = (payload.get("channel") or "").strip()
-    channel = channel_override if channel_override in {"ip", "personal"} else receipt.channel if receipt.channel in {"ip", "personal"} else detect_receipt_channel(parsed)
+    channel = channel_override if channel_override in {"ip", "personal", "expense_fund"} else receipt.channel if receipt.channel in {"ip", "personal", "expense_fund"} else detect_receipt_channel(parsed)
     lease = session.get(Lease, receipt.lease_id) if receipt.lease_id else None
     if action in {"accept_rent", "accept_utility"} and not lease:
         raise HTTPException(400, "нужна аренда для этой операции")
 
     moderation_note = f"модерация owner{': ' + note if note else ''}"
     if action == "accept_rent":
-        create_rent_receipts(
+        receipts = create_rent_receipts(
             session,
             lease,
-            "ip" if channel == "ip" else "personal",
+            channel if channel in {"ip", "personal", "expense_fund"} else "personal",
             float(receipt.amount or 0),
             paid_at=receipt.paid_at,
             source=receipt.source,
@@ -3215,7 +3627,9 @@ def moderate_payment_receipt(receipt_id: int, payload: dict[str, Any], session: 
             file_path=receipt.file_path,
             exact_only=False,
             prefer_document_month=receipt.source == "telegram",
+            cutoff=allocation_cutoff_date(session),
         )
+        sync_expense_fund_receipts(session, receipts)
         receipt.status = "moderated"
     elif action == "accept_utility":
         create_utility_receipts(

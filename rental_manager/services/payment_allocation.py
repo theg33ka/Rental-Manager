@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from rental_manager.models import Lease, PaymentReceipt, RentCharge, UtilityBillLine
-from rental_manager.services.billing import generate_rent_charges, money, update_rent_charge_status, update_utility_line_status
+from rental_manager.services.billing import RENT_GENERATION_START, generate_rent_charges, money, update_rent_charge_status, update_utility_line_status
 
 EPS = 0.009
 
@@ -37,7 +37,7 @@ def recalculate_lease_balances(session: Session, lease_id: int) -> None:
             continue
         if receipt.rent_charge_id and receipt.rent_charge_id in charge_map:
             charge = charge_map[receipt.rent_charge_id]
-            if receipt.channel == "ip":
+            if normalized_rent_channel(receipt.channel) == "ip":
                 charge.ip_paid = money(charge.ip_paid + float(receipt.amount or 0))
             else:
                 charge.personal_paid = money(charge.personal_paid + float(receipt.amount or 0))
@@ -48,13 +48,18 @@ def recalculate_lease_balances(session: Session, lease_id: int) -> None:
         update_utility_line_status(line)
 
 
-def rent_charge_candidates(session: Session, lease_id: int, channel: str) -> list[RentCharge]:
+def normalized_rent_channel(channel: str) -> str:
+    return "ip" if channel == "expense_fund" else channel
+
+
+def rent_charge_candidates(session: Session, lease_id: int, channel: str, cutoff: date | None = None) -> list[RentCharge]:
+    cutoff = cutoff or RENT_GENERATION_START
     charges = session.scalars(
         select(RentCharge).where(RentCharge.lease_id == lease_id).order_by(RentCharge.due_date, RentCharge.id)
     ).all()
     for charge in charges:
         update_rent_charge_status(charge)
-    return [charge for charge in charges if rent_charge_debt(charge, channel) > EPS]
+    return [charge for charge in charges if charge.due_date >= cutoff and rent_charge_debt(charge, channel) > EPS]
 
 
 def utility_line_candidates(session: Session, lease_id: int) -> list[UtilityBillLine]:
@@ -69,6 +74,7 @@ def utility_line_candidates(session: Session, lease_id: int) -> list[UtilityBill
 
 
 def rent_charge_debt(charge: RentCharge, channel: str) -> float:
+    channel = normalized_rent_channel(channel)
     if channel == "ip":
         return money(max(0.0, float(charge.ip_due or 0) - float(charge.ip_paid or 0)))
     return money(max(0.0, float(charge.personal_due or 0) - float(charge.personal_paid or 0)))
@@ -78,19 +84,21 @@ def utility_line_debt(line: UtilityBillLine) -> float:
     return money(max(0.0, float(line.total_amount or 0) - float(line.paid_amount or 0)))
 
 
-def ensure_rent_debt_capacity(session: Session, lease: Lease, channel: str, amount: float) -> list[RentCharge]:
+def ensure_rent_debt_capacity(session: Session, lease: Lease, channel: str, amount: float, cutoff: date | None = None) -> list[RentCharge]:
+    cutoff = cutoff or RENT_GENERATION_START
     horizon = date.today() + timedelta(days=365)
     for _ in range(3):
         generate_rent_charges(session, until=horizon)
-        charges = rent_charge_candidates(session, lease.id, channel)
+        charges = rent_charge_candidates(session, lease.id, channel, cutoff)
         total = sum(rent_charge_debt(charge, channel) for charge in charges)
         if total + EPS >= amount:
             return charges
         horizon += timedelta(days=365)
-    return rent_charge_candidates(session, lease.id, channel)
+    return rent_charge_candidates(session, lease.id, channel, cutoff)
 
 
 def rent_channel_paid_amount(charge: RentCharge, channel: str) -> float:
+    channel = normalized_rent_channel(channel)
     return money(float(charge.ip_paid or 0)) if channel == "ip" else money(float(charge.personal_paid or 0))
 
 
@@ -112,6 +120,27 @@ def charge_for_payment_month(
     return None
 
 
+def persisted_charge_for_payment_month(session: Session, lease_id: int, paid_at: date | datetime | None) -> RentCharge | None:
+    if not paid_at:
+        return None
+    paid_day = paid_at.date() if isinstance(paid_at, datetime) else paid_at
+    month_start = date(paid_day.year, paid_day.month, 1)
+    if paid_day.month == 12:
+        month_end = date(paid_day.year + 1, 1, 1) - timedelta(days=1)
+    else:
+        month_end = date(paid_day.year, paid_day.month + 1, 1) - timedelta(days=1)
+    return session.scalar(
+        select(RentCharge)
+        .where(
+            RentCharge.lease_id == lease_id,
+            RentCharge.due_date >= month_start,
+            RentCharge.due_date <= month_end,
+        )
+        .order_by(RentCharge.due_date, RentCharge.id)
+        .limit(1)
+    )
+
+
 def describe_rent_allocation_decision(decision: dict[str, Any] | None) -> str:
     if not decision or not decision.get("target_due_date"):
         return ""
@@ -130,14 +159,19 @@ def describe_rent_allocation_decision(decision: dict[str, Any] | None) -> str:
 
 
 def reorder_ip_document_charges(
+    session: Session,
+    lease: Lease,
     charges: list[RentCharge],
     channel: str,
     paid_at: date | datetime | None,
+    cutoff: date | None = None,
 ) -> tuple[list[RentCharge], dict[str, Any]]:
     if not paid_at:
         return charges, {"mode": "fifo", "target_due_date": charges[0].due_date if charges else None}
     paid_day = paid_at.date() if isinstance(paid_at, datetime) else paid_at
-    current_charge = charge_for_payment_month(charges, paid_day)
+    current_charge = persisted_charge_for_payment_month(session, lease.id, paid_day) or charge_for_payment_month(charges, paid_day)
+    if current_charge and cutoff and current_charge.due_date < cutoff:
+        current_charge = None
     if current_charge and rent_channel_paid_amount(current_charge, channel) <= EPS and rent_charge_debt(current_charge, channel) > EPS:
         return [current_charge, *[charge for charge in charges if charge.id != current_charge.id]], {
             "mode": "current_month",
@@ -176,12 +210,13 @@ def build_rent_plan(
     exact_only: bool,
     paid_at: date | datetime | None = None,
     prefer_document_month: bool = False,
+    cutoff: date | None = None,
 ) -> tuple[list[tuple[RentCharge, float]], float, dict[str, Any] | None]:
-    charges = ensure_rent_debt_capacity(session, lease, channel, amount)
+    charges = ensure_rent_debt_capacity(session, lease, channel, amount, cutoff)
     decision: dict[str, Any] | None = None
     if prefer_document_month:
         if channel == "ip":
-            charges, decision = reorder_ip_document_charges(charges, channel, paid_at)
+            charges, decision = reorder_ip_document_charges(session, lease, charges, channel, paid_at, cutoff)
         else:
             preferred = charge_for_payment_month(charges, paid_at)
             if preferred and rent_channel_paid_amount(preferred, channel) <= EPS and rent_charge_debt(preferred, channel) > EPS:
@@ -219,6 +254,7 @@ def create_rent_receipts(
     file_path: str = "",
     exact_only: bool = False,
     prefer_document_month: bool = False,
+    cutoff: date | None = None,
 ) -> list[PaymentReceipt]:
     plan, remaining, _decision = build_rent_plan(
         session,
@@ -228,6 +264,7 @@ def create_rent_receipts(
         exact_only=exact_only,
         paid_at=paid_at,
         prefer_document_month=prefer_document_month,
+        cutoff=cutoff,
     )
     if not plan or remaining > EPS:
         raise ValueError("Не удалось честно разложить платёж по аренде")

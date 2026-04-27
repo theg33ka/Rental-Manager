@@ -68,11 +68,13 @@
           <label>Telegram<input name="telegram" placeholder="@username" /></label>
           <label>WhatsApp<input name="whatsapp" placeholder="+7..." /></label>
           <label>Дата заезда<input type="date" name="start_date" required /></label>
+          <label>Дата выезда<input type="date" name="end_date" /></label>
           <label>День оплаты<input type="number" min="1" max="31" name="payment_day" placeholder="по дате заезда" /></label>
           <label>Платёж на ИП<input type="number" min="0" step="0.01" name="ip_amount" /></label>
           <label>Личный перевод<input type="number" min="0" step="0.01" name="personal_amount" /></label>
           <label>Залог<input type="number" min="0" step="0.01" name="deposit_amount" /></label>
           <label>Где хранится залог<input name="deposit_location" /></label>
+          <label class="checkbox-inline"><input type="checkbox" name="ignored" /> Только для информации</label>
           <label class="wide">Условия залога<textarea name="deposit_terms" rows="2"></textarea></label>
           <label class="wide">Комментарий<textarea name="notes" rows="2"></textarea></label>
           <button id="onboardSubmitBtn" class="primary wide" type="submit">Заселить</button>
@@ -239,6 +241,7 @@
             <select name="channel" id="manualPaymentChannelSelect">
               <option value="personal">Перевод</option>
               <option value="ip">ИП</option>
+              <option value="expense_fund">Мне на расходы</option>
             </select>
           </label>
           <label>Источник
@@ -311,6 +314,7 @@
               <option value="twice_daily">2 раза в день каждый день</option>
               <option value="daily_evening">вечером каждого дня</option>
               <option value="every_two_days">раз в два дня</option>
+              <option value="never">выключено</option>
             </select>
           </label>
           <label>Аренда: просрочка и частичная оплата
@@ -318,6 +322,7 @@
               <option value="twice_daily">2 раза в день каждый день</option>
               <option value="daily_evening">вечером каждого дня</option>
               <option value="every_two_days">раз в два дня</option>
+              <option value="never">выключено</option>
             </select>
           </label>
           <label>Коммуналка
@@ -325,6 +330,7 @@
               <option value="twice_daily">2 раза в день каждый день</option>
               <option value="daily_evening">вечером каждого дня</option>
               <option value="every_two_days">раз в два дня</option>
+              <option value="never">выключено</option>
             </select>
           </label>
           <button class="primary" type="submit">Сохранить частоту</button>

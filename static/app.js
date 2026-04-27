@@ -351,7 +351,7 @@ function hydrateForms() {
   const vacantApartments = apartments.filter((apartment) => !apartment.active_lease_id || apartment.id === currentLease?.apartment_id);
   const services = state.bootstrap.services;
   const activeLeases = [...state.bootstrap.leases]
-    .filter((lease) => lease.active)
+    .filter((lease) => lease.active && !lease.ignored)
     .sort((left, right) => `${left.object} ${left.apartment} ${left.tenant}`.localeCompare(`${right.object} ${right.apartment} ${right.tenant}`, "ru"));
   qsa('select[name="apartment_id"]').forEach((select) => {
     if (select.closest("#onboardForm")) {
@@ -737,6 +737,24 @@ function manualAllocationOptions(group) {
   return [...rentOptions, ...utilityOptions];
 }
 
+function rentChargeManualGroup(charge) {
+  return {
+    leaseId: charge.lease_id,
+    object: charge.object,
+    apartment: charge.apartment,
+    tenant: charge.tenant,
+    rentItems: [charge],
+    utilityItems: [],
+    topIssue: { kind: "rent", id: charge.id, date: charge.due_date },
+  };
+}
+
+function manualAllocationGroup() {
+  if (!state.manualAllocation) return null;
+  if (state.manualAllocation.group) return state.manualAllocation.group;
+  return state.dashboardAttentionGroups.find((item) => item.leaseId === state.manualAllocation.leaseId) || null;
+}
+
 function openManualAllocation(leaseId) {
   const group = state.dashboardAttentionGroups.find((item) => item.leaseId === leaseId);
   if (!group) return;
@@ -749,6 +767,21 @@ function openManualAllocation(leaseId) {
     target: options.some((item) => item.value === preferredTarget) ? preferredTarget : options[0]?.value || "",
     paidAt: localDateTimeNow(),
   };
+  renderManualAllocationModal();
+}
+
+function openManualAllocationForRentCharge(chargeId) {
+  const charge = state.rentCharges.find((item) => item.id === chargeId);
+  if (!charge) return;
+  const group = rentChargeManualGroup(charge);
+  const options = manualAllocationOptions(group);
+  state.manualAllocation = {
+    leaseId: charge.lease_id,
+    group,
+    target: `rent:${charge.id}`,
+    paidAt: localDateTimeNow(),
+  };
+  if (!options.length) return;
   renderManualAllocationModal();
 }
 
@@ -776,7 +809,7 @@ function renderManualAllocationModal() {
     root.innerHTML = "";
     return;
   }
-  const group = state.dashboardAttentionGroups.find((item) => item.leaseId === state.manualAllocation.leaseId);
+  const group = manualAllocationGroup();
   if (!group) {
     closeManualAllocation();
     return;
@@ -803,6 +836,7 @@ function renderManualAllocationModal() {
           <select name="channel" id="manualAllocationChannelSelect">
             <option value="personal">По номеру</option>
             <option value="ip">ИП</option>
+            <option value="expense_fund">Мне на расходы</option>
           </select>
         </label>
         <label>Источник
@@ -833,7 +867,7 @@ function renderManualAllocationModal() {
 async function submitManualAllocation(event) {
   event.preventDefault();
   const form = event.currentTarget;
-  const group = state.dashboardAttentionGroups.find((item) => item.leaseId === state.manualAllocation?.leaseId);
+  const group = manualAllocationGroup();
   const target = group ? selectedManualAllocationTarget(group) : null;
   if (!group || !target) return;
   const payload = formData(form);
@@ -940,6 +974,16 @@ function suspiciousReceiptCard(item) {
   );
 }
 
+function expenseFundCard(fund) {
+  return attentionCard(
+    "expense-fund",
+    "Деньги на расходы не разошлись",
+    `<p class="attention-lead">Получено ${money(fund.received)}, расходов к покрытию ${money(fund.spent)}.</p><div class="attention-issue-list"><article class="attention-issue"><strong>Остаток</strong><div>${money(fund.balance)} пока висит как неиспользованное пополнение.</div></article></div>`,
+    `<div class="attention-card__footer-actions"><button class="mini" onclick="openExpensesTab()">Расходы</button></div>`,
+    `<span class="pill">контроль денег на расходы</span>`,
+  );
+}
+
 function renderDashboard() {
   const dashboard = state.bootstrap.dashboard;
   const metrics = [
@@ -957,6 +1001,7 @@ function renderDashboard() {
   state.dashboardAttentionGroups = collectTenantAttentionGroups(dashboard);
   const cards = [
     ...state.dashboardAttentionGroups.map(tenantAttentionCard),
+    ...(dashboard.expense_fund?.has_mismatch ? [expenseFundCard(dashboard.expense_fund)] : []),
     ...dashboard.provider_debts.map(providerDebtCard),
     ...dashboard.stale_readings.map(staleReadingCard),
     ...dashboard.suspicious_receipts.map(suspiciousReceiptCard),
@@ -1056,24 +1101,28 @@ function renderObjects() {
 }
 
 function renderLeases() {
-  const rows = state.bootstrap.leases.map((lease) => `
+  const rows = [...state.bootstrap.leases]
+    .sort((left, right) => Number(right.active) - Number(left.active) || `${left.object} ${left.apartment}`.localeCompare(`${right.object} ${right.apartment}`, "ru"))
+    .map((lease) => `
     <tr>
       <td>${lease.object}</td>
       <td>${lease.apartment}</td>
       <td>${lease.tenant}<br><span class="muted">${lease.phone || ""}</span></td>
-      <td>${formatDate(lease.start_date)}</td>
+      <td>${formatDate(lease.start_date)}${lease.end_date ? `<br><span class="muted">выезд ${formatDate(lease.end_date)}</span>` : ""}</td>
       <td>${lease.payment_day}</td>
       <td>${money(lease.ip_amount)} / ${money(lease.personal_amount)}</td>
       <td>${lease.deposit_amount ? `${money(lease.deposit_amount)}<br><span class="muted">${lease.deposit_location || ""}</span>` : "нет"}</td>
-      <td>${statusPill(lease.active ? "issued" : "paid")}${lease.apartment_active ? "" : '<br><span class="pill warn">квартира выключена</span>'}</td>
+      <td>${statusPill(lease.active ? "issued" : "paid")}${lease.ignored ? '<br><span class="pill warn">только информация</span>' : ""}${lease.apartment_active ? "" : '<br><span class="pill warn">квартира выключена</span>'}</td>
       <td class="actions">
         ${contactButtons(lease)}
         <button class="mini" onclick="startLeaseEdit(${lease.id})">Ред.</button>
+        <label class="checkbox-inline mini-checkbox"><input type="checkbox" ${lease.ignored ? "checked" : ""} onchange="toggleLeaseIgnored(${lease.id}, this.checked)" /> игнор</label>
         ${lease.active ? `<button class="mini danger-soft" onclick="moveOut(${lease.id})">Выезд</button>` : ""}
+        <button class="mini danger-soft" onclick="deleteLease(${lease.id})">Удалить</button>
       </td>
     </tr>
   `).join("");
-  qs("#leaseList").innerHTML = table(["Объект", "Квартира", "Жилец", "Заезд", "День", "ИП / личный", "Залог", "Статус", "Действия"], rows);
+  qs("#leaseList").innerHTML = table(["Объект", "Квартира", "Жилец", "Период", "День", "ИП / личный", "Залог", "Статус", "Действия"], rows);
 }
 
 function renderApartmentRegistry() {
@@ -1103,6 +1152,7 @@ function startLeaseEdit(leaseId) {
   form.elements.telegram.value = lease.telegram || "";
   form.elements.whatsapp.value = lease.whatsapp || "";
   form.elements.start_date.value = lease.start_date || "";
+  form.elements.end_date.value = lease.end_date || "";
   form.elements.payment_day.value = lease.payment_day || "";
   form.elements.ip_amount.value = lease.ip_amount || "";
   form.elements.personal_amount.value = lease.personal_amount || "";
@@ -1110,6 +1160,7 @@ function startLeaseEdit(leaseId) {
   form.elements.deposit_location.value = lease.deposit_location || "";
   form.elements.deposit_terms.value = lease.deposit_terms || "";
   form.elements.notes.value = lease.notes || "";
+  form.elements.ignored.checked = Boolean(lease.ignored);
   form.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
@@ -1134,6 +1185,27 @@ async function toggleApartmentActive(apartmentId, active) {
   }
 }
 
+async function toggleLeaseIgnored(leaseId, ignored) {
+  try {
+    await api(`/api/leases/${leaseId}/ignore`, {
+      method: "PATCH",
+      body: JSON.stringify({ ignored }),
+    });
+    await refreshBootstrap();
+    toast(ignored ? "Договор выключен из контроля" : "Договор снова участвует в контроле");
+  } catch (error) {
+    await refreshBootstrap();
+    toast(error.message);
+  }
+}
+
+async function deleteLease(leaseId) {
+  if (!confirm("Удалить запись о жильце и связанную историю? Данные пропадут из приложения.")) return;
+  await api(`/api/leases/${leaseId}`, { method: "DELETE" });
+  toast("Запись о жильце удалена");
+  await loadAll();
+}
+
 function renderRent() {
   const rows = state.rentCharges.map((charge) => `
     <tr>
@@ -1152,11 +1224,8 @@ function renderRent() {
 }
 
 function rentActions(charge) {
-  const ipLeft = Math.max(0, charge.ip_due - charge.ip_paid);
-  const personalLeft = Math.max(0, charge.personal_due - charge.personal_paid);
   return `
-    ${ipLeft > 0 ? `<button class="mini primary" onclick="payRent(${charge.id}, 'ip', ${ipLeft})">ИП подтверждён</button>` : ""}
-    ${personalLeft > 0 ? `<button class="mini primary" onclick="payRent(${charge.id}, 'personal', ${personalLeft})">Перевод подтверждён</button>` : ""}
+    <button class="mini primary" onclick="openManualAllocationForRentCharge(${charge.id})">Зачесть вручную</button>
     <button class="mini" onclick="deferRent(${charge.id})">Отсрочка</button>
     <button class="mini" onclick="openPaymentHistory(${charge.lease_id})">История</button>
   `;
@@ -1167,6 +1236,7 @@ function receiptStatusLabel(status) {
 }
 
 async function openPaymentHistory(leaseId) {
+  openRentTab();
   state.paymentHistory = await api(`/api/leases/${leaseId}/payment-history`);
   state.editingPaymentReceiptId = null;
   renderRentHistory();
@@ -1179,6 +1249,28 @@ function closePaymentHistory() {
   renderRentHistory();
 }
 
+function paymentReceiptTargetValue(receipt) {
+  if (receipt.rent_charge_id) return `rent:${receipt.rent_charge_id}`;
+  if (receipt.utility_line_id) return `utility:${receipt.utility_line_id}`;
+  return "";
+}
+
+function paymentReceiptTargetOptions(receipt) {
+  const targets = state.paymentHistory?.targets || { rent: [], utility: [] };
+  const selected = paymentReceiptTargetValue(receipt);
+  const rentOptions = (targets.rent || []).map((target) =>
+    `<option value="rent:${target.id}" ${selected === `rent:${target.id}` ? "selected" : ""}>${escapeHtml(target.label)} · долг ${money(target.debt)}</option>`
+  ).join("");
+  const utilityOptions = (targets.utility || []).map((target) =>
+    `<option value="utility:${target.id}" ${selected === `utility:${target.id}` ? "selected" : ""}>${escapeHtml(target.label)} · долг ${money(target.debt)}</option>`
+  ).join("");
+  return `
+    <option value="" ${selected ? "" : "selected"}>Не привязан</option>
+    ${rentOptions ? `<optgroup label="Аренда">${rentOptions}</optgroup>` : ""}
+    ${utilityOptions ? `<optgroup label="Коммуналка">${utilityOptions}</optgroup>` : ""}
+  `;
+}
+
 function renderRentHistory() {
   const root = qs("#rentHistoryPanel");
   if (!root) return;
@@ -1187,7 +1279,6 @@ function renderRentHistory() {
     return;
   }
   const rows = state.paymentHistory.receipts.map((receipt) => {
-    const target = receiptTargetParts(receipt);
     const editing = state.editingPaymentReceiptId === receipt.id;
     const editorRow = editing ? `
       <tr class="receipt-editor-row">
@@ -1199,20 +1290,16 @@ function renderRentHistory() {
             <label>Оплачен
               <input type="datetime-local" name="paid_at" value="${escapeAttr((receipt.paid_at || "").slice(0, 16))}" required />
             </label>
-            ${receipt.rent_charge_id ? `
-              <label>Канал
-                <select name="channel">
-                  <option value="ip" ${receipt.channel === "ip" ? "selected" : ""}>ИП</option>
-                  <option value="personal" ${receipt.channel === "personal" ? "selected" : ""}>По номеру</option>
-                </select>
-              </label>
-              <label>Зачесть за месяц
-                <select name="target_month" required>${monthOptions(target.month)}</select>
-              </label>
-              <label>Год
-                <input type="number" name="target_year" min="2020" step="1" value="${target.year || currentYear()}" required />
-              </label>
-            ` : ""}
+            <label>Зачесть за
+              <select name="target_ref">${paymentReceiptTargetOptions(receipt)}</select>
+            </label>
+            <label>Канал
+              <select name="channel">
+                <option value="ip" ${receipt.channel === "ip" ? "selected" : ""}>ИП</option>
+                <option value="personal" ${receipt.channel === "personal" ? "selected" : ""}>По номеру</option>
+                <option value="expense_fund" ${receipt.channel === "expense_fund" ? "selected" : ""}>Мне на расходы</option>
+              </select>
+            </label>
             <label class="wide">Комментарий
               <input name="notes" value="${escapeAttr(receipt.notes || "")}" />
             </label>
@@ -1277,14 +1364,18 @@ async function savePaymentReceiptEdit(event, receiptId) {
   if (!receipt) return;
   const payload = formData(event.currentTarget);
   payload.amount = Number(payload.amount);
-  if (receipt.rent_charge_id) {
-    payload.target_month = Number(payload.target_month);
-    payload.target_year = Number(payload.target_year || history.current_year || currentYear());
+  if (payload.target_ref) {
+    const [targetKind, targetId] = payload.target_ref.split(":");
+    payload.target_kind = targetKind;
+    if (targetKind === "rent") {
+      payload.rent_charge_id = Number(targetId);
+    } else if (targetKind === "utility") {
+      payload.utility_line_id = Number(targetId);
+    }
   } else {
     delete payload.channel;
-    delete payload.target_month;
-    delete payload.target_year;
   }
+  delete payload.target_ref;
   await api(`/api/payment-receipts/${receiptId}`, {
     method: "PATCH",
     body: JSON.stringify(payload),
@@ -1704,6 +1795,14 @@ function prefillTariff(serviceId) {
 }
 
 function renderExpenses() {
+  const fund = state.bootstrap.dashboard.expense_fund || {};
+  const summary = `
+    <div class="expense-summary">
+      <article><span>Получено на расходы</span><strong>${money(fund.received)}</strong></article>
+      <article><span>Некомпенсированные расходы</span><strong>${money(fund.spent)}</strong></article>
+      <article class="${fund.balance > 0 ? "warn" : "ok"}"><span>Разница</span><strong>${money(fund.balance)}</strong></article>
+    </div>
+  `;
   const rows = state.expenses.map((expense) => `
     <tr>
       <td>${formatDate(expense.expense_date)}</td>
@@ -1717,7 +1816,7 @@ function renderExpenses() {
       <td class="actions">${expense.compensation_status !== "compensated" && expense.source_funds === "personal" ? `<button class="mini primary" onclick="compensateExpense(${expense.id})">Компенсировано</button>` : ""}</td>
     </tr>
   `).join("");
-  qs("#expenseList").innerHTML = table(["Дата", "Объект", "Квартира", "Категория", "Сумма", "Источник", "Компенсация", "Описание", "Действия"], rows);
+  qs("#expenseList").innerHTML = `${summary}${table(["Дата", "Объект", "Квартира", "Категория", "Сумма", "Источник", "Компенсация", "Описание", "Действия"], rows)}`;
 }
 
 function renderMessages() {
@@ -1746,10 +1845,23 @@ function renderMessages() {
 
 function cadenceLabel(value) {
   return {
+    inherit: "по общей настройке",
     twice_daily: "2 раза в день каждый день",
     daily_evening: "вечером каждого дня",
     every_two_days: "раз в два дня",
+    never: "выключено",
   }[value] || value || "не задано";
+}
+
+function cadenceSelect(name, value) {
+  const options = [
+    ["inherit", "по общей настройке"],
+    ["twice_daily", "2 раза в день"],
+    ["daily_evening", "вечером каждый день"],
+    ["every_two_days", "раз в два дня"],
+    ["never", "выключено"],
+  ];
+  return `<select name="${name}">${options.map(([key, label]) => `<option value="${key}" ${value === key ? "selected" : ""}>${label}</option>`).join("")}</select>`;
 }
 
 function issueCountLabel(target) {
@@ -1807,6 +1919,12 @@ function renderAutomation() {
             <div class="automation-card__row">${automationReminderLine("Аренда", target.rent_reminder, target.rent_status === "pending" ? state.settings.automation_rent_due_cadence : state.settings.automation_rent_overdue_cadence)}</div>
             <div class="automation-card__row">${automationReminderLine("Коммуналка", target.utility_reminder, state.settings.automation_utility_cadence)}</div>
           </div>
+          <form class="automation-card__rows" onsubmit="saveLeaseAutomation(event, ${target.lease_id})">
+            <label>День оплаты ${cadenceSelect("message_rent_due", target.automation?.message_rent_due || "inherit")}</label>
+            <label>Долг по аренде ${cadenceSelect("message_rent_overdue", target.automation?.message_rent_overdue || "inherit")}</label>
+            <label>Коммуналка ${cadenceSelect("message_utility_bill", target.automation?.message_utility_bill || "inherit")}</label>
+            <button class="mini primary" type="submit">Сохранить для жильца</button>
+          </form>
           <div class="attention-actions">
             <button class="mini primary" onclick="previewTemplateMessage(${target.lease_id}, 'message_all_debts')">Все долги</button>
             ${target.rent_charge_id ? `<button class="mini" onclick="previewTemplateMessage(${target.lease_id}, '${target.rent_status === "pending" ? "message_rent_due" : "message_rent_overdue"}', ${target.rent_charge_id}, null)">Напомнить по аренде</button>` : ""}
@@ -1827,6 +1945,16 @@ async function submitAutomationSettings(event) {
   applySettings(settings);
   renderAutomation();
   toast("Частота автонапоминаний сохранена");
+}
+
+async function saveLeaseAutomation(event, leaseId) {
+  event.preventDefault();
+  await api(`/api/leases/${leaseId}/automation`, {
+    method: "PATCH",
+    body: JSON.stringify(formData(event.currentTarget)),
+  });
+  toast("Индивидуальные настройки уведомлений сохранены");
+  await loadAll();
 }
 
 function renderMessagePreview() {
@@ -2002,6 +2130,11 @@ function openReportsTab() {
 
 function openTenantsTab() {
   const tab = qs('.tab[data-tab="tenants"]');
+  if (tab) tab.click();
+}
+
+function openRentTab() {
+  const tab = qs('.tab[data-tab="rent"]');
   if (tab) tab.click();
 }
 
