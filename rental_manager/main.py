@@ -4618,6 +4618,40 @@ def accepted_receipts_for_charge(charge: RentCharge, channel: str) -> list[Payme
     return [receipt for receipt in charge.receipts if receipt.status == "accepted" and receipt.channel == channel]
 
 
+def accepted_receipt_amount(receipts: list[PaymentReceipt]) -> float:
+    return money(sum(float(receipt.amount or 0) for receipt in receipts))
+
+
+def charge_expense_fund_receipts(charge: RentCharge) -> list[PaymentReceipt]:
+    return accepted_receipts_for_charge(charge, "expense_fund")
+
+
+def charge_direct_ip_receipts(charge: RentCharge) -> list[PaymentReceipt]:
+    return accepted_receipts_for_charge(charge, "ip")
+
+
+def owner_expected_ip_for_charge(charge: RentCharge) -> float:
+    return money(max(0.0, float(charge.ip_due or 0) - accepted_receipt_amount(charge_expense_fund_receipts(charge))))
+
+
+def owner_direct_ip_paid_for_charge(charge: RentCharge) -> float:
+    return accepted_receipt_amount(charge_direct_ip_receipts(charge))
+
+
+def owner_charge_status_label(charge: RentCharge) -> str:
+    expense_paid = accepted_receipt_amount(charge_expense_fund_receipts(charge))
+    direct_ip_paid = owner_direct_ip_paid_for_charge(charge)
+    adjusted_expected_ip = owner_expected_ip_for_charge(charge)
+    total_due = money(float(charge.ip_due or 0) + float(charge.personal_due or 0))
+    total_paid = money(float(charge.ip_paid or 0) + float(charge.personal_paid or 0))
+    if expense_paid > EPS and total_paid + EPS >= total_due:
+        if direct_ip_paid > EPS and adjusted_expected_ip <= EPS:
+            return "оплачено, часть ушла на расходы"
+        if adjusted_expected_ip <= EPS:
+            return "оплачено, ушло на расходы"
+    return report_status_label(charge.status, charge.due_date)
+
+
 def receipt_amounts_text(receipts: list[PaymentReceipt]) -> str:
     if not receipts:
         return ""
@@ -5048,7 +5082,7 @@ def prior_ip_debt_for_lease(lease: Lease, before_date: date, cutoff: date | None
         if cutoff and charge.due_date < cutoff:
             continue
         update_rent_charge_status(charge)
-        total += max(0.0, float(charge.ip_due or 0) - float(charge.ip_paid or 0))
+        total += max(0.0, owner_expected_ip_for_charge(charge) - owner_direct_ip_paid_for_charge(charge))
     return money(total)
 
 
@@ -5068,11 +5102,26 @@ def owner_report(start: str | None = None, end: str | None = None, session: Sess
     for charge in rent_charges:
         update_rent_charge_status(charge)
 
-    expected_ip = money(sum(float(charge.ip_due or 0) for charge in rent_charges))
-    ip_receipts = [receipt for charge in rent_charges for receipt in accepted_receipts_for_charge(charge, "ip")]
+    expected_ip = money(sum(owner_expected_ip_for_charge(charge) for charge in rent_charges))
+    ip_receipts = [receipt for charge in rent_charges for receipt in charge_direct_ip_receipts(charge)]
     actual_ip = money(sum(float(receipt.amount or 0) for receipt in ip_receipts))
+    expense_fund_receipts = [receipt for charge in rent_charges for receipt in charge_expense_fund_receipts(charge)]
+    expense_fund_rent_income = money(sum(float(receipt.amount or 0) for receipt in expense_fund_receipts))
     occupied_count = len({charge.lease.apartment_id for charge in rent_charges if charge.ip_due > EPS or charge.personal_due > EPS})
     has_rent_debt = any(max(0.0, charge.ip_due - charge.ip_paid) + max(0.0, charge.personal_due - charge.personal_paid) > EPS for charge in rent_charges)
+    period_expenses = session.scalars(
+        select(Expense).where(Expense.expense_date >= start_date, Expense.expense_date <= end_date).order_by(Expense.expense_date, Expense.id)
+    ).all()
+    expense_income_total = money(sum(float(expense.amount or 0) for expense in period_expenses if expense.source_funds == "expense_fund_income"))
+    expense_spent_total = money(sum(float(expense.amount or 0) for expense in period_expenses if expense.source_funds != "expense_fund_income"))
+    expense_balance = money(expense_income_total - expense_spent_total)
+    expense_balance_label = (
+        f"в расходном фонде осталось {money_text(expense_balance)}"
+        if expense_balance > EPS
+        else f"объекты должны хозяину {money_text(abs(expense_balance))}"
+        if expense_balance < -EPS
+        else "сошлось без хвостов"
+    )
 
     wb = Workbook()
     ws = setup_sheet(wb, "Для хозяина", ["Показатель", "Значение"])
@@ -5083,6 +5132,8 @@ def owner_report(start: str | None = None, end: str | None = None, session: Sess
     ws.append(["Заселённых квартир к оплате", occupied_count])
     ws.append(["Ожидалось на ИП", expected_ip])
     ws.append(["Получено на ИП", actual_ip])
+    ws.append(["Получено на расходы вместо ИП", expense_fund_rent_income])
+    ws.append(["Расходный фонд за период", expense_balance_label])
     ws.append(["Общий статус аренды", "есть долги" if has_rent_debt else "в порядке"])
     if has_rent_debt:
         fill_report_row(ws, ws.max_row, REPORT_FILL_DEBT)
@@ -5098,6 +5149,7 @@ def owner_report(start: str | None = None, end: str | None = None, session: Sess
             "Жилец",
             "Статус квартиры",
             "ИП оплачено",
+            "На расходы",
             "Дата платежа",
             "Отправитель",
             "Долг ИП с прошлыми месяцами",
@@ -5116,8 +5168,9 @@ def owner_report(start: str | None = None, end: str | None = None, session: Sess
             highlight_status_row(rows_ws, rows_ws.max_row, "pending", 0, True)
             continue
         for charge in charges:
-            receipts = accepted_receipts_for_charge(charge, "ip")
-            current_ip_debt = money(max(0.0, float(charge.ip_due or 0) - float(charge.ip_paid or 0)))
+            receipts = charge_direct_ip_receipts(charge)
+            expense_receipts = charge_expense_fund_receipts(charge)
+            current_ip_debt = money(max(0.0, owner_expected_ip_for_charge(charge) - owner_direct_ip_paid_for_charge(charge)))
             total_ip_debt = money(current_ip_debt + prior_ip_debt_for_lease(charge.lease, start_date, cutoff))
             rows_ws.append(
                 [
@@ -5125,11 +5178,12 @@ def owner_report(start: str | None = None, end: str | None = None, session: Sess
                     apartment.name,
                     charge.lease.tenant.full_name,
                     state["state"],
-                    money(charge.ip_paid),
-                    receipt_amounts_text(receipts),
-                    receipt_senders_text(receipts),
+                    owner_direct_ip_paid_for_charge(charge),
+                    accepted_receipt_amount(expense_receipts),
+                    "; ".join(bit for bit in [receipt_amounts_text(receipts), receipt_amounts_text(expense_receipts)] if bit),
+                    "; ".join(bit for bit in [receipt_senders_text(receipts), receipt_senders_text(expense_receipts)] if bit),
                     total_ip_debt,
-                    report_status_label(charge.status, charge.due_date),
+                    owner_charge_status_label(charge),
                 ]
             )
             highlight_status_row(rows_ws, rows_ws.max_row, charge.status, total_ip_debt, state["changed"] or state["vacant_days"] > 0)
@@ -5153,6 +5207,38 @@ def owner_report(start: str | None = None, end: str | None = None, session: Sess
             ]
         )
         highlight_status_row(utility_ws, utility_ws.max_row, status, 0 if bill.provider_paid else money(bill.total_cost))
+
+    expense_ws = setup_sheet(
+        wb,
+        "Расходы и зачёт",
+        ["Дата", "Объект", "Квартира", "Категория", "Сумма", "Источник", "Способ", "Статус", "Описание"],
+    )
+    expense_ws.append(["Итог", "", "", "Поступило на расходы", expense_income_total, "", "", "", ""])
+    fill_report_row(expense_ws, expense_ws.max_row, REPORT_FILL_OK)
+    expense_ws.append(["Итог", "", "", "Израсходовано", expense_spent_total, "", "", "", ""])
+    fill_report_row(expense_ws, expense_ws.max_row, REPORT_FILL_WARN if expense_spent_total > EPS else REPORT_FILL_OK)
+    expense_ws.append(["Итог", "", "", "Взаимозачёт", expense_balance, "", "", "", expense_balance_label])
+    fill_report_row(
+        expense_ws,
+        expense_ws.max_row,
+        REPORT_FILL_WARN if abs(expense_balance) > EPS else REPORT_FILL_OK,
+    )
+    for expense in period_expenses:
+        data = serialize_expense(expense)
+        expense_ws.append(
+            [
+                data["expense_date"],
+                data["object"],
+                data["apartment"],
+                data["category"],
+                data["amount"],
+                data["source_funds"],
+                data["payment_method"],
+                report_status_label(data["compensation_status"]),
+                data["description"],
+            ]
+        )
+        highlight_status_row(expense_ws, expense_ws.max_row, data["compensation_status"], 0, data["source_funds"] == "expense_fund_income")
 
     return workbook_response(wb, f"owner-{start_date}-{end_date}.xlsx")
 

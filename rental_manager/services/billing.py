@@ -43,6 +43,8 @@ def money(value: float) -> float:
 def status_for_amount(due: float, paid: float) -> str:
     due = float(due or 0)
     paid = float(paid or 0)
+    if due <= 0:
+        return "paid_ahead" if paid > 0.009 else "paid"
     if paid <= 0:
         return "pending"
     if paid + 0.009 < due:
@@ -59,9 +61,11 @@ def update_rent_charge_status(charge: RentCharge, today: date | None = None) -> 
     personal_status = status_for_amount(charge.personal_due, charge.personal_paid)
     ip_paid = float(charge.ip_paid or 0)
     personal_paid = float(charge.personal_paid or 0)
+    total_due = float(charge.ip_due or 0) + float(charge.personal_due or 0)
+    total_paid = ip_paid + personal_paid
 
     if ip_status in {"paid", "paid_ahead"} and personal_status in {"paid", "paid_ahead"}:
-        charge.status = "paid_ahead" if "paid_ahead" in {ip_status, personal_status} else "paid"
+        charge.status = "paid_ahead" if total_paid > total_due + 0.009 else "paid"
     elif charge.deferral_until and charge.deferral_until >= today:
         charge.status = "deferred"
     elif ip_paid > 0 or personal_paid > 0:

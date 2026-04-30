@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from rental_manager.database import Base
-from rental_manager.main import build_all_debts_breakdown, build_dashboard, render_message_text
+from rental_manager.main import build_all_debts_breakdown, build_dashboard, owner_charge_status_label, owner_expected_ip_for_charge, render_message_text
 from rental_manager.models import AppSetting, Apartment, Lease, Meter, MeterReading, RentalObject, RentCharge, Tenant, UtilityBill, UtilityBillLine, UtilityService
 from rental_manager.services.billing import (
     LEGACY_IMPORT_MARK,
@@ -119,6 +119,12 @@ class RentScheduleTests(DatabaseTestCase):
         charge.personal_paid = 6000
         self.assertEqual(update_rent_charge_status(charge, today=date(2026, 4, 15)), "paid_ahead")
 
+    def test_total_rent_status_does_not_become_paid_ahead_without_real_overpayment(self) -> None:
+        charge = self._charge(due_date=date(2026, 3, 2), period_end=date(2026, 4, 1), ip_due=20000, personal_due=0)
+        charge.ip_paid = 20000
+
+        self.assertEqual(update_rent_charge_status(charge, today=date(2026, 3, 16)), "paid")
+
     def test_active_deferral_overrides_partial_debt(self) -> None:
         charge = self._charge(due_date=date(2026, 4, 14), ip_due=20000, personal_due=5000)
         charge.ip_paid = 20000
@@ -145,6 +151,18 @@ class RentScheduleTests(DatabaseTestCase):
 
         self.assertEqual(update_rent_charge_status(charge, today=date(2026, 4, 15)), "partial")
         self.assertEqual(float(charge.personal_paid or 0), 0.0)
+
+    def test_owner_report_treats_expense_fund_payment_as_reduced_ip_expectation(self) -> None:
+        from rental_manager.models import PaymentReceipt
+
+        charge = self._charge(due_date=date(2026, 4, 14), ip_due=20000, personal_due=0)
+        charge.receipts = [
+            PaymentReceipt(amount=20000, channel="expense_fund", status="accepted", paid_at=date(2026, 4, 16)),
+        ]
+        charge.ip_paid = 20000
+
+        self.assertEqual(owner_expected_ip_for_charge(charge), 0.0)
+        self.assertEqual(owner_charge_status_label(charge), "оплачено, ушло на расходы")
 
     def test_full_months_lived_uses_payment_periods(self) -> None:
         lease = Lease(start_date=date(2026, 4, 14), payment_day=14)
@@ -609,6 +627,7 @@ class StatusHelperTests(unittest.TestCase):
         self.assertEqual(status_for_amount(100, 99), "partial")
         self.assertEqual(status_for_amount(100, 100), "paid")
         self.assertEqual(status_for_amount(100, 101), "paid_ahead")
+        self.assertEqual(status_for_amount(0, 0), "paid")
 
 
 if __name__ == "__main__":
