@@ -206,6 +206,7 @@
           <a class="button" id="rentReport" href="#">Аренда</a>
           <a class="button" id="utilitiesReport" href="#">Коммуналка</a>
           <a class="button" id="expensesReport" href="#">Расходы</a>
+          <a class="button primary" id="ownerReport" href="#">Для хозяина</a>
           <a class="button danger-soft" href="/api/reports/debts.xlsx">Долги</a>
           <a class="button" id="historyReport" href="/api/reports/history.xlsx">История</a>
         </div>
@@ -310,12 +311,7 @@
         </div>
         <form id="automationSettingsForm" class="form-grid compact">
           <label>Аренда: день оплаты
-            <select name="automation_rent_due_cadence" id="automationRentDueCadenceInput">
-              <option value="twice_daily">2 раза в день каждый день</option>
-              <option value="daily_evening">вечером каждого дня</option>
-              <option value="every_two_days">раз в два дня</option>
-              <option value="never">выключено</option>
-            </select>
+            <input value="один раз в 10:00 Новосибирска" disabled />
           </label>
           <label>Аренда: просрочка и частичная оплата
             <select name="automation_rent_overdue_cadence" id="automationRentOverdueCadenceInput">
@@ -400,6 +396,7 @@
     </main>
 
     <div id="manualAllocationModal" class="modal-shell" hidden></div>
+    <div id="manualDebtModal" class="modal-shell" hidden></div>
     <div id="toast" role="status" aria-live="polite"></div>
     <script src="/static/app.js"></script>
   </body>

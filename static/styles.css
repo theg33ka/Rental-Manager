@@ -383,6 +383,20 @@ main {
   text-align: left;
   border-width: 2px;
   background: var(--surface);
+  cursor: pointer;
+}
+
+.report-status__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+}
+
+.report-accept {
+  min-width: 32px;
+  padding: 4px 8px;
 }
 
 .report-status strong {
@@ -884,6 +898,12 @@ td.actions .button {
   color: #f3e8ff;
 }
 
+.attention-card.manual-debt {
+  border-left-color: #8b5cf6;
+  background: #241244;
+  color: #f4eaff;
+}
+
 .attention-card.rent-critical .muted,
 .attention-card.utility-overdue .muted,
 .attention-card.utility-partial .muted,
@@ -891,7 +911,8 @@ td.actions .button {
 .attention-card.provider .muted,
 .attention-card.reading .muted,
 .attention-card.receipt .muted,
-.attention-card.expense-fund .muted {
+.attention-card.expense-fund .muted,
+.attention-card.manual-debt .muted {
   color: color-mix(in srgb, currentColor 72%, transparent);
 }
 

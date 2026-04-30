@@ -451,6 +451,17 @@ def calculate_utility_bill(
     previously_billed_amount = 0.0
     billed_segment_count = 0
 
+    if allow_estimate:
+        for apartment_meter in apartment_meters.values():
+            reading_dates = session.scalars(
+                select(MeterReading.reading_date).where(
+                    MeterReading.meter_id == apartment_meter.id,
+                    MeterReading.reading_date > period_start,
+                    MeterReading.reading_date < period_end,
+                )
+            ).all()
+            boundaries.update(reading_dates)
+
     for leases in apartment_leases.values():
         for lease in leases:
             if period_start < lease.start_date < period_end:

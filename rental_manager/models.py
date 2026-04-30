@@ -77,6 +77,7 @@ class Lease(Base):
     apartment: Mapped[Apartment] = relationship(back_populates="leases")
     tenant: Mapped[Tenant] = relationship(back_populates="leases")
     rent_charges: Mapped[list["RentCharge"]] = relationship(back_populates="lease")
+    manual_debts: Mapped[list["ManualDebt"]] = relationship(back_populates="lease")
 
 
 class RentCharge(Base):
@@ -243,6 +244,30 @@ class UtilityBillLine(Base):
     bill: Mapped[UtilityBill] = relationship(back_populates="lines")
     apartment: Mapped[Apartment] = relationship()
     lease: Mapped[Lease | None] = relationship()
+
+
+class ManualDebt(Base):
+    __tablename__ = "manual_debts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    lease_id: Mapped[int] = mapped_column(ForeignKey("leases.id"))
+    apartment_id: Mapped[int] = mapped_column(ForeignKey("apartments.id"))
+    kind: Mapped[str] = mapped_column(String(40), default="other")
+    channel: Mapped[str] = mapped_column(String(40), default="")
+    title: Mapped[str] = mapped_column(String(180), default="")
+    period_start: Mapped[date | None] = mapped_column(Date, nullable=True)
+    period_end: Mapped[date | None] = mapped_column(Date, nullable=True)
+    due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    amount: Mapped[float] = mapped_column(Float, default=0)
+    paid_amount: Mapped[float] = mapped_column(Float, default=0)
+    status: Mapped[str] = mapped_column(String(40), default="open")
+    notes: Mapped[str] = mapped_column(Text, default="")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
+
+    lease: Mapped[Lease] = relationship(back_populates="manual_debts")
+    apartment: Mapped[Apartment] = relationship()
 
 
 class Expense(Base):
