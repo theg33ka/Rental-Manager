@@ -136,6 +136,7 @@ INTERNAL_SETTINGS = {
     "accepted_monthly_reports": "[]",
     "notified_monthly_reports": "[]",
     "owner_due_digest_dates": "[]",
+    "processed_move_out_notifications": "[]",
 }
 BOOLEAN_SETTINGS = {"notifications_enabled"}
 VALID_REMINDER_CADENCES = {"twice_daily", "daily_evening", "every_two_days", "never"}
@@ -2303,6 +2304,236 @@ def utility_issue_targets(session: Session, bill: UtilityBill) -> list[dict[str,
     return previews
 
 
+def move_out_process_key(lease_id: int, end_date: date) -> str:
+    return f"{lease_id}:{end_date.isoformat()}"
+
+
+def processed_move_out_keys(session: Session) -> set[str]:
+    raw = get_internal_json(session, "processed_move_out_notifications", [])
+    if not isinstance(raw, list):
+        return set()
+    return {str(item) for item in raw if isinstance(item, str) and item}
+
+
+def save_processed_move_out_keys(session: Session, values: set[str]) -> None:
+    set_internal_json(session, "processed_move_out_notifications", sorted(values))
+
+
+def last_lease_service_period_end(session: Session, lease: Lease, service_id: int) -> date:
+    ends = session.scalars(
+        select(UtilityBill.period_end)
+        .join(UtilityBillLine, UtilityBillLine.bill_id == UtilityBill.id)
+        .where(
+            UtilityBill.service_id == service_id,
+            UtilityBillLine.lease_id == lease.id,
+        )
+        .order_by(UtilityBill.period_end.desc())
+    ).all()
+    return ends[0] if ends else lease.start_date
+
+
+def existing_lease_service_line(
+    session: Session,
+    lease: Lease,
+    service_id: int,
+    period_start: date,
+    period_end: date,
+) -> UtilityBillLine | None:
+    return session.scalar(
+        select(UtilityBillLine)
+        .join(UtilityBill, UtilityBillLine.bill_id == UtilityBill.id)
+        .where(
+            UtilityBill.service_id == service_id,
+            UtilityBill.period_start == period_start,
+            UtilityBill.period_end == period_end,
+            UtilityBillLine.lease_id == lease.id,
+        )
+        .order_by(UtilityBillLine.id.desc())
+        .limit(1)
+    )
+
+
+def create_move_out_utility_lines(session: Session, lease: Lease) -> tuple[list[UtilityBillLine], list[str]]:
+    end_date = lease.end_date
+    if not end_date:
+        return [], []
+    created_lines: list[UtilityBillLine] = []
+    warnings: list[str] = []
+    services = session.scalars(
+        select(UtilityService)
+        .where(UtilityService.object_id == lease.apartment.object_id, UtilityService.active.is_(True))
+        .order_by(UtilityService.id)
+    ).all()
+    for service in services:
+        period_start = last_lease_service_period_end(session, lease, service.id)
+        if end_date <= period_start:
+            continue
+        existing = existing_lease_service_line(session, lease, service.id, period_start, end_date)
+        if existing:
+            if existing.bill.status == "draft":
+                due = resident_due_date(service, end_date)
+                existing.bill.status = "issued"
+                existing.bill.due_date = due
+                existing.bill.is_forecast = True
+                existing.bill.provider_paid = True
+                existing.bill.provider_paid_at = utc_now()
+                existing.status = "issued"
+                existing.issued_at = utc_now()
+                existing.due_date = due
+            created_lines.append(existing)
+            continue
+        try:
+            preview_bill, preview_warnings = calculate_utility_bill(
+                session=session,
+                service_id=service.id,
+                period_start=period_start,
+                period_end=end_date,
+                allow_estimate=True,
+            )
+        except ValueError as exc:
+            warnings.append(f"{service.object.name}, {service.name}: {exc}")
+            continue
+        selected_lines = [
+            line
+            for line in preview_bill.lines
+            if line.lease_id == lease.id and line.apartment_id == lease.apartment_id and money(line.total_amount) > EPS
+        ]
+        if not selected_lines:
+            continue
+        due = resident_due_date(service, end_date)
+        note_lines = list(dict.fromkeys([*(preview_warnings or []), *(preview_bill.notes or "").splitlines()]))
+        note_lines = [item for item in note_lines if item]
+        note_lines.append(f"Авторасчёт при выезде {lease.tenant.full_name} на {end_date:%d.%m.%Y}.")
+        bill = UtilityBill(
+            service_id=service.id,
+            period_start=period_start,
+            period_end=end_date,
+            status="issued",
+            total_consumption=money(sum(float(line.personal_consumption or 0) + float(line.odn_consumption or 0) for line in selected_lines)),
+            apartment_consumption=money(sum(float(line.personal_consumption or 0) for line in selected_lines)),
+            odn_consumption=money(sum(float(line.odn_consumption or 0) for line in selected_lines)),
+            total_cost=money(sum(float(line.total_amount or 0) for line in selected_lines)),
+            average_unit_price=preview_bill.average_unit_price,
+            due_date=due,
+            is_forecast=True,
+            provider_paid=True,
+            provider_paid_at=utc_now(),
+            notes="\n".join(note_lines),
+        )
+        issued_at = utc_now()
+        for preview_line in selected_lines:
+            bill.lines.append(
+                UtilityBillLine(
+                    apartment_id=preview_line.apartment_id,
+                    lease_id=preview_line.lease_id,
+                    personal_consumption=money(preview_line.personal_consumption),
+                    odn_consumption=money(preview_line.odn_consumption),
+                    total_amount=money(preview_line.total_amount),
+                    paid_amount=0,
+                    status="issued",
+                    issued_at=issued_at,
+                    due_date=due,
+                    note=(preview_line.note or "").strip(),
+                )
+            )
+        session.add(bill)
+        session.flush()
+        created_lines.extend(bill.lines)
+        warnings.extend([warning for warning in preview_warnings if warning])
+    return created_lines, list(dict.fromkeys(warnings))
+
+
+def send_move_out_utility_message(session: Session, lease: Lease, lines: list[UtilityBillLine]) -> bool:
+    if not lines or not lease_chat_id(session, lease):
+        return False
+    sorted_lines = sorted(lines, key=lambda item: (item.bill.period_end, item.bill.service.name, item.id))
+    payload = send_tenant_message(
+        session,
+        lease,
+        "message_utility_bill",
+        line=sorted_lines[0],
+        note="move-out-auto",
+        utility_lines_override=sorted_lines,
+        utility_due_date_override=sorted_lines[0].due_date,
+    )
+    for extra_line in sorted_lines[1:]:
+        session.add(
+            MessageLog(
+                lease_id=lease.id,
+                utility_line_id=extra_line.id,
+                channel="telegram",
+                template_key="message_utility_bill",
+                status="sent",
+                recipient_chat_id=str(lease_chat_id(session, lease)),
+                text=payload["text"],
+                note="move-out-auto",
+            )
+        )
+    session.flush()
+    return True
+
+
+def notify_owner_about_move_out(
+    session: Session,
+    lease: Lease,
+    lines: list[UtilityBillLine],
+    warnings: list[str],
+    tenant_notified: bool,
+) -> bool:
+    owner_id = telegram_owner_chat_id(session)
+    if not owner_id or not telegram_token(session):
+        return False
+    total = money(sum(max(0.0, float(line.total_amount or 0) - float(line.paid_amount or 0)) for line in lines))
+    if lines:
+        utility_rows = "\n".join(f"- {utility_message_line(line)}" for line in lines)
+    else:
+        utility_rows = "- коммуналка не создана: либо нулевой хвост, либо не хватило данных."
+    warning_text = ""
+    if warnings:
+        warning_text = "\nПредупреждения:\n" + "\n".join(f"- {item}" for item in warnings)
+    tenant_state = "отправлено жильцу" if tenant_notified else "жильцу не отправлено: чат не привязан или нечего слать"
+    text = (
+        f"Сегодня выезд жильца.\n"
+        f"{lease.apartment.object.name}, {lease.apartment.name}, {lease.tenant.full_name}\n"
+        f"Дата выезда: {lease.end_date:%d.%m.%Y}\n"
+        f"Расчётная коммуналка создана на {money_text(total)}.\n"
+        f"{utility_rows}\n"
+        f"Статус рассылки: {tenant_state}.{warning_text}"
+    )
+    send_telegram_text(session, owner_id, text, app_keyboard(app_base_url(session)))
+    return True
+
+
+def process_move_out_notifications(session: Session, today: date | None = None) -> dict[str, int]:
+    today = today or date.today()
+    processed = processed_move_out_keys(session)
+    leases = session.scalars(
+        select(Lease)
+        .join(Apartment)
+        .join(Tenant)
+        .where(Lease.end_date == today, Apartment.active.is_(True))
+        .order_by(Apartment.object_id, Apartment.sort_order, Lease.id)
+    ).all()
+    summary = {"processed": 0, "created_lines": 0, "tenant_sent": 0, "owner_sent": 0}
+    for lease in leases:
+        if lease_ignored(session, lease.id):
+            continue
+        key = move_out_process_key(lease.id, today)
+        if key in processed:
+            continue
+        lines, warnings = create_move_out_utility_lines(session, lease)
+        tenant_sent = send_move_out_utility_message(session, lease, lines)
+        owner_sent = notify_owner_about_move_out(session, lease, lines, warnings, tenant_sent)
+        processed.add(key)
+        summary["processed"] += 1
+        summary["created_lines"] += len(lines)
+        summary["tenant_sent"] += 1 if tenant_sent else 0
+        summary["owner_sent"] += 1 if owner_sent else 0
+    save_processed_move_out_keys(session, processed)
+    session.flush()
+    return summary
+
+
 def reminder_sent_today(
     session: Session,
     template_key: str,
@@ -2477,6 +2708,7 @@ def run_due_reminders(session: Session, today: date | None = None) -> dict[str, 
             summary["failed"] += 1
 
     summary["owner_due_digest_sent"] = run_owner_due_payment_digest(session, today, now)
+    summary["move_out_processed"] = process_move_out_notifications(session, today)["processed"]
     return summary
 
 
@@ -3562,6 +3794,10 @@ def move_out(lease_id: int, payload: dict[str, Any], session: Session = Depends(
     for charge in lease.rent_charges:
         update_rent_charge_status(charge)
 
+    move_out_summary = {"processed": 0, "created_lines": 0, "tenant_sent": 0, "owner_sent": 0}
+    if end == date.today():
+        move_out_summary = process_move_out_notifications(session, end)
+
     rent_debt = sum(
         max(0, charge.ip_due - charge.ip_paid) + max(0, charge.personal_due - charge.personal_paid)
         for charge in lease.rent_charges
@@ -3584,6 +3820,7 @@ def move_out(lease_id: int, payload: dict[str, Any], session: Session = Depends(
             "deposit_location": lease.deposit_location,
             "deposit_terms": lease.deposit_terms,
             "final_total_due": money(rent_debt + utility_debt),
+            "move_out_utility_lines_created": move_out_summary["created_lines"],
         },
     }
 

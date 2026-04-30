@@ -5,13 +5,14 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from rental_manager.database import Base
-from rental_manager.main import build_all_debts_breakdown, build_dashboard, expense_period_summary, owner_charge_status_label, owner_expected_ip_for_charge, render_message_text
-from rental_manager.models import AppSetting, Apartment, Expense, Lease, Meter, MeterReading, RentalObject, RentCharge, Tenant, UtilityBill, UtilityBillLine, UtilityService
+from rental_manager.main import build_all_debts_breakdown, build_dashboard, create_move_out_utility_lines, expense_period_summary, owner_charge_status_label, owner_expected_ip_for_charge, process_move_out_notifications, render_message_text
+from rental_manager.models import AppSetting, Apartment, Expense, Lease, MessageLog, Meter, MeterReading, RentalObject, RentCharge, Tenant, UtilityBill, UtilityBillLine, UtilityService, Tariff
 from rental_manager.services.billing import (
     LEGACY_IMPORT_MARK,
     allocate_odn,
@@ -342,6 +343,114 @@ class UtilityBillingTests(DatabaseTestCase):
         self.assertEqual(warnings[-1], "Пропущено уже выставленных сегментов: 1.")
         self.assertEqual(len(bill.lines), 1)
         self.assertEqual(bill.lines[0].note, "10.04.2026 -> 01.05.2026 (21 дн.)")
+
+    def test_move_out_utility_lines_are_created_as_forecasted_issued_bill(self) -> None:
+        with self.Session() as session:
+            rental_object = RentalObject(name="Тестовый дом", short_code="ТД")
+            apartment = Apartment(name="ТД1", sort_order=1, odn_share_percent=100, active=True, object=rental_object)
+            tenant = Tenant(full_name="Съезжающий жилец", active=True)
+            lease = Lease(
+                apartment=apartment,
+                tenant=tenant,
+                start_date=date(2026, 4, 1),
+                end_date=date(2026, 4, 10),
+                payment_day=1,
+                ip_amount=10000,
+                personal_amount=2000,
+                active=False,
+            )
+            service = UtilityService(
+                object=rental_object,
+                kind="electricity",
+                name="Электричество",
+                provider_due_day=24,
+                resident_due_days=7,
+                active=True,
+            )
+            session.add_all([rental_object, apartment, tenant, lease, service])
+            session.flush()
+            session.add(Tariff(service_id=service.id, starts_on=date(2026, 1, 1), tiers_json=json.dumps([{"limit": None, "price": 4.18}])))
+            object_meter = Meter(service_id=service.id, object_id=rental_object.id, scope="object", name="Общий", active=True)
+            apartment_meter = Meter(service_id=service.id, object_id=rental_object.id, apartment_id=apartment.id, scope="apartment", name="ТД1", active=True)
+            session.add_all([object_meter, apartment_meter])
+            session.flush()
+            session.add_all(
+                [
+                    MeterReading(meter_id=object_meter.id, reading_date=date(2026, 4, 1), value=1000),
+                    MeterReading(meter_id=object_meter.id, reading_date=date(2026, 4, 20), value=1200),
+                    MeterReading(meter_id=apartment_meter.id, reading_date=date(2026, 4, 1), value=10),
+                    MeterReading(meter_id=apartment_meter.id, reading_date=date(2026, 4, 20), value=30),
+                ]
+            )
+            session.commit()
+
+            lines, warnings = create_move_out_utility_lines(session, lease)
+
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(warnings)
+        line = lines[0]
+        self.assertEqual(line.status, "issued")
+        self.assertEqual(line.bill.status, "issued")
+        self.assertTrue(line.bill.is_forecast)
+        self.assertTrue(line.bill.provider_paid)
+        self.assertEqual(line.bill.period_start, date(2026, 4, 1))
+        self.assertEqual(line.bill.period_end, date(2026, 4, 10))
+        self.assertEqual(line.note, "01.04.2026 -> 10.04.2026 (9 дн.)")
+        self.assertGreater(line.total_amount, 0)
+
+    def test_move_out_notifications_send_once_and_create_logs(self) -> None:
+        with self.Session() as session:
+            session.add_all(
+                [
+                    AppSetting(key="telegram_bot_token", value="token"),
+                    AppSetting(key="telegram_owner_chat_id", value="999"),
+                ]
+            )
+            rental_object = RentalObject(name="Тестовый дом 2", short_code="Т2")
+            apartment = Apartment(name="Т21", sort_order=1, odn_share_percent=100, active=True, object=rental_object)
+            tenant = Tenant(full_name="Жилец на выезд", active=True)
+            lease = Lease(
+                apartment=apartment,
+                tenant=tenant,
+                start_date=date(2026, 4, 1),
+                end_date=date(2026, 4, 10),
+                payment_day=1,
+                ip_amount=10000,
+                personal_amount=2000,
+                active=False,
+            )
+            service = UtilityService(object=rental_object, kind="electricity", name="Электричество", provider_due_day=24, resident_due_days=7, active=True)
+            session.add_all([rental_object, apartment, tenant, lease, service])
+            session.flush()
+            session.add(AppSetting(key="telegram_tenant_links", value=json.dumps({str(tenant.id): "123"})))
+            session.add(Tariff(service_id=service.id, starts_on=date(2026, 1, 1), tiers_json=json.dumps([{"limit": None, "price": 4.18}])))
+            object_meter = Meter(service_id=service.id, object_id=rental_object.id, scope="object", name="Общий", active=True)
+            apartment_meter = Meter(service_id=service.id, object_id=rental_object.id, apartment_id=apartment.id, scope="apartment", name="Т21", active=True)
+            session.add_all([object_meter, apartment_meter])
+            session.flush()
+            session.add_all(
+                [
+                    MeterReading(meter_id=object_meter.id, reading_date=date(2026, 4, 1), value=1000),
+                    MeterReading(meter_id=object_meter.id, reading_date=date(2026, 4, 20), value=1200),
+                    MeterReading(meter_id=apartment_meter.id, reading_date=date(2026, 4, 1), value=10),
+                    MeterReading(meter_id=apartment_meter.id, reading_date=date(2026, 4, 20), value=30),
+                ]
+            )
+            session.commit()
+
+            with patch("rental_manager.main.send_telegram_text", return_value={"ok": True}) as mocked_send:
+                summary = process_move_out_notifications(session, date(2026, 4, 10))
+                session.commit()
+                repeat = process_move_out_notifications(session, date(2026, 4, 10))
+
+            self.assertEqual(summary["processed"], 1)
+            self.assertEqual(summary["tenant_sent"], 1)
+            self.assertEqual(summary["owner_sent"], 1)
+            self.assertEqual(repeat["processed"], 0)
+            self.assertEqual(mocked_send.call_count, 2)
+            logs = session.scalars(select(MessageLog).where(MessageLog.lease_id == lease.id)).all()
+
+        self.assertTrue(any(log.template_key == "message_utility_bill" for log in logs))
 
     def test_all_debts_message_groups_rent_and_utility_by_month(self) -> None:
         with self.seed() as session:
