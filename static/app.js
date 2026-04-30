@@ -99,17 +99,22 @@ async function api(path, options = {}) {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
     ...options,
   });
+  const rawText = await response.text();
+  const parseJson = () => {
+    if (!rawText) return null;
+    try {
+      return JSON.parse(rawText);
+    } catch {
+      return null;
+    }
+  };
   if (!response.ok) {
     let message = "Ошибка запроса";
-    try {
-      const data = await response.json();
-      message = data.detail || message;
-    } catch {
-      message = await response.text();
-    }
+    const data = parseJson();
+    message = data?.detail || rawText || message;
     throw new Error(message);
   }
-  return response.json();
+  return parseJson();
 }
 
 function toast(message) {

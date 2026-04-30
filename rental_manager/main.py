@@ -131,6 +131,7 @@ SECRET_SETTINGS = {
 ALL_SETTINGS = {**DEFAULT_SETTINGS, **SECRET_SETTINGS}
 INTERNAL_SETTINGS = {
     "telegram_tenant_links": "{}",
+    "telegram_consent_chat_ids": "[]",
     "ignored_lease_ids": "[]",
     "accepted_monthly_reports": "[]",
     "notified_monthly_reports": "[]",
@@ -640,6 +641,25 @@ def get_tenant_links(session: Session) -> dict[str, str]:
     if not isinstance(parsed, dict):
         return {}
     return {str(key): str(value) for key, value in parsed.items() if value}
+
+
+def tenant_consent_chat_ids(session: Session) -> set[str]:
+    raw = get_internal_json(session, "telegram_consent_chat_ids", [])
+    if not isinstance(raw, list):
+        return set()
+    return {str(item) for item in raw if str(item).strip()}
+
+
+def tenant_consent_sent(session: Session, chat_id: int | str | None) -> bool:
+    if not chat_id:
+        return False
+    return str(chat_id) in tenant_consent_chat_ids(session)
+
+
+def mark_tenant_consent_sent(session: Session, chat_id: int | str) -> None:
+    items = tenant_consent_chat_ids(session)
+    items.add(str(chat_id))
+    set_internal_json(session, "telegram_consent_chat_ids", sorted(items))
 
 
 def save_tenant_links(session: Session, links: dict[str, str]) -> None:
@@ -3088,10 +3108,14 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
             )
             return
         if linked_lease:
+            if not tenant_consent_sent(session, chat_id):
+                mark_tenant_consent_sent(session, chat_id)
+                send_telegram_text(session, chat_id, tenant_personal_data_consent_text(), tenant_keyboard())
+                return
             send_telegram_text(
                 session,
                 chat_id,
-                f"Привет. Я привязал этот чат к квартире {linked_lease.apartment.name}. Теперь сюда можно присылать чеки PDF документом, спрашивать реквизиты и получать ответы по платежам.\n\n{tenant_personal_data_consent_text()}",
+                f"Привет. Я привязал этот чат к квартире {linked_lease.apartment.name}. Теперь сюда можно присылать чеки PDF документом, спрашивать реквизиты и получать ответы по платежам.",
                 tenant_keyboard(),
             )
             return
@@ -4635,21 +4659,32 @@ def owner_expected_ip_for_charge(charge: RentCharge) -> float:
 
 
 def owner_direct_ip_paid_for_charge(charge: RentCharge) -> float:
-    return accepted_receipt_amount(charge_direct_ip_receipts(charge))
+    direct_paid = accepted_receipt_amount(charge_direct_ip_receipts(charge))
+    if direct_paid > EPS:
+        return direct_paid
+    expense_paid = accepted_receipt_amount(charge_expense_fund_receipts(charge))
+    return money(max(0.0, float(charge.ip_paid or 0) - expense_paid))
 
 
 def owner_charge_status_label(charge: RentCharge) -> str:
     expense_paid = accepted_receipt_amount(charge_expense_fund_receipts(charge))
     direct_ip_paid = owner_direct_ip_paid_for_charge(charge)
     adjusted_expected_ip = owner_expected_ip_for_charge(charge)
-    total_due = money(float(charge.ip_due or 0) + float(charge.personal_due or 0))
-    total_paid = money(float(charge.ip_paid or 0) + float(charge.personal_paid or 0))
-    if expense_paid > EPS and total_paid + EPS >= total_due:
+    total_owner_paid = money(direct_ip_paid + expense_paid)
+    if expense_paid > EPS and total_owner_paid + EPS >= float(charge.ip_due or 0):
         if direct_ip_paid > EPS and adjusted_expected_ip <= EPS:
             return "оплачено, часть ушла на расходы"
         if adjusted_expected_ip <= EPS:
             return "оплачено, ушло на расходы"
-    return report_status_label(charge.status, charge.due_date)
+    if adjusted_expected_ip <= EPS:
+        return "оплачено"
+    if total_owner_paid <= EPS:
+        return report_status_label("overdue" if charge.due_date < date.today() else "pending", charge.due_date)
+    if total_owner_paid + EPS < adjusted_expected_ip:
+        return report_status_label("partial", charge.due_date)
+    if total_owner_paid > adjusted_expected_ip + EPS:
+        return report_status_label("paid_ahead", charge.due_date)
+    return report_status_label("paid", charge.due_date)
 
 
 def receipt_amounts_text(receipts: list[PaymentReceipt]) -> str:

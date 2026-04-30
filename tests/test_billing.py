@@ -164,6 +164,12 @@ class RentScheduleTests(DatabaseTestCase):
         self.assertEqual(owner_expected_ip_for_charge(charge), 0.0)
         self.assertEqual(owner_charge_status_label(charge), "оплачено, ушло на расходы")
 
+    def test_owner_report_status_does_not_show_paid_ahead_without_overpayment(self) -> None:
+        charge = self._charge(due_date=date(2026, 3, 2), period_end=date(2026, 4, 1), ip_due=20000, personal_due=0)
+        charge.ip_paid = 20000
+
+        self.assertEqual(owner_charge_status_label(charge), "оплачено")
+
     def test_full_months_lived_uses_payment_periods(self) -> None:
         lease = Lease(start_date=date(2026, 4, 14), payment_day=14)
         self.assertEqual(full_months_lived(lease, date(2026, 5, 13)), 1)
