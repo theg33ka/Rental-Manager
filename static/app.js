@@ -101,20 +101,15 @@ async function api(path, options = {}) {
   });
   if (!response.ok) {
     let message = "Ошибка запроса";
-    const text = await response.text();
     try {
-      const data = JSON.parse(text || "{}");
+      const data = await response.json();
       message = data.detail || message;
     } catch {
-      if (text) message = text;
+      message = await response.text();
     }
     throw new Error(message);
   }
-  if (response.status === 204) {
-    return null;
-  }
-  const text = await response.text();
-  return text ? JSON.parse(text) : null;
+  return response.json();
 }
 
 function toast(message) {
