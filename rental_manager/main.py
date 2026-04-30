@@ -4585,6 +4585,108 @@ def highlight_status_row(ws, row_index: int, status: str, debt: float = 0.0, att
         fill_report_row(ws, row_index, REPORT_FILL_OK)
 
 
+def expense_balance_value(spent_total: float, income_total: float) -> float:
+    return money(float(spent_total or 0) - float(income_total or 0))
+
+
+def expense_balance_comment(balance: float) -> str:
+    if balance > EPS:
+        return "Расходов больше, чем поступлений"
+    if balance < -EPS:
+        return "Поступлений больше, чем расходов"
+    return "Сошлось в ноль"
+
+
+def expense_period_summary(session: Session, start_date: date, end_date: date) -> dict[str, float]:
+    opening_income = money(
+        session.scalar(
+            select(func.coalesce(func.sum(Expense.amount), 0)).where(
+                Expense.expense_date < start_date,
+                Expense.source_funds == "expense_fund_income",
+            )
+        )
+        or 0
+    )
+    opening_spent = money(
+        session.scalar(
+            select(func.coalesce(func.sum(Expense.amount), 0)).where(
+                Expense.expense_date < start_date,
+                Expense.source_funds != "expense_fund_income",
+            )
+        )
+        or 0
+    )
+    period_income = money(
+        session.scalar(
+            select(func.coalesce(func.sum(Expense.amount), 0)).where(
+                Expense.expense_date >= start_date,
+                Expense.expense_date <= end_date,
+                Expense.source_funds == "expense_fund_income",
+            )
+        )
+        or 0
+    )
+    period_spent = money(
+        session.scalar(
+            select(func.coalesce(func.sum(Expense.amount), 0)).where(
+                Expense.expense_date >= start_date,
+                Expense.expense_date <= end_date,
+                Expense.source_funds != "expense_fund_income",
+            )
+        )
+        or 0
+    )
+    closing_income = money(opening_income + period_income)
+    closing_spent = money(opening_spent + period_spent)
+    opening_balance = expense_balance_value(opening_spent, opening_income)
+    closing_balance = expense_balance_value(closing_spent, closing_income)
+    return {
+        "opening_income": opening_income,
+        "opening_spent": opening_spent,
+        "opening_balance": opening_balance,
+        "period_income": period_income,
+        "period_spent": period_spent,
+        "closing_income": closing_income,
+        "closing_spent": closing_spent,
+        "closing_balance": closing_balance,
+    }
+
+
+def prepend_expense_summary(
+    ws,
+    start_date: date,
+    end_date: date,
+    summary: dict[str, float],
+    merge_columns: int,
+) -> None:
+    ws.insert_rows(1, amount=9)
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(2, merge_columns))
+    ws["A1"] = f"Сводка по расходам: {start_date:%d.%m.%Y} - {end_date:%d.%m.%Y}"
+    ws["A1"].font = Font(bold=True, size=14)
+    ws["A2"] = "Плюс = расходов больше, минус = поступлений больше. Да, знак теперь честный."
+    ws["A2"].font = Font(italic=True)
+
+    rows = [
+        ("Сальдо на начало периода", summary["opening_balance"], expense_balance_comment(summary["opening_balance"])),
+        ("Поступило на расходы до начала периода", summary["opening_income"], ""),
+        ("Израсходовано до начала периода", summary["opening_spent"], ""),
+        ("Поступило на расходы за период", summary["period_income"], ""),
+        ("Израсходовано за период", summary["period_spent"], ""),
+        ("Сальдо на конец периода", summary["closing_balance"], expense_balance_comment(summary["closing_balance"])),
+    ]
+    for row_index, (label, value, comment) in enumerate(rows, start=3):
+        ws.cell(row=row_index, column=1, value=label)
+        ws.cell(row=row_index, column=2, value=value)
+        if merge_columns >= 3 and comment:
+            ws.cell(row=row_index, column=3, value=comment)
+        fill_report_row(
+            ws,
+            row_index,
+            REPORT_FILL_WARN if abs(float(value or 0)) > EPS and "Сальдо" in label else REPORT_FILL_OK,
+        )
+    ws.freeze_panes = "A10"
+
+
 def finalize_workbook(wb: Workbook) -> None:
     for ws in wb.worksheets:
         for row in ws.iter_rows():
@@ -4865,11 +4967,13 @@ def expenses_report(start: str | None = None, end: str | None = None, session: S
         start_date = parse_date(start)
     if end:
         end_date = parse_date(end)
+    expense_summary = expense_period_summary(session, start_date, end_date)
     expenses = session.scalars(
         select(Expense).where(Expense.expense_date >= start_date, Expense.expense_date <= end_date).order_by(Expense.expense_date)
     ).all()
     wb = Workbook()
     ws = setup_sheet(wb, "Расходы", ["Дата", "Объект", "Квартира", "Категория", "Сумма", "Источник", "Способ", "Компенсация", "Описание"])
+    prepend_expense_summary(ws, start_date, end_date, expense_summary, 9)
     for expense in expenses:
         data = serialize_expense(expense)
         ws.append(
@@ -5071,6 +5175,8 @@ def monthly_report(year: int, month: int, session: Session = Depends(get_session
     expenses = session.scalars(
         select(Expense).where(Expense.expense_date >= start_date, Expense.expense_date <= end_date).order_by(Expense.expense_date)
     ).all()
+    expense_summary = expense_period_summary(session, start_date, end_date)
+    prepend_expense_summary(expenses_ws, start_date, end_date, expense_summary, 9)
     for expense in expenses:
         data = serialize_expense(expense)
         expenses_ws.append(
@@ -5170,6 +5276,16 @@ def owner_report(start: str | None = None, end: str | None = None, session: Sess
     ws.append(["Получено на расходы вместо ИП", expense_fund_rent_income])
     ws.append(["Расходный фонд за период", expense_balance_label])
     ws.append(["Общий статус аренды", "есть долги" if has_rent_debt else "в порядке"])
+    expense_summary = expense_period_summary(session, start_date, end_date)
+    expense_income_total = expense_summary["period_income"]
+    expense_spent_total = expense_summary["period_spent"]
+    expense_balance = expense_summary["closing_balance"]
+    expense_balance_label = expense_balance_comment(expense_balance)
+    ws.append(["Сальдо расходного фонда на начало", expense_summary["opening_balance"]])
+    ws.append(["Поступления на расходы за период", expense_income_total])
+    ws.append(["Расходы за период", expense_spent_total])
+    ws.append(["Сальдо расходного фонда на конец", expense_balance])
+    ws.append(["Комментарий по сальдо", expense_balance_label])
     if has_rent_debt:
         fill_report_row(ws, ws.max_row, REPORT_FILL_DEBT)
     else:
@@ -5249,6 +5365,7 @@ def owner_report(start: str | None = None, end: str | None = None, session: Sess
         ["Дата", "Объект", "Квартира", "Категория", "Сумма", "Источник", "Способ", "Статус", "Описание"],
     )
     expense_ws.append(["Итог", "", "", "Поступило на расходы", expense_income_total, "", "", "", ""])
+    prepend_expense_summary(expense_ws, start_date, end_date, expense_summary, 9)
     fill_report_row(expense_ws, expense_ws.max_row, REPORT_FILL_OK)
     expense_ws.append(["Итог", "", "", "Израсходовано", expense_spent_total, "", "", "", ""])
     fill_report_row(expense_ws, expense_ws.max_row, REPORT_FILL_WARN if expense_spent_total > EPS else REPORT_FILL_OK)

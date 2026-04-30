@@ -10,8 +10,8 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from rental_manager.database import Base
-from rental_manager.main import build_all_debts_breakdown, build_dashboard, owner_charge_status_label, owner_expected_ip_for_charge, render_message_text
-from rental_manager.models import AppSetting, Apartment, Lease, Meter, MeterReading, RentalObject, RentCharge, Tenant, UtilityBill, UtilityBillLine, UtilityService
+from rental_manager.main import build_all_debts_breakdown, build_dashboard, expense_period_summary, owner_charge_status_label, owner_expected_ip_for_charge, render_message_text
+from rental_manager.models import AppSetting, Apartment, Expense, Lease, Meter, MeterReading, RentalObject, RentCharge, Tenant, UtilityBill, UtilityBillLine, UtilityService
 from rental_manager.services.billing import (
     LEGACY_IMPORT_MARK,
     allocate_odn,
@@ -193,6 +193,25 @@ class RentScheduleTests(DatabaseTestCase):
 
 
 class UtilityBillingTests(DatabaseTestCase):
+    def test_expense_period_summary_keeps_opening_balance_and_sign(self) -> None:
+        with self.seed() as session:
+            session.add_all(
+                [
+                    Expense(expense_date=date(2025, 12, 20), amount=20000, source_funds="expense_fund_income", category="Пополнение"),
+                    Expense(expense_date=date(2025, 12, 25), amount=11000, source_funds="personal", category="Ремонт"),
+                    Expense(expense_date=date(2026, 1, 5), amount=3000, source_funds="personal", category="Кран"),
+                    Expense(expense_date=date(2026, 1, 10), amount=2000, source_funds="expense_fund_income", category="Пополнение"),
+                ]
+            )
+            session.commit()
+
+            summary = expense_period_summary(session, date(2026, 1, 1), date(2026, 1, 31))
+
+        self.assertEqual(summary["opening_balance"], -9000)
+        self.assertEqual(summary["period_spent"], 3000)
+        self.assertEqual(summary["period_income"], 2000)
+        self.assertEqual(summary["closing_balance"], -8000)
+
     def test_tiered_cost_is_applied_to_object_consumption(self) -> None:
         tiers = json.dumps(
             [
