@@ -172,12 +172,18 @@ def _is_success(status: str, source_bank: str, text: str) -> bool:
 
 
 def _parse_payer_name(flat: str) -> str:
+    inline_tbank_marker = "Комиссия Без комиссии "
+    inline_tbank_tail = "Отправитель Телефон получателя"
+    if inline_tbank_marker in flat and inline_tbank_tail in flat:
+        inline_value = flat.split(inline_tbank_marker, 1)[1].split(inline_tbank_tail, 1)[0].strip()
+        if inline_value:
+            return inline_value
     patterns = [
         r"Отправитель\s+(.+?)\s+(?:ID операции|Сообщение|Cooбщение|По вопросам)",
         r"Плательщик\s+(.+?)\s+(?:Банк-|Способ оплаты|ОПЛАТА ПО РЕКВИЗИТАМ)",
         r"ФИО отправителя\s+(.+?)\s+Сч[её]т отправителя",
+        r"Комиссия\s+Без комиссии\s+(.+?)Отправитель\s+Телефон получателя",
         r"Комиссия\s+Без комиссии\s+(.+?)Отправитель",
-        r"(.+?)Отправитель\s+Телефон получателя",
     ]
     for pattern in patterns:
         value = _group(flat, pattern)

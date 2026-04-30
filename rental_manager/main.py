@@ -5040,10 +5040,12 @@ def rent_period_short(charge: RentCharge | None, start_date: date, end_date: dat
     return f"{charge.period_start:%d.%m.%y} - {charge.period_end:%d.%m.%y}"
 
 
-def prior_ip_debt_for_lease(lease: Lease, before_date: date) -> float:
+def prior_ip_debt_for_lease(lease: Lease, before_date: date, cutoff: date | None = None) -> float:
     total = 0.0
     for charge in lease.rent_charges:
         if charge.due_date >= before_date:
+            continue
+        if cutoff and charge.due_date < cutoff:
             continue
         update_rent_charge_status(charge)
         total += max(0.0, float(charge.ip_due or 0) - float(charge.ip_paid or 0))
@@ -5057,6 +5059,7 @@ def owner_report(start: str | None = None, end: str | None = None, session: Sess
         start_date = parse_date(start)
     if end:
         end_date = parse_date(end)
+    cutoff = configured_notification_cutoff_date(session)
 
     rent_charges = session.scalars(
         select(RentCharge).where(RentCharge.due_date >= start_date, RentCharge.due_date <= end_date).order_by(RentCharge.due_date)
@@ -5115,7 +5118,7 @@ def owner_report(start: str | None = None, end: str | None = None, session: Sess
         for charge in charges:
             receipts = accepted_receipts_for_charge(charge, "ip")
             current_ip_debt = money(max(0.0, float(charge.ip_due or 0) - float(charge.ip_paid or 0)))
-            total_ip_debt = money(current_ip_debt + prior_ip_debt_for_lease(charge.lease, start_date))
+            total_ip_debt = money(current_ip_debt + prior_ip_debt_for_lease(charge.lease, start_date, cutoff))
             rows_ws.append(
                 [
                     rent_period_short(charge, start_date, end_date),

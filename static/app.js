@@ -342,6 +342,16 @@ async function loadAll() {
   renderAll();
 }
 
+async function refreshBootstrap() {
+  state.bootstrap = await api("/api/bootstrap");
+  applySettings(state.bootstrap.settings);
+  hydrateForms();
+  renderObjects();
+  renderLeases();
+  renderApartmentRegistry();
+  renderDashboard();
+}
+
 async function loadRent() {
   const start = qs("#rentStart").value;
   const end = qs("#rentEnd").value;
