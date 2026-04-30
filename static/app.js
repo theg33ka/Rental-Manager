@@ -88,6 +88,12 @@ function qsa(selector, root = document) {
   return [...root.querySelectorAll(selector)];
 }
 
+function on(selector, eventName, handler) {
+  const node = typeof selector === "string" ? qs(selector) : selector;
+  if (!node) return;
+  node.addEventListener(eventName, handler);
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
@@ -2482,13 +2488,13 @@ async function acceptMonthlyReport(event, year, month, kind = "full") {
 }
 
 function setReportLinks() {
-  const start = qs("#reportStart").value || "";
-  const end = qs("#reportEnd").value || "";
+  const start = qs("#reportStart")?.value || "";
+  const end = qs("#reportEnd")?.value || "";
   const query = start && end ? `?start=${start}&end=${end}` : "";
-  qs("#rentReport").href = `/api/reports/rent.xlsx${query}`;
-  qs("#utilitiesReport").href = `/api/reports/utilities.xlsx${query}`;
-  qs("#expensesReport").href = `/api/reports/expenses.xlsx${query}`;
-  qs("#ownerReport").href = `/api/reports/owner.xlsx${query}`;
+  if (qs("#rentReport")) qs("#rentReport").href = `/api/reports/rent.xlsx${query}`;
+  if (qs("#utilitiesReport")) qs("#utilitiesReport").href = `/api/reports/utilities.xlsx${query}`;
+  if (qs("#expensesReport")) qs("#expensesReport").href = `/api/reports/expenses.xlsx${query}`;
+  if (qs("#ownerReport")) qs("#ownerReport").href = `/api/reports/owner.xlsx${query}`;
 }
 
 async function connectTelegramWebhook() {
@@ -2563,28 +2569,28 @@ function bindEvents() {
       qsa(".tab").forEach((item) => item.classList.remove("active"));
       qsa(".panel").forEach((item) => item.classList.remove("active"));
       tab.classList.add("active");
-      qs(`#${tab.dataset.tab}`).classList.add("active");
+      qs(`#${tab.dataset.tab}`)?.classList.add("active");
     });
   });
 
-  qs("#refreshBtn").addEventListener("click", loadAll);
-  qs("#runRemindersBtn").addEventListener("click", runRemindersNow);
-  qs("#importBaselineBtn")?.addEventListener("click", importBaseline);
-  qs("#manualPaymentForm")?.addEventListener("submit", submitManualPayment);
-  qs("#manualPaymentKindSelect")?.addEventListener("change", updateManualPaymentKind);
-  qs("#openTariffsBtn").addEventListener("click", () => {
+  on("#refreshBtn", "click", loadAll);
+  on("#runRemindersBtn", "click", runRemindersNow);
+  on("#importBaselineBtn", "click", importBaseline);
+  on("#manualPaymentForm", "submit", submitManualPayment);
+  on("#manualPaymentKindSelect", "change", updateManualPaymentKind);
+  on("#openTariffsBtn", "click", () => {
     const tab = qs('.tab[data-tab="tariffs"]');
     if (tab) tab.click();
   });
-  qs("#telegramWebhookBtn").addEventListener("click", connectTelegramWebhook);
-  qs("#telegramWebhookInfoBtn").addEventListener("click", telegramWebhookInfo);
-  qs("#telegramTestBtn").addEventListener("click", sendTelegramTest);
-  qs("#loadRentBtn").addEventListener("click", async () => {
+  on("#telegramWebhookBtn", "click", connectTelegramWebhook);
+  on("#telegramWebhookInfoBtn", "click", telegramWebhookInfo);
+  on("#telegramTestBtn", "click", sendTelegramTest);
+  on("#loadRentBtn", "click", async () => {
     await loadRent();
     renderRent();
   });
 
-  qs("#onboardForm").addEventListener("submit", async (event) => {
+  on("#onboardForm", "submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
     const data = formData(form);
@@ -2599,17 +2605,17 @@ function bindEvents() {
     form.reset();
     await loadAll();
   });
-  qs("#cancelLeaseEditBtn")?.addEventListener("click", cancelLeaseEdit);
+  on("#cancelLeaseEditBtn", "click", cancelLeaseEdit);
 
-  qs("#readingForm").addEventListener("submit", async (event) => {
+  on("#readingForm", "submit", async (event) => {
     event.preventDefault();
     await api("/api/meter-readings", { method: "POST", body: JSON.stringify(formData(event.currentTarget)) });
     toast("Показание сохранено");
     await loadAll();
   });
-  qs("#quickReadingsForm").addEventListener("submit", submitQuickReadings);
+  on("#quickReadingsForm", "submit", submitQuickReadings);
 
-  qs("#utilityCalcForm").addEventListener("submit", async (event) => {
+  on("#utilityCalcForm", "submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
     syncUtilityPeriodInputs();
@@ -2617,12 +2623,12 @@ function bindEvents() {
     toast(`Черновик создан: ${money(result.total_cost)}`);
     await loadAll();
   });
-  qs("#utilityServiceSelect")?.addEventListener("change", updateUtilityPeriodControls);
-  qs('#utilityCalcForm input[name="allow_estimate"]')?.addEventListener("change", updateUtilityPeriodControls);
-  qs("#utilityPeriodStartSelect")?.addEventListener("change", syncUtilityPeriodInputs);
-  qs("#utilityPeriodEndSelect")?.addEventListener("change", syncUtilityPeriodInputs);
+  on("#utilityServiceSelect", "change", updateUtilityPeriodControls);
+  on('#utilityCalcForm input[name="allow_estimate"]', "change", updateUtilityPeriodControls);
+  on("#utilityPeriodStartSelect", "change", syncUtilityPeriodInputs);
+  on("#utilityPeriodEndSelect", "change", syncUtilityPeriodInputs);
 
-  qs("#tariffForm").addEventListener("submit", async (event) => {
+  on("#tariffForm", "submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
     await api("/api/tariffs", { method: "POST", body: JSON.stringify(formData(form)) });
@@ -2631,7 +2637,7 @@ function bindEvents() {
     await loadAll();
   });
 
-  qs("#expenseForm").addEventListener("submit", async (event) => {
+  on("#expenseForm", "submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
     await api("/api/expenses", { method: "POST", body: JSON.stringify(formData(form)) });
@@ -2640,7 +2646,7 @@ function bindEvents() {
     await loadAll();
   });
 
-  qs("#messageTemplatesForm").addEventListener("submit", async (event) => {
+  on("#messageTemplatesForm", "submit", async (event) => {
     event.preventDefault();
     const data = formData(event.currentTarget);
     const settings = await api("/api/settings", { method: "POST", body: JSON.stringify(data) });
@@ -2648,9 +2654,9 @@ function bindEvents() {
     toast("Шаблоны сохранены");
   });
 
-  qs("#automationSettingsForm")?.addEventListener("submit", submitAutomationSettings);
+  on("#automationSettingsForm", "submit", submitAutomationSettings);
 
-  qs("#settingsForm").addEventListener("submit", async (event) => {
+  on("#settingsForm", "submit", async (event) => {
     event.preventDefault();
     const data = formData(event.currentTarget);
     const settings = await api("/api/settings", { method: "POST", body: JSON.stringify(data) });
@@ -2658,11 +2664,11 @@ function bindEvents() {
     toast("Настройки сохранены");
   });
 
-  qs("#paletteSelect").addEventListener("change", (event) => {
+  on("#paletteSelect", "change", (event) => {
     applySettings({ ...state.settings, color_palette: event.currentTarget.value });
   });
 
-  ["reportStart", "reportEnd"].forEach((id) => qs(`#${id}`).addEventListener("change", setReportLinks));
+  ["reportStart", "reportEnd"].forEach((id) => on(`#${id}`, "change", setReportLinks));
 }
 
 window.addEventListener("unhandledrejection", (event) => {
