@@ -595,10 +595,7 @@ def current_active_lease(apartment: Apartment, today: date | None = None) -> Lea
         (
             lease
             for lease in leases
-            if lease.active
-            and lease.start_date <= today
-            and (lease.end_date is None or lease.end_date >= today)
-            and IGNORE_LEASE_MARK not in (lease.notes or "")
+            if lease.active and lease.start_date <= today and (lease.end_date is None or lease.end_date >= today)
         ),
         None,
     )
@@ -1136,13 +1133,7 @@ def build_monthly_reports(session: Session, today: date | None = None) -> list[d
 def build_dashboard(session: Session) -> dict[str, Any]:
     today = date.today()
     cutoff = configured_notification_cutoff_date(session)
-    charges = [
-        charge
-        for charge in session.scalars(
-            select(RentCharge).join(Lease).join(Apartment).where(Apartment.active.is_(True)).order_by(RentCharge.due_date)
-        ).all()
-        if IGNORE_LEASE_MARK not in (charge.lease.notes or "")
-    ]
+    charges = session.scalars(select(RentCharge).join(Lease).join(Apartment).where(Apartment.active.is_(True)).order_by(RentCharge.due_date)).all()
     for charge in charges:
         update_rent_charge_status(charge, today)
     utility_lines = session.scalars(select(UtilityBillLine).join(Apartment).where(Apartment.active.is_(True))).all()
@@ -2754,7 +2745,7 @@ def onboard_tenant(payload: dict[str, Any], session: Session = Depends(get_sessi
     apartment = session.get(Apartment, apartment_id)
     if not apartment:
         raise HTTPException(404, "Квартира не найдена")
-    active_lease = active_lease_for_apartment(session, apartment.id, start, date.max)
+    active_lease = session.scalar(select(Lease).where(Lease.apartment_id == apartment.id, Lease.active.is_(True)))
     if active_lease:
         raise HTTPException(400, "В квартире уже есть активный жилец. Сначала оформите выезд.")
 
@@ -2800,7 +2791,7 @@ def update_lease(lease_id: int, payload: dict[str, Any], session: Session = Depe
     if not apartment:
         raise HTTPException(404, "Квартира не найдена")
     if apartment.id != lease.apartment_id:
-        active_lease = active_lease_for_apartment(session, apartment.id, start, date.max)
+        active_lease = session.scalar(select(Lease).where(Lease.apartment_id == apartment.id, Lease.active.is_(True), Lease.id != lease.id))
         if active_lease:
             raise HTTPException(400, "В квартире уже есть активный жилец. Сначала оформите выезд.")
         lease.apartment_id = apartment.id
