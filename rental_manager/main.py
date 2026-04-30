@@ -1796,7 +1796,6 @@ def run_due_reminders(session: Session, today: date | None = None) -> dict[str, 
         .join(Lease)
         .join(Apartment)
         .where(Lease.active.is_(True), Apartment.active.is_(True))
-        .where(~Lease.notes.contains(IGNORE_LEASE_MARK))
         .order_by(RentCharge.due_date, RentCharge.id)
     ).all()
     for charge in charges:
@@ -2941,7 +2940,6 @@ def list_rent_charges(
         .join(Lease)
         .join(Apartment)
         .where(Apartment.active.is_(True))
-        .where(~Lease.notes.contains(IGNORE_LEASE_MARK))
         .where(RentCharge.due_date >= start_date, RentCharge.due_date <= end_date)
         .order_by(RentCharge.due_date, RentCharge.id)
     ).all()
@@ -3814,11 +3812,7 @@ def rent_report(start: str | None = None, end: str | None = None, session: Sessi
     if end:
         end_date = parse_date(end)
     charges = session.scalars(
-        select(RentCharge)
-        .join(Lease)
-        .where(RentCharge.due_date >= start_date, RentCharge.due_date <= end_date)
-        .where(~Lease.notes.contains(IGNORE_LEASE_MARK))
-        .order_by(RentCharge.due_date)
+        select(RentCharge).where(RentCharge.due_date >= start_date, RentCharge.due_date <= end_date).order_by(RentCharge.due_date)
     ).all()
     wb = Workbook()
     ws = setup_sheet(
@@ -3909,12 +3903,7 @@ def utilities_report(start: str | None = None, end: str | None = None, session: 
 def debts_report(session: Session = Depends(get_session)) -> StreamingResponse:
     wb = Workbook()
     ws = setup_sheet(wb, "Долги", ["Тип", "Дата", "Объект", "Квартира", "Жилец", "Сумма", "Комментарий"])
-    for charge in session.scalars(
-        select(RentCharge)
-        .join(Lease)
-        .where(~Lease.notes.contains(IGNORE_LEASE_MARK))
-        .order_by(RentCharge.due_date)
-    ).all():
+    for charge in session.scalars(select(RentCharge).order_by(RentCharge.due_date)).all():
         data = serialize_rent_charge(charge)
         if data["debt"] > 0 and data["status"] in {"overdue", "partial", "deferred"}:
             ws.append(["Аренда", data["due_date"], data["object"], data["apartment"], data["tenant"], data["debt"], report_status_label(data["status"], charge.due_date)])
@@ -3964,11 +3953,7 @@ def monthly_report(year: int, month: int, session: Session = Depends(get_session
 
     summary = monthly_report_status(session, year, month)
     rent_charges = session.scalars(
-        select(RentCharge)
-        .join(Lease)
-        .where(RentCharge.due_date >= start_date, RentCharge.due_date <= end_date)
-        .where(~Lease.notes.contains(IGNORE_LEASE_MARK))
-        .order_by(RentCharge.due_date)
+        select(RentCharge).where(RentCharge.due_date >= start_date, RentCharge.due_date <= end_date).order_by(RentCharge.due_date)
     ).all()
     bills = session.scalars(
         select(UtilityBill)
