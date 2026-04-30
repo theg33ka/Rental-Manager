@@ -1,21 +1,25 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 import unittest
 from datetime import date
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
 from fastapi import HTTPException
+from openpyxl import load_workbook
 from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import sessionmaker
 
 from rental_manager.database import Base
-from rental_manager.main import build_all_debts_breakdown, build_dashboard, create_move_out_utility_lines, expense_period_summary, owner_charge_status_label, owner_expected_ip_for_charge, process_move_out_notifications, render_message_text
+from rental_manager.main import apartment_month_state, build_all_debts_breakdown, build_dashboard, create_move_out_utility_lines, expense_period_summary, owner_charge_status_label, owner_expected_ip_for_charge, process_move_out_notifications, render_message_text, rent_report
 from rental_manager.main import apply_database_import_payload, current_database_snapshot, inspect_database_import_payload, parse_database_import_bytes
 from rental_manager.models import AppSetting, Apartment, Expense, Lease, MessageLog, Meter, MeterReading, RentalObject, RentCharge, Tenant, UtilityBill, UtilityBillLine, UtilityService, Tariff
 from rental_manager.services.billing import (
+    IGNORE_LEASE_MARK,
     LEGACY_IMPORT_MARK,
     allocate_odn,
     calculate_tiered_cost,
@@ -88,6 +92,13 @@ class DatabaseImportExportTests(DatabaseTestCase):
     def test_parse_database_import_bytes_rejects_wrong_payload(self) -> None:
         with self.assertRaises(HTTPException):
             parse_database_import_bytes(b'{"format":"nope","version":1,"tables":{}}')
+
+
+async def read_streaming_response_bytes(response) -> bytes:
+    payload = b""
+    async for chunk in response.body_iterator:
+        payload += chunk
+    return payload
 
 
 class RentScheduleTests(DatabaseTestCase):
@@ -693,6 +704,64 @@ class UtilityBillingTests(DatabaseTestCase):
 
 
 class DashboardCutoffTests(DatabaseTestCase):
+    def test_apartment_month_state_skips_ignored_lease(self) -> None:
+        with self.Session() as session:
+            rental_object = RentalObject(name="Дом-игнор", short_code="ДИ")
+            apartment = Apartment(name="ДИ1", sort_order=1, odn_share_percent=100, active=True, object=rental_object)
+            tenant = Tenant(full_name="Старая арендаторша")
+            lease = Lease(
+                apartment=apartment,
+                tenant=tenant,
+                start_date=date(2026, 4, 1),
+                end_date=None,
+                payment_day=1,
+                ip_amount=20000,
+                personal_amount=3000,
+                notes=IGNORE_LEASE_MARK,
+            )
+            session.add_all([rental_object, apartment, tenant, lease])
+            session.commit()
+
+            state = apartment_month_state(apartment, date(2026, 4, 1), date(2026, 4, 30))
+
+        self.assertEqual(state["tenant_names"], "нет жильца")
+        self.assertTrue(state["vacant_full"])
+
+    def test_rent_report_hides_ignored_lease_charge(self) -> None:
+        with self.Session() as session:
+            rental_object = RentalObject(name="Дом-отчёт", short_code="ДО")
+            apartment = Apartment(name="ДО1", sort_order=1, odn_share_percent=100, active=True, object=rental_object)
+            tenant = Tenant(full_name="Лишний хвост")
+            lease = Lease(
+                apartment=apartment,
+                tenant=tenant,
+                start_date=date(2026, 1, 1),
+                end_date=None,
+                payment_day=14,
+                ip_amount=20000,
+                personal_amount=3000,
+                notes=IGNORE_LEASE_MARK,
+            )
+            charge = RentCharge(
+                lease=lease,
+                period_start=date(2026, 4, 14),
+                period_end=date(2026, 5, 13),
+                due_date=date(2026, 4, 14),
+                ip_due=20000,
+                personal_due=3000,
+                status="overdue",
+            )
+            session.add_all([rental_object, apartment, tenant, lease, charge])
+            session.commit()
+
+            response = rent_report(start="2026-04-01", end="2026-04-30", session=session)
+            workbook_bytes = asyncio.run(read_streaming_response_bytes(response))
+
+        workbook = load_workbook(BytesIO(workbook_bytes))
+        sheet = workbook["Аренда"]
+        values = [cell for row in sheet.iter_rows(values_only=True) for cell in row if isinstance(cell, str)]
+        self.assertNotIn("Лишний хвост", values)
+
     def test_dashboard_ignores_debts_before_cutoff_date(self) -> None:
         with self.Session() as session:
             rental_object = RentalObject(name="Тестовый дом", short_code="ТД")

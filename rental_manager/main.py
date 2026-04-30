@@ -5275,6 +5275,8 @@ def apartment_month_state(apartment: Apartment, start_date: date, end_date: date
     occupied_days: set[date] = set()
     overlaps: list[Lease] = []
     for lease in sorted(apartment.leases, key=lambda item: (item.start_date, item.id)):
+        if IGNORE_LEASE_MARK in (lease.notes or ""):
+            continue
         overlap_start = max(lease.start_date, start_date)
         overlap_end = min(lease.end_date or end_date, end_date)
         if overlap_start > overlap_end:
@@ -5318,6 +5320,7 @@ def rent_report(start: str | None = None, end: str | None = None, session: Sessi
     charges = session.scalars(
         select(RentCharge).where(RentCharge.due_date >= start_date, RentCharge.due_date <= end_date).order_by(RentCharge.due_date)
     ).all()
+    charges = [charge for charge in charges if not lease_ignored(session, charge.lease_id)]
     wb = Workbook()
     ws = setup_sheet(
         wb,
@@ -5385,6 +5388,8 @@ def utilities_report(start: str | None = None, end: str | None = None, session: 
     )
     for bill in bills:
         for line in bill.lines:
+            if line.lease_id and lease_ignored(session, line.lease_id):
+                continue
             data = serialize_bill_line(line)
             ws.append(
                 [
@@ -5470,6 +5475,7 @@ def monthly_report(year: int, month: int, session: Session = Depends(get_session
     rent_charges = session.scalars(
         select(RentCharge).where(RentCharge.due_date >= start_date, RentCharge.due_date <= end_date).order_by(RentCharge.due_date)
     ).all()
+    rent_charges = [charge for charge in rent_charges if not lease_ignored(session, charge.lease_id)]
     bills = session.scalars(
         select(UtilityBill)
         .where(UtilityBill.period_start >= start_date, UtilityBill.period_start <= end_date)
@@ -5477,7 +5483,7 @@ def monthly_report(year: int, month: int, session: Session = Depends(get_session
     ).all()
     apartments = session.scalars(select(Apartment).where(Apartment.active.is_(True)).order_by(Apartment.object_id, Apartment.sort_order, Apartment.name)).all()
 
-    utility_lines = [line for bill in bills for line in bill.lines]
+    utility_lines = [line for bill in bills for line in bill.lines if not line.lease_id or not lease_ignored(session, line.lease_id)]
     utility_debt_by_apartment: dict[int, float] = {}
     for line in utility_lines:
         utility_debt_by_apartment[line.apartment_id] = utility_debt_by_apartment.get(line.apartment_id, 0.0) + max(0.0, float(line.total_amount or 0) - float(line.paid_amount or 0))
