@@ -43,7 +43,6 @@ from rental_manager.services.billing import (
     effective_due_date,
     full_months_lived,
     generate_rent_charges,
-    IGNORE_LEASE_MARK,
     money,
     next_due_after,
     object_last_reading_date,
@@ -628,24 +627,6 @@ def serialize_tenant(tenant: Tenant) -> dict[str, Any]:
     }
 
 
-def _lease_ignored(lease: Lease) -> bool:
-    return any(line.strip() == IGNORE_LEASE_MARK for line in (lease.notes or "").splitlines())
-
-
-def _normalize_ignored(payload: dict[str, Any]) -> bool:
-    return payload.get("ignored") not in {False, "false", "0", 0, None, ""}
-
-
-def _lease_notes_with_ignore(notes: str | None, ignored: bool) -> str:
-    lines = [line for line in (notes or "").splitlines() if line.strip() != ""]
-    has_ignore = any(line.strip() == IGNORE_LEASE_MARK for line in lines)
-    if ignored and not has_ignore:
-        lines.append(IGNORE_LEASE_MARK)
-    if not ignored and has_ignore:
-        lines = [line for line in lines if line.strip() != IGNORE_LEASE_MARK]
-    return "\n".join(lines).strip()
-
-
 def serialize_lease(lease: Lease) -> dict[str, Any]:
     return {
         "id": lease.id,
@@ -667,7 +648,6 @@ def serialize_lease(lease: Lease) -> dict[str, Any]:
         "deposit_location": lease.deposit_location,
         "deposit_terms": lease.deposit_terms,
         "notes": lease.notes,
-        "ignored": _lease_ignored(lease),
         "active": lease.active,
     }
 
@@ -2770,7 +2750,7 @@ def onboard_tenant(payload: dict[str, Any], session: Session = Depends(get_sessi
         deposit_amount=float(payload.get("deposit_amount") or 0),
         deposit_location=payload.get("deposit_location") or "",
         deposit_terms=payload.get("deposit_terms") or "",
-        notes=_lease_notes_with_ignore(payload.get("notes") or "", _normalize_ignored(payload)),
+        notes=payload.get("notes") or "",
     )
     session.add(lease)
     session.flush()
@@ -2806,7 +2786,7 @@ def update_lease(lease_id: int, payload: dict[str, Any], session: Session = Depe
     lease.deposit_amount = float(payload.get("deposit_amount") or 0)
     lease.deposit_location = payload.get("deposit_location") or ""
     lease.deposit_terms = payload.get("deposit_terms") or ""
-    lease.notes = _lease_notes_with_ignore(payload.get("notes") or "", _normalize_ignored(payload))
+    lease.notes = payload.get("notes") or ""
 
     lease.tenant.full_name = (payload.get("full_name") or "Без имени").strip()
     lease.tenant.phone = payload.get("phone") or ""
@@ -2816,20 +2796,6 @@ def update_lease(lease_id: int, payload: dict[str, Any], session: Session = Depe
     if tenant_notes is not None:
         lease.tenant.notes = tenant_notes
 
-    session.flush()
-    generate_rent_charges(session)
-    session.commit()
-    session.refresh(lease)
-    return serialize_lease(lease)
-
-
-@app.patch("/api/leases/{lease_id}/ignore")
-def ignore_lease(lease_id: int, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
-    lease = session.get(Lease, lease_id)
-    if not lease:
-        raise HTTPException(404, "Договор не найден")
-
-    lease.notes = _lease_notes_with_ignore(lease.notes, _normalize_ignored(payload))
     session.flush()
     generate_rent_charges(session)
     session.commit()
