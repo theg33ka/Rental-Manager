@@ -7,11 +7,13 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
-from sqlalchemy import create_engine, select
+from fastapi import HTTPException
+from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import sessionmaker
 
 from rental_manager.database import Base
 from rental_manager.main import build_all_debts_breakdown, build_dashboard, create_move_out_utility_lines, expense_period_summary, owner_charge_status_label, owner_expected_ip_for_charge, process_move_out_notifications, render_message_text
+from rental_manager.main import apply_database_import_payload, current_database_snapshot, inspect_database_import_payload, parse_database_import_bytes
 from rental_manager.models import AppSetting, Apartment, Expense, Lease, MessageLog, Meter, MeterReading, RentalObject, RentCharge, Tenant, UtilityBill, UtilityBillLine, UtilityService, Tariff
 from rental_manager.services.billing import (
     LEGACY_IMPORT_MARK,
@@ -45,6 +47,47 @@ class DatabaseTestCase(unittest.TestCase):
         session = self.Session()
         seed_if_empty(session)
         return session
+
+
+class DatabaseImportExportTests(DatabaseTestCase):
+    def test_database_snapshot_roundtrip_restores_records(self) -> None:
+        with self.Session() as session:
+            rental_object = RentalObject(name="Дом для экспорта", short_code="ЭКС")
+            tenant = Tenant(full_name="Тестовый жилец")
+            session.add_all([rental_object, tenant, AppSetting(key="telegram_owner_chat_id", value="123")])
+            session.flush()
+            apartment = Apartment(object_id=rental_object.id, name="ЭКС1", sort_order=1, odn_share_percent=100, active=True)
+            session.add(apartment)
+            session.flush()
+            lease = Lease(apartment_id=apartment.id, tenant_id=tenant.id, start_date=date(2026, 5, 1), payment_day=1, ip_amount=20000, personal_amount=3000)
+            session.add(lease)
+            session.commit()
+
+            snapshot = current_database_snapshot(session)
+            inspection = inspect_database_import_payload(snapshot)
+
+            session.execute(delete(Lease))
+            session.execute(delete(Apartment))
+            session.execute(delete(Tenant))
+            session.execute(delete(RentalObject))
+            session.execute(delete(AppSetting))
+            session.commit()
+
+            result = apply_database_import_payload(session, snapshot)
+            session.commit()
+
+            restored_lease = session.scalar(select(Lease).where(Lease.id == lease.id))
+            restored_setting = session.get(AppSetting, "telegram_owner_chat_id")
+
+        self.assertEqual(inspection["format"], "rental-manager-db-export")
+        self.assertGreaterEqual(inspection["total_rows"], 5)
+        self.assertEqual(result["counts"]["leases"], 1)
+        self.assertIsNotNone(restored_lease)
+        self.assertEqual(restored_setting.value, "123")
+
+    def test_parse_database_import_bytes_rejects_wrong_payload(self) -> None:
+        with self.assertRaises(HTTPException):
+            parse_database_import_bytes(b'{"format":"nope","version":1,"tables":{}}')
 
 
 class RentScheduleTests(DatabaseTestCase):

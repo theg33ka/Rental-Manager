@@ -95,8 +95,13 @@ function on(selector, eventName, handler) {
 }
 
 async function api(path, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData;
+  if (!isFormData && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json";
+  }
   const response = await fetch(path, {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    headers,
     ...options,
   });
   const rawText = await response.text();
@@ -115,6 +120,26 @@ async function api(path, options = {}) {
     throw new Error(message);
   }
   return parseJson();
+}
+
+async function downloadFile(path, filenameFallback = "download.json") {
+  const response = await fetch(path);
+  if (!response.ok) {
+    const rawText = await response.text();
+    throw new Error(rawText || "Не удалось скачать файл");
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get("Content-Disposition") || "";
+  const matched = disposition.match(/filename="?([^"]+)"?/i);
+  const filename = matched?.[1] || filenameFallback;
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 function toast(message) {
@@ -1717,6 +1742,70 @@ async function importBaseline() {
   await loadAll();
 }
 
+function selectedDatabaseImportFile() {
+  return qs("#databaseImportFile")?.files?.[0] || null;
+}
+
+function renderDatabaseImportInspection(result = {}) {
+  const box = qs("#databaseImportStatusBox");
+  if (!box) return;
+  if (!Object.keys(result).length) {
+    box.innerHTML = '<div class="muted">Сюда прилетит разбор файла импорта после проверки.</div>';
+    return;
+  }
+  const counts = Object.entries(result.counts || {})
+    .sort((a, b) => a[0].localeCompare(b[0], "ru"))
+    .map(([name, count]) => `<span class="pill">${name}: ${count}</span>`)
+    .join("");
+  const warnings = (result.warnings || []).map((item) => `<li>${item}</li>`).join("");
+  box.innerHTML = `
+    <div class="stack">
+      <div class="pill-row">
+        <span class="pill ok">строк: ${result.total_rows || 0}</span>
+        <span class="pill">${result.database_url_hint || "db"}</span>
+        <span class="pill">${result.exported_at ? formatDateTime(result.exported_at) : "дата неизвестна"}</span>
+      </div>
+      <div class="pill-row">${counts}</div>
+      ${warnings ? `<div class="danger-box"><strong>Предупреждения:</strong><ul>${warnings}</ul></div>` : '<div class="ok-box">Файл выглядит валидно.</div>'}
+    </div>
+  `;
+}
+
+async function exportDatabase() {
+  await downloadFile("/api/admin/database-export", "rental-manager-db-export.json");
+  toast("Экспорт базы скачан");
+}
+
+async function inspectDatabaseImport() {
+  const file = selectedDatabaseImportFile();
+  if (!file) throw new Error("Сначала выбери файл экспорта");
+  const body = new FormData();
+  body.append("file", file);
+  const result = await api("/api/admin/database-import/inspect", { method: "POST", body });
+  renderDatabaseImportInspection(result);
+  toast("Файл импорта проверен");
+}
+
+async function importDatabase() {
+  const file = selectedDatabaseImportFile();
+  if (!file) throw new Error("Сначала выбери файл экспорта");
+  const confirmReplace = qs("#databaseImportConfirmReplace")?.checked;
+  const confirmationText = (qs("#databaseImportConfirmationText")?.value || "").trim();
+  const createBackup = qs("#databaseImportCreateBackup")?.checked !== false;
+  if (!confirmReplace) throw new Error("Подтверди полную замену базы");
+  if (confirmationText.toUpperCase() !== "ИМПОРТ") throw new Error('Введи слово "ИМПОРТ"');
+  if (!confirm("Импорт полностью заменит текущую базу. Продолжить?")) return;
+  const body = new FormData();
+  body.append("file", file);
+  body.append("confirmation_text", confirmationText);
+  body.append("confirm_replace", String(confirmReplace));
+  body.append("create_backup", String(createBackup));
+  const result = await api("/api/admin/database-import", { method: "POST", body });
+  renderDatabaseImportInspection(result.inspection || {});
+  toast(`Импорт завершён. Строк: ${result.imported?.total_rows || 0}`);
+  await loadAll();
+}
+
 function updateManualPaymentKind() {
   const kind = qs("#manualPaymentKindSelect")?.value || "rent";
   const channelSelect = qs("#manualPaymentChannelSelect");
@@ -2581,6 +2670,9 @@ function bindEvents() {
   on("#refreshBtn", "click", loadAll);
   on("#runRemindersBtn", "click", runRemindersNow);
   on("#importBaselineBtn", "click", importBaseline);
+  on("#databaseExportBtn", "click", exportDatabase);
+  on("#databaseImportInspectBtn", "click", inspectDatabaseImport);
+  on("#databaseImportApplyBtn", "click", importDatabase);
   on("#manualPaymentForm", "submit", submitManualPayment);
   on("#manualPaymentKindSelect", "change", updateManualPaymentKind);
   on("#openTariffsBtn", "click", () => {
@@ -2674,6 +2766,7 @@ function bindEvents() {
   });
 
   ["reportStart", "reportEnd"].forEach((id) => on(`#${id}`, "change", setReportLinks));
+  renderDatabaseImportInspection();
 }
 
 window.addEventListener("unhandledrejection", (event) => {

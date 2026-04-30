@@ -11,16 +11,16 @@ import time as time_module
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import Session
 
-from rental_manager.database import ROOT_DIR, SessionLocal, get_session, init_db
+from rental_manager.database import Base, DATABASE_URL, ROOT_DIR, SessionLocal, get_session, init_db
 from rental_manager.models import (
     Apartment,
     Expense,
@@ -377,6 +377,190 @@ def save_settings(session: Session, payload: dict[str, Any]) -> dict[str, str | 
             setting.value = str(value)
     session.commit()
     return get_settings(session)
+
+
+DB_EXPORT_FORMAT = "rental-manager-db-export"
+DB_EXPORT_VERSION = 1
+DB_IMPORT_CONFIRM_TEXT = "ИМПОРТ"
+
+
+def table_model_map() -> dict[str, Any]:
+    return {
+        "rental_objects": RentalObject,
+        "apartments": Apartment,
+        "tenants": Tenant,
+        "leases": Lease,
+        "rent_charges": RentCharge,
+        "payment_receipts": PaymentReceipt,
+        "message_logs": MessageLog,
+        "utility_services": UtilityService,
+        "meters": Meter,
+        "meter_readings": MeterReading,
+        "tariffs": Tariff,
+        "utility_bills": UtilityBill,
+        "utility_bill_lines": UtilityBillLine,
+        "manual_debts": ManualDebt,
+        "expenses": Expense,
+        "app_settings": AppSetting,
+    }
+
+
+def export_scalar(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return {"__type__": "datetime", "value": value.isoformat()}
+    if isinstance(value, date):
+        return {"__type__": "date", "value": value.isoformat()}
+    return value
+
+
+def import_scalar(column, value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, dict) and value.get("__type__") == "datetime":
+        return datetime.fromisoformat(str(value.get("value") or ""))
+    if isinstance(value, dict) and value.get("__type__") == "date":
+        return date.fromisoformat(str(value.get("value") or ""))
+    try:
+        python_type = getattr(column.type, "python_type", None)
+    except NotImplementedError:
+        python_type = None
+    if python_type is bool:
+        return bool(value)
+    if python_type is int:
+        return int(value)
+    if python_type is float:
+        return float(value)
+    return value
+
+
+def current_database_snapshot(session: Session) -> dict[str, Any]:
+    tables: dict[str, list[dict[str, Any]]] = {}
+    counts: dict[str, int] = {}
+    for table in Base.metadata.sorted_tables:
+        rows = session.execute(select(table)).mappings().all()
+        serialized_rows = [
+            {column.name: export_scalar(row[column.name]) for column in table.columns}
+            for row in rows
+        ]
+        tables[table.name] = serialized_rows
+        counts[table.name] = len(serialized_rows)
+    return {
+        "format": DB_EXPORT_FORMAT,
+        "version": DB_EXPORT_VERSION,
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "database_url_hint": "postgres" if DATABASE_URL.startswith("postgresql") else "sqlite",
+        "tables": tables,
+        "counts": counts,
+    }
+
+
+def parse_database_import_bytes(raw_bytes: bytes) -> dict[str, Any]:
+    if not raw_bytes:
+        raise HTTPException(400, "Файл пустой. Такой импорт только философский.")
+    try:
+        payload = json.loads(raw_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(400, "Файл импорта должен быть JSON-экспортом из приложения.") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Файл импорта должен содержать JSON-объект верхнего уровня.")
+    if payload.get("format") != DB_EXPORT_FORMAT:
+        raise HTTPException(400, "Неузнаваемый формат импорта. Нужен экспорт именно из этого приложения.")
+    if int(payload.get("version") or 0) != DB_EXPORT_VERSION:
+        raise HTTPException(400, "Версия формата импорта не поддерживается.")
+    tables = payload.get("tables")
+    if not isinstance(tables, dict):
+        raise HTTPException(400, "В файле импорта нет блока tables.")
+    return payload
+
+
+def inspect_database_import_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    table_names = {table.name for table in Base.metadata.sorted_tables}
+    tables = payload.get("tables") or {}
+    unknown_tables = sorted(name for name in tables.keys() if name not in table_names)
+    missing_tables = sorted(name for name in table_names if name not in tables)
+    counts = {
+        name: len(rows) if isinstance(rows, list) else 0
+        for name, rows in tables.items()
+        if name in table_names
+    }
+    total_rows = sum(counts.values())
+    if total_rows <= 0:
+        raise HTTPException(400, "В импорте нет данных. Переезжать не с чем.")
+    warnings: list[str] = []
+    if missing_tables:
+        warnings.append("В файле нет части таблиц: " + ", ".join(missing_tables))
+    if unknown_tables:
+        warnings.append("Есть лишние таблицы, они будут проигнорированы: " + ", ".join(unknown_tables))
+    if total_rows < 10:
+        warnings.append("Очень мало записей. Перед импортом лучше ещё раз проверить, тот ли это файл.")
+    return {
+        "format": payload.get("format"),
+        "version": payload.get("version"),
+        "exported_at": payload.get("exported_at"),
+        "database_url_hint": payload.get("database_url_hint") or "",
+        "counts": counts,
+        "total_rows": total_rows,
+        "missing_tables": missing_tables,
+        "unknown_tables": unknown_tables,
+        "warnings": warnings,
+    }
+
+
+def backup_export_path() -> Path:
+    target_dir = ROOT_DIR / "data" / "backups"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    return target_dir / f"db-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+
+
+def save_database_backup(session: Session) -> Path:
+    snapshot = current_database_snapshot(session)
+    target = backup_export_path()
+    target.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+    return target
+
+
+def reset_database_sequences(session: Session) -> None:
+    if not DATABASE_URL.startswith("postgresql"):
+        return
+    for table in Base.metadata.sorted_tables:
+        integer_pk_columns = [column for column in table.columns if column.primary_key and getattr(column.type, "python_type", None) is int]
+        for column in integer_pk_columns:
+            session.execute(
+                text(
+                    f"SELECT setval(pg_get_serial_sequence('{table.name}', '{column.name}'), "
+                    f"COALESCE((SELECT MAX({column.name}) FROM {table.name}), 1), "
+                    f"COALESCE((SELECT MAX({column.name}) FROM {table.name}), 0) > 0)"
+                )
+            )
+
+
+def apply_database_import_payload(session: Session, payload: dict[str, Any]) -> dict[str, Any]:
+    table_lookup = {table.name: table for table in Base.metadata.sorted_tables}
+    tables = payload.get("tables") or {}
+    for table in reversed(Base.metadata.sorted_tables):
+        session.execute(table.delete())
+    session.flush()
+    inserted_counts: dict[str, int] = {}
+    for table in Base.metadata.sorted_tables:
+        rows = tables.get(table.name)
+        if not isinstance(rows, list) or not rows:
+            inserted_counts[table.name] = 0
+            continue
+        prepared_rows = []
+        for row in rows:
+            if not isinstance(row, dict):
+                raise HTTPException(400, f"Таблица {table.name} содержит битую строку импорта.")
+            prepared_rows.append(
+                {
+                    column.name: import_scalar(column, row.get(column.name))
+                    for column in table.columns
+                    if column.name in row
+                }
+            )
+        session.execute(table_lookup[table.name].insert(), prepared_rows)
+        inserted_counts[table.name] = len(prepared_rows)
+    reset_database_sequences(session)
+    return {"counts": inserted_counts, "total_rows": sum(inserted_counts.values())}
 
 
 def telegram_token(session: Session) -> str:
@@ -1277,6 +1461,51 @@ def api_get_settings(session: Session = Depends(get_session)) -> dict[str, str |
 @app.post("/api/settings")
 def api_save_settings(payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, str | bool]:
     return save_settings(session, payload)
+
+
+@app.get("/api/admin/database-export")
+def export_database(session: Session = Depends(get_session)) -> StreamingResponse:
+    snapshot = current_database_snapshot(session)
+    raw = json.dumps(snapshot, ensure_ascii=False, indent=2).encode("utf-8")
+    filename = f"rental-manager-db-export-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+    return StreamingResponse(
+        BytesIO(raw),
+        media_type="application/json; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/api/admin/database-import/inspect")
+async def inspect_database_import(file: UploadFile = File(...)) -> dict[str, Any]:
+    payload = parse_database_import_bytes(await file.read())
+    return inspect_database_import_payload(payload)
+
+
+@app.post("/api/admin/database-import")
+async def import_database(
+    file: UploadFile = File(...),
+    confirmation_text: str = Form(""),
+    confirm_replace: bool = Form(False),
+    create_backup: bool = Form(True),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    if not confirm_replace:
+        raise HTTPException(400, "Сначала подтвердите, что текущая база будет полностью заменена.")
+    if confirmation_text.strip().upper() != DB_IMPORT_CONFIRM_TEXT:
+        raise HTTPException(400, f'Для импорта введите подтверждение "{DB_IMPORT_CONFIRM_TEXT}".')
+    payload = parse_database_import_bytes(await file.read())
+    inspection = inspect_database_import_payload(payload)
+    backup_path = ""
+    if create_backup:
+        backup_path = str(save_database_backup(session))
+    result = apply_database_import_payload(session, payload)
+    session.commit()
+    return {
+        "ok": True,
+        "inspection": inspection,
+        "imported": result,
+        "backup_path": backup_path,
+    }
 
 
 @app.get("/api/leases/{lease_id}/cadence")

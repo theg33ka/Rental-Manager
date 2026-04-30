@@ -390,6 +390,30 @@
           <button id="telegramWebhookInfoBtn" type="button">Проверить webhook</button>
           <button id="importBaselineBtn" type="button">Импортировать данные из старой базы</button>
         </div>
+        <section class="card stack">
+          <div class="section-title">
+            <h3>Импорт и экспорт базы</h3>
+            <span>Переезд хостинга без ритуалов. Но с защитой от случайного «ой».</span>
+          </div>
+          <div class="settings-actions">
+            <button id="databaseExportBtn" type="button" class="primary">Экспортировать базу целиком</button>
+          </div>
+          <div class="form-grid compact">
+            <label class="wide">Файл экспорта
+              <input id="databaseImportFile" type="file" accept=".json,application/json" />
+            </label>
+            <label class="check wide"><input id="databaseImportCreateBackup" type="checkbox" checked /> Перед импортом сохранить резервную копию текущей базы</label>
+            <label class="check wide"><input id="databaseImportConfirmReplace" type="checkbox" /> Я понимаю, что импорт полностью заменит текущую базу</label>
+            <label>Подтверждение
+              <input id="databaseImportConfirmationText" placeholder='Введи: ИМПОРТ' />
+            </label>
+            <div class="settings-actions wide">
+              <button id="databaseImportInspectBtn" type="button">Проверить файл</button>
+              <button id="databaseImportApplyBtn" type="button" class="danger">Импортировать и заменить базу</button>
+            </div>
+          </div>
+          <div id="databaseImportStatusBox" class="card muted-box"></div>
+        </section>
         <div id="telegramStatusBox" class="card muted-box"></div>
       </section>
     </main>
