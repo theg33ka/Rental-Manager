@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
@@ -196,6 +197,7 @@ def reminder_worker_loop() -> None:
     while True:
         try:
             with SessionLocal() as session:
+                generate_rent_charges(session)
                 run_due_reminders(session)
                 notify_available_monthly_reports(session)
                 session.commit()
@@ -3019,6 +3021,18 @@ def tenant_help_text() -> str:
     )
 
 
+def tenant_personal_data_consent_text() -> str:
+    return "\n".join(
+        [
+            "Соглашение на обработку персональных данных:",
+            "Продолжая пользоваться ботом, вы соглашаетесь на обработку ваших персональных данных по 152-ФЗ РФ.",
+            "Обрабатываются: ФИО, номер телефона, Telegram ID/username, сведения по аренде, платежам, коммунальным начислениям и отправленные вами документы/чеки.",
+            "Цель обработки: учёт аренды, проверка оплат, расчёт коммунальных платежей и связь по вопросам проживания.",
+            "Если не согласны, не отправляйте боту документы и свяжитесь с владельцем напрямую.",
+        ]
+    )
+
+
 def telegram_help_text() -> str:
     return "\n".join(
         [
@@ -3054,7 +3068,7 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
             send_telegram_text(
                 session,
                 chat_id,
-                f"Готово, привязал этот чат к квартире {linked_lease.apartment.name}.",
+                f"Готово, привязал этот чат к квартире {linked_lease.apartment.name}.\n\n{tenant_personal_data_consent_text()}",
                 tenant_keyboard(),
             )
         else:
@@ -3077,7 +3091,7 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
             send_telegram_text(
                 session,
                 chat_id,
-                f"Привет. Я привязал этот чат к квартире {linked_lease.apartment.name}. Теперь сюда можно присылать чеки PDF документом, спрашивать реквизиты и получать ответы по платежам.",
+                f"Привет. Я привязал этот чат к квартире {linked_lease.apartment.name}. Теперь сюда можно присылать чеки PDF документом, спрашивать реквизиты и получать ответы по платежам.\n\n{tenant_personal_data_consent_text()}",
                 tenant_keyboard(),
             )
             return
@@ -3610,6 +3624,7 @@ def add_rent_payment(charge_id: int, payload: dict[str, Any], session: Session =
         cutoff=allocation_cutoff_date(session),
     )
     sync_expense_fund_receipts(session, receipts)
+    generate_rent_charges(session)
     session.commit()
     session.refresh(charge)
     return serialize_rent_charge(charge, session)
@@ -3663,6 +3678,66 @@ def ensure_utility_line_target(session: Session, lease: Lease, line_id: int) -> 
     if not line or line.lease_id != lease.id:
         raise HTTPException(404, "Коммунальный счёт не найден")
     return line
+
+
+def apply_manual_debt_payload(debt: ManualDebt, lease: Lease, payload: dict[str, Any]) -> ManualDebt:
+    today_value = date.today()
+    existing = debt.id is not None
+    kind = (payload.get("kind") or (debt.kind if existing else "other")).strip()
+    if kind not in {"rent", "utility", "other"}:
+        raise HTTPException(400, "назначение долга должно быть: rent, utility или other")
+    channel = (payload.get("channel") or (debt.channel if existing else "")).strip()
+    if kind == "rent" and channel not in {"ip", "personal", "expense_fund"}:
+        raise HTTPException(400, "для арендного долга нужен канал ИП/по номеру/мне на расходы")
+
+    raw_amount = payload.get("amount")
+    amount = float(raw_amount if raw_amount not in {None, ""} else debt.amount if existing else 0)
+    if amount <= 0:
+        raise HTTPException(400, "сумма долга должна быть больше нуля")
+    raw_paid = payload.get("paid_amount")
+    paid_amount = float(raw_paid if raw_paid not in {None, ""} else debt.paid_amount if existing else 0)
+
+    period_start = debt.period_start if existing else None
+    period_end = debt.period_end if existing else None
+    if "period_start" in payload:
+        raw_start = str(payload.get("period_start") or "").strip()
+        period_start = parse_date(raw_start) if raw_start else None
+    if "period_end" in payload:
+        raw_end = str(payload.get("period_end") or "").strip()
+        period_end = parse_date(raw_end) if raw_end else None
+    if kind == "rent":
+        month = int(payload.get("target_month") or payload.get("month") or 0)
+        year = int(payload.get("target_year") or payload.get("year") or today_value.year)
+        if month:
+            period_start, period_end = month_range(year, month)
+    elif period_start and not period_end:
+        period_end = period_start
+
+    due_date = debt.due_date if existing else None
+    if "due_date" in payload:
+        raw_due = str(payload.get("due_date") or "").strip()
+        due_date = parse_date(raw_due) if raw_due else None
+    if due_date is None:
+        due_date = period_end or period_start or today_value
+
+    debt.lease_id = lease.id
+    debt.apartment_id = lease.apartment_id
+    debt.kind = kind
+    debt.channel = channel if kind == "rent" else ""
+    debt.title = (payload.get("title") if "title" in payload else debt.title) or manual_debt_kind_label(kind)
+    debt.title = debt.title.strip()
+    debt.period_start = period_start
+    debt.period_end = period_end
+    debt.due_date = due_date
+    debt.amount = money(amount)
+    debt.paid_amount = money(paid_amount)
+    if "notes" in payload:
+        debt.notes = (payload.get("notes") or "").strip()
+    elif not existing:
+        debt.notes = ""
+    debt.active = True
+    update_manual_debt_status(debt)
+    return debt
 
 
 @app.post("/api/payment-receipts/manual")
@@ -3771,6 +3846,7 @@ def create_manual_payment(payload: dict[str, Any], session: Session = Depends(ge
     else:
         raise HTTPException(400, "тип ручного платежа должен быть rent или utility")
 
+    generate_rent_charges(session)
     session.commit()
     return {
         "ok": True,
@@ -3779,46 +3855,39 @@ def create_manual_payment(payload: dict[str, Any], session: Session = Depends(ge
     }
 
 
+@app.get("/api/leases/{lease_id}/manual-debts")
+def list_manual_debts_for_lease(lease_id: int, session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    lease = session.get(Lease, lease_id)
+    if not lease:
+        raise HTTPException(404, "аренда не найдена")
+    debts = session.scalars(
+        select(ManualDebt)
+        .where(ManualDebt.lease_id == lease.id, ManualDebt.active.is_(True))
+        .order_by(ManualDebt.due_date.desc(), ManualDebt.created_at.desc(), ManualDebt.id.desc())
+    ).all()
+    return [serialize_manual_debt(debt, session) for debt in debts]
+
+
 @app.post("/api/manual-debts")
 def create_manual_debt(payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
     lease = session.get(Lease, int(payload.get("lease_id") or 0))
     if not lease:
         raise HTTPException(404, "аренда не найдена")
-    kind = (payload.get("kind") or "other").strip()
-    if kind not in {"rent", "utility", "other"}:
-        raise HTTPException(400, "назначение долга должно быть: rent, utility или other")
-    channel = (payload.get("channel") or "").strip()
-    if kind == "rent" and channel not in {"ip", "personal", "expense_fund"}:
-        raise HTTPException(400, "для арендного долга нужен канал ИП/по номеру/мне на расходы")
-    amount = float(payload.get("amount") or 0)
-    if amount <= 0:
-        raise HTTPException(400, "сумма долга должна быть больше нуля")
-
-    today_value = date.today()
-    period_start = parse_date(payload.get("period_start"), today_value) if payload.get("period_start") else None
-    period_end = parse_date(payload.get("period_end"), period_start or today_value) if payload.get("period_end") else period_start
-    if kind == "rent":
-        month = int(payload.get("target_month") or payload.get("month") or 0)
-        year = int(payload.get("target_year") or payload.get("year") or today_value.year)
-        if month:
-            period_start, period_end = month_range(year, month)
-    due_date = parse_date(payload.get("due_date"), period_end or period_start or today_value) if payload.get("due_date") else (period_end or period_start or today_value)
-    debt = ManualDebt(
-        lease_id=lease.id,
-        apartment_id=lease.apartment_id,
-        kind=kind,
-        channel=channel if kind == "rent" else "",
-        title=(payload.get("title") or manual_debt_kind_label(kind)).strip(),
-        period_start=period_start,
-        period_end=period_end,
-        due_date=due_date,
-        amount=money(amount),
-        paid_amount=money(float(payload.get("paid_amount") or 0)),
-        notes=(payload.get("notes") or "").strip(),
-        active=True,
-    )
-    update_manual_debt_status(debt)
+    debt = apply_manual_debt_payload(ManualDebt(), lease, payload)
     session.add(debt)
+    session.commit()
+    return serialize_manual_debt(debt, session)
+
+
+@app.patch("/api/manual-debts/{debt_id}")
+def update_manual_debt(debt_id: int, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
+    debt = session.get(ManualDebt, debt_id)
+    if not debt or not debt.active:
+        raise HTTPException(404, "ручной долг не найден")
+    lease = session.get(Lease, int(payload.get("lease_id") or debt.lease_id))
+    if not lease:
+        raise HTTPException(404, "аренда не найдена")
+    apply_manual_debt_payload(debt, lease, payload)
     session.commit()
     return serialize_manual_debt(debt, session)
 
@@ -3918,6 +3987,7 @@ def update_payment_receipt(receipt_id: int, payload: dict[str, Any], session: Se
         affected_ids = {item for item in [old_lease_id, receipt.lease_id] if item}
         for lease_id in affected_ids:
             recalculate_lease_balances(session, int(lease_id))
+    generate_rent_charges(session)
     session.commit()
     return serialize_payment_receipt(receipt, session)
 
@@ -3936,6 +4006,7 @@ def delete_payment_receipt(receipt_id: int, session: Session = Depends(get_sessi
     session.flush()
     if lease_id and status == "accepted":
         recalculate_lease_balances(session, lease_id)
+    generate_rent_charges(session)
     session.commit()
     return {"ok": True}
 
@@ -4015,6 +4086,7 @@ def moderate_payment_receipt(receipt_id: int, payload: dict[str, Any], session: 
     else:
         raise HTTPException(400, "неизвестное действие модерации")
     receipt.notes = "; ".join(part for part in [receipt.notes, moderation_note] if part)
+    generate_rent_charges(session)
     session.commit()
     return serialize_payment_receipt(receipt, session)
 
@@ -4494,8 +4566,8 @@ def finalize_workbook(wb: Workbook) -> None:
         for row in ws.iter_rows():
             for cell in row:
                 cell.alignment = Alignment(wrap_text=True, vertical="top")
-        for column in ws.columns:
-            letter = column[0].column_letter
+        for column_index, column in enumerate(ws.columns, start=1):
+            letter = get_column_letter(column_index)
             max_length = 0
             for cell in column:
                 value = "" if cell.value is None else str(cell.value)

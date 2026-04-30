@@ -146,6 +146,8 @@ def _parse_transfer_type(flat: str, source_bank: str) -> str:
     value = _group(flat, r"Перевод\s+(По номеру телефона|Юридическому лицу)")
     if value:
         return value
+    if source_bank == "ozon_bank" and "Телефон получателя" in flat:
+        return "По номеру телефона"
     if "ОПЛАТА ПО РЕКВИЗИТАМ" in flat.upper():
         return "По реквизитам"
     if source_bank == "sberbank" and "Перевод клиенту СберБанка" in flat:
@@ -171,6 +173,7 @@ def _is_success(status: str, source_bank: str, text: str) -> bool:
 
 def _parse_payer_name(flat: str) -> str:
     patterns = [
+        r"Отправитель\s+(.+?)\s+(?:ID операции|Сообщение|Cooбщение|По вопросам)",
         r"Плательщик\s+(.+?)\s+(?:Банк-|Способ оплаты|ОПЛАТА ПО РЕКВИЗИТАМ)",
         r"ФИО отправителя\s+(.+?)\s+Сч[её]т отправителя",
         r"Комиссия\s+Без комиссии\s+(.+?)Отправитель",
@@ -194,6 +197,7 @@ def _parse_recipient_name(flat: str, source_bank: str) -> str:
     else:
         patterns = [
             r"Сч[её]т получателя\s+\d+\s+(?<!-)Получатель\s+(.+?)\s+Назначение платежа",
+            r"(?<!-)Получатель\s+(.+?)\s+Телефон получателя",
             r"(?<!-)Получатель\s+(.+?)\s+Назначение платежа",
             r"(?<!-)Получатель\s+(.+?)\s+Назначение перевода",
             r"(?<!-)Получатель\s+(.+?)\s+Банк получателя",
@@ -223,7 +227,7 @@ def _parse_recipient_phone(flat: str) -> str:
 def _parse_recipient_bank(flat: str) -> str:
     patterns = [
         r"Банк-\s*получатель\s+(.+?)\s+БИК\s+\d{9}",
-        r"Банк получателя\s+(.+?)\s+(?:Сч[её]т получателя|Счет получателя|Идентификатор операции|Служба поддержки|Сч[её]т списания)",
+        r"Банк получателя\s+(.+?)\s+(?:Отправитель|Сч[её]т получателя|Счет получателя|Идентификатор операции|Служба поддержки|Сч[её]т списания)",
     ]
     for pattern in patterns:
         value = _group(flat, pattern)
@@ -241,6 +245,7 @@ def _parse_recipient_account(flat: str) -> str:
 
 def _parse_purpose(flat: str) -> str:
     patterns = [
+        r"(?:Сообщение|Cooбщение)\s+(.+?)\s+По вопросам",
         r"Назначение платежа\s+(.+?)\s+(?:По вопросам зачисления|Идентификатор платежа)",
         r"Назначение платежа\s+(.+)$",
         r"Назначение перевода\s+(.+?)\s+Служба поддержки",
@@ -257,6 +262,7 @@ def _parse_receipt_number(flat: str) -> str:
     return (
         _group(flat, r"Квитанция\s+№\s*([0-9-]+)")
         or _group(flat, r"Номер документа\s+([0-9-]+)")
+        or _group(flat, r"ID операции\s+([A-ZА-Я0-9-]+)")
         or ""
     )
 

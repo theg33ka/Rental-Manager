@@ -151,9 +151,17 @@ def generate_rent_charges(session: Session, until: date | None = None) -> int:
                 )
                 created += 1
             else:
-                if money(exists.ip_due) <= 0 and money(lease.ip_amount) > 0:
+                can_sync_future_amounts = (
+                    exists.due_date >= date.today()
+                    and money(float(exists.ip_paid or 0)) <= 0.009
+                    and money(float(exists.personal_paid or 0)) <= 0.009
+                )
+                if can_sync_future_amounts:
                     exists.ip_due = money(lease.ip_amount)
-                if money(exists.personal_due) <= 0 and money(lease.personal_amount) > 0:
+                    exists.personal_due = money(lease.personal_amount)
+                elif money(exists.ip_due) <= 0 and money(lease.ip_amount) > 0:
+                    exists.ip_due = money(lease.ip_amount)
+                if not can_sync_future_amounts and money(exists.personal_due) <= 0 and money(lease.personal_amount) > 0:
                     exists.personal_due = money(lease.personal_amount)
             due = next_due
     session.flush()

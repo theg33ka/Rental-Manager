@@ -151,11 +151,37 @@ function setValueOptions(select, values, getLabel, placeholder = "Не выбр�
 }
 
 function allApartments() {
-  return state.bootstrap.objects.flatMap((object) => object.apartments.map((apartment) => ({ ...apartment, object_name: object.name })));
+  return state.bootstrap.objects
+    .flatMap((object) => object.apartments.map((apartment) => ({ ...apartment, object_name: object.name })))
+    .sort(compareApartmentRefs);
 }
 
 function activeApartments() {
   return allApartments().filter((apartment) => apartment.active);
+}
+
+function objectSortRank(name = "") {
+  const normalized = String(name).toLowerCase().replaceAll("ё", "е");
+  if (normalized.includes("бел") || normalized.includes("бд")) return 1;
+  if (normalized.includes("чер") || normalized.includes("чд")) return 2;
+  if (normalized.includes("бан")) return 3;
+  return 20;
+}
+
+function apartmentSortNumber(name = "") {
+  const match = String(name).match(/\d+/);
+  return match ? Number(match[0]) : 999;
+}
+
+function compareApartmentRefs(left, right) {
+  const leftObject = left.object || left.object_name || "";
+  const rightObject = right.object || right.object_name || "";
+  const leftApartment = left.apartment || left.name || "";
+  const rightApartment = right.apartment || right.name || "";
+  return objectSortRank(leftObject) - objectSortRank(rightObject)
+    || apartmentSortNumber(leftApartment) - apartmentSortNumber(rightApartment)
+    || String(leftObject).localeCompare(String(rightObject), "ru")
+    || String(leftApartment).localeCompare(String(rightApartment), "ru");
 }
 
 function utilityReadingDates(serviceId) {
@@ -354,7 +380,7 @@ function hydrateForms() {
   const services = state.bootstrap.services;
   const activeLeases = [...state.bootstrap.leases]
     .filter((lease) => lease.active && !lease.ignored)
-    .sort((left, right) => `${left.object} ${left.apartment} ${left.tenant}`.localeCompare(`${right.object} ${right.apartment} ${right.tenant}`, "ru"));
+    .sort((left, right) => compareApartmentRefs(left, right) || String(left.tenant).localeCompare(String(right.tenant), "ru"));
   qsa('select[name="apartment_id"]').forEach((select) => {
     if (select.closest("#onboardForm")) {
       setOptions(select, vacantApartments, (a) => `${a.object_name}: ${a.name}`);
@@ -910,7 +936,7 @@ async function submitManualAllocation(event) {
       method: "POST",
       body: JSON.stringify(payload),
     });
-    toast("Р СѓС‡РЅРѕР№ РґРѕР»Рі Р·Р°РєСЂС‹С‚");
+    toast("Ручной долг закрыт");
     closeManualAllocation();
     await loadAll();
     return;
@@ -924,15 +950,23 @@ async function submitManualAllocation(event) {
   await loadAll();
 }
 
-function openManualDebt(leaseId) {
+async function openManualDebt(leaseId) {
   const lease = state.bootstrap.leases.find((item) => item.id === leaseId);
   if (!lease) return;
   state.manualDebt = {
     leaseId,
+    debts: [],
+    editingDebtId: null,
     kind: "rent",
     targetMonth: new Date().getMonth() + 1,
     targetYear: currentYear(),
   };
+  renderManualDebtModal();
+  try {
+    state.manualDebt.debts = await api(`/api/leases/${leaseId}/manual-debts`);
+  } catch (error) {
+    toast(error.message);
+  }
   renderManualDebtModal();
 }
 
@@ -945,6 +979,31 @@ function updateManualDebtKind(value) {
   if (!state.manualDebt) return;
   state.manualDebt.kind = value;
   renderManualDebtModal();
+}
+
+function editManualDebt(debtId) {
+  if (!state.manualDebt) return;
+  const debt = (state.manualDebt.debts || []).find((item) => item.id === debtId);
+  if (!debt) return;
+  state.manualDebt.editingDebtId = debtId;
+  state.manualDebt.kind = debt.kind || "other";
+  renderManualDebtModal();
+}
+
+function resetManualDebtForm() {
+  if (!state.manualDebt) return;
+  state.manualDebt.editingDebtId = null;
+  state.manualDebt.kind = "rent";
+  renderManualDebtModal();
+}
+
+async function deleteManualDebt(debtId) {
+  if (!state.manualDebt || !confirm("Удалить этот ручной долг?")) return;
+  const leaseId = state.manualDebt.leaseId;
+  await api(`/api/manual-debts/${debtId}`, { method: "DELETE" });
+  toast("Долг удалён");
+  await loadAll();
+  await openManualDebt(leaseId);
 }
 
 function renderManualDebtModal() {
@@ -961,15 +1020,36 @@ function renderManualDebtModal() {
     return;
   }
   const kind = state.manualDebt.kind || "rent";
+  const editing = (state.manualDebt.debts || []).find((item) => item.id === state.manualDebt.editingDebtId) || null;
+  const selectedMonth = editing?.period_start ? Number(editing.period_start.slice(5, 7)) : new Date().getMonth() + 1;
+  const selectedYear = editing?.period_start ? Number(editing.period_start.slice(0, 4)) : currentYear();
+  const selectedChannel = editing?.channel || "ip";
+  const debtRows = (state.manualDebt.debts || []).map((debt) => `
+    <tr class="${editing?.id === debt.id ? "row-selected" : ""}">
+      <td>${escapeHtml(debt.kind_label)}</td>
+      <td>${escapeHtml(debt.channel_label || "")}</td>
+      <td>${escapeHtml(debt.title || "")}<br><span class="muted">${escapeHtml(debt.period_label || formatDate(debt.due_date))}</span></td>
+      <td>${money(debt.amount)}<br><span class="muted">оплачено ${money(debt.paid_amount)}</span></td>
+      <td>${money(debt.debt)}</td>
+      <td>${statusPill(debt.status)}</td>
+      <td class="actions">
+        <button class="mini" type="button" onclick="editManualDebt(${debt.id})">Ред.</button>
+        <button class="mini danger-soft" type="button" onclick="deleteManualDebt(${debt.id})">Удалить</button>
+      </td>
+    </tr>
+  `).join("");
   root.hidden = false;
   root.innerHTML = `
     <div class="modal-card">
       <div class="section-title">
         <div>
-          <h3>Добавить долг вручную</h3>
+          <h3>Другие долги</h3>
           <span>${escapeHtml(lease.object)}, ${escapeHtml(lease.apartment)}, ${escapeHtml(lease.tenant)}</span>
         </div>
         <button class="mini" type="button" onclick="closeManualDebt()">Закрыть</button>
+      </div>
+      <div class="table-wrap">
+        ${debtRows ? table(["Тип", "Канал", "Описание", "Сумма", "Остаток", "Статус", "Действия"], debtRows) : '<p class="muted">Ручных долгов пока нет.</p>'}
       </div>
       <form id="manualDebtForm" class="form-grid compact" onsubmit="submitManualDebt(event)">
         <label>Назначение
@@ -981,37 +1061,41 @@ function renderManualDebtModal() {
         </label>
         <label ${kind === "rent" ? "" : "hidden"}>Канал
           <select name="channel">
-            <option value="ip">ИП</option>
-            <option value="personal">По номеру</option>
-            <option value="expense_fund">Мне на расходы</option>
+            <option value="ip" ${selectedChannel === "ip" ? "selected" : ""}>ИП</option>
+            <option value="personal" ${selectedChannel === "personal" ? "selected" : ""}>По номеру</option>
+            <option value="expense_fund" ${selectedChannel === "expense_fund" ? "selected" : ""}>Мне на расходы</option>
           </select>
         </label>
         <label ${kind === "rent" ? "" : "hidden"}>Месяц
-          <select name="target_month">${monthOptions(new Date().getMonth() + 1)}</select>
+          <select name="target_month">${monthOptions(selectedMonth)}</select>
         </label>
         <label ${kind === "rent" ? "" : "hidden"}>Год
-          <input type="number" min="2025" step="1" name="target_year" value="${currentYear()}" />
+          <input type="number" min="2025" step="1" name="target_year" value="${selectedYear}" />
         </label>
         <label ${kind !== "rent" ? "" : "hidden"}>Начало периода
-          <input type="date" name="period_start" />
+          <input type="date" name="period_start" value="${escapeAttr(editing?.period_start || "")}" />
         </label>
         <label ${kind !== "rent" ? "" : "hidden"}>Конец периода
-          <input type="date" name="period_end" />
+          <input type="date" name="period_end" value="${escapeAttr(editing?.period_end || "")}" />
         </label>
         <label>Название
-          <input name="title" placeholder="${kind === "utility" ? "Коммуналка" : kind === "rent" ? "Старый долг по аренде" : "Парковка, ремонт, прочее"}" />
+          <input name="title" value="${escapeAttr(editing?.title || "")}" placeholder="${kind === "utility" ? "Коммуналка" : kind === "rent" ? "Старый долг по аренде" : "Парковка, ремонт, прочее"}" />
         </label>
         <label>Срок
-          <input type="date" name="due_date" value="${today()}" />
+          <input type="date" name="due_date" value="${escapeAttr(editing?.due_date || today())}" />
         </label>
         <label>Сумма
-          <input type="number" min="0" step="0.01" name="amount" required />
+          <input type="number" min="0" step="0.01" name="amount" value="${editing ? editing.amount : ""}" required />
+        </label>
+        <label>Уже оплачено
+          <input type="number" min="0" step="0.01" name="paid_amount" value="${editing ? editing.paid_amount : 0}" />
         </label>
         <label class="wide">Комментарий
-          <textarea name="notes" rows="2"></textarea>
+          <textarea name="notes" rows="2">${escapeHtml(editing?.notes || "")}</textarea>
         </label>
         <div class="attention-card__footer-primary wide">
-          <button class="primary" type="submit">Добавить долг</button>
+          <button class="primary" type="submit">${editing ? "Сохранить долг" : "Добавить долг"}</button>
+          ${editing ? '<button type="button" onclick="resetManualDebtForm()">Новый долг</button>' : ""}
           <button type="button" onclick="closeManualDebt()">Отмена</button>
         </div>
       </form>
@@ -1025,10 +1109,16 @@ async function submitManualDebt(event) {
   const payload = formData(event.currentTarget);
   payload.lease_id = state.manualDebt.leaseId;
   payload.amount = Number(payload.amount);
-  await api("/api/manual-debts", { method: "POST", body: JSON.stringify(payload) });
-  toast("Долг добавлен");
-  closeManualDebt();
+  payload.paid_amount = Number(payload.paid_amount || 0);
+  const editingDebtId = state.manualDebt.editingDebtId;
+  await api(editingDebtId ? `/api/manual-debts/${editingDebtId}` : "/api/manual-debts", {
+    method: editingDebtId ? "PATCH" : "POST",
+    body: JSON.stringify(payload),
+  });
+  toast(editingDebtId ? "Долг обновлён" : "Долг добавлен");
+  const leaseId = state.manualDebt.leaseId;
   await loadAll();
+  await openManualDebt(leaseId);
 }
 
 function previewGroupReminder(leaseId) {
@@ -1084,7 +1174,7 @@ function tenantAttentionCard(group) {
     issueTone(group.topIssue?.kind),
     `${group.object}, ${group.apartment}<br><span class="muted">${group.tenant}</span>`,
     `<p class="attention-lead">${attentionLeadText(group)}</p><div class="attention-issue-list">${issueList}</div>${reminderBlock}`,
-    `<div class="attention-card__footer-actions"><button class="mini primary" onclick="openManualAllocation(${group.leaseId})">Зачесть вручную</button><button class="mini" onclick="openManualDebt(${group.leaseId})">Добавить долг</button><button class="mini" onclick="openPaymentHistory(${group.leaseId})">История</button>${group.primaryRent ? `<button class="mini" onclick="deferRent(${group.primaryRent.id})">Отсрочка</button>` : `<button class="mini" type="button" disabled>Отсрочка</button>`}</div>`,
+    `<div class="attention-card__footer-actions"><button class="mini primary" onclick="openManualAllocation(${group.leaseId})">Зачесть вручную</button><button class="mini" onclick="openPaymentHistory(${group.leaseId})">История</button>${group.primaryRent ? `<button class="mini" onclick="deferRent(${group.primaryRent.id})">Отсрочка</button>` : `<button class="mini" type="button" disabled>Отсрочка</button>`}</div>`,
     `<span class="pill">${group.issues.length} проблем</span>${group.topIssue ? monthMeta(group.topIssue.date) : ""}`,
   );
 }
@@ -1251,7 +1341,7 @@ function renderObjects() {
 
 function renderLeases() {
   const rows = [...state.bootstrap.leases]
-    .sort((left, right) => Number(right.active) - Number(left.active) || `${left.object} ${left.apartment}`.localeCompare(`${right.object} ${right.apartment}`, "ru"))
+    .sort((left, right) => Number(right.active) - Number(left.active) || compareApartmentRefs(left, right) || String(left.tenant).localeCompare(String(right.tenant), "ru"))
     .map((lease) => `
     <tr>
       <td>${lease.object}</td>
@@ -1265,6 +1355,7 @@ function renderLeases() {
       <td class="actions">
         ${contactButtons(lease)}
         <button class="mini" onclick="startLeaseEdit(${lease.id})">Ред.</button>
+        <button class="mini" onclick="openManualDebt(${lease.id})">Др. долги</button>
         <label class="checkbox-inline mini-checkbox"><input type="checkbox" ${lease.ignored ? "checked" : ""} onchange="toggleLeaseIgnored(${lease.id}, this.checked)" /> игнор</label>
         ${lease.active ? `<button class="mini danger-soft" onclick="moveOut(${lease.id})">Выезд</button>` : ""}
         <button class="mini danger-soft" onclick="deleteLease(${lease.id})">Удалить</button>
@@ -1276,7 +1367,7 @@ function renderLeases() {
 
 function renderApartmentRegistry() {
   const rows = allApartments()
-    .sort((left, right) => `${left.object_name} ${left.sort_order} ${left.name}`.localeCompare(`${right.object_name} ${right.sort_order} ${right.name}`, "ru"))
+    .sort(compareApartmentRefs)
     .map((apartment) => `
       <tr>
         <td>${apartment.object_name}</td>
@@ -1356,7 +1447,7 @@ async function deleteLease(leaseId) {
 }
 
 function renderRent() {
-  const rows = state.rentCharges.map((charge) => `
+  const rows = [...state.rentCharges].sort((left, right) => compareApartmentRefs(left, right) || String(left.due_date).localeCompare(String(right.due_date))).map((charge) => `
     <tr>
       <td>${formatDate(charge.due_date)}<br><span class="muted">${formatDateRange(charge.period_start, charge.period_end)}</span></td>
       <td>${charge.object}</td>
@@ -2478,11 +2569,6 @@ function bindEvents() {
   qs("#telegramWebhookBtn").addEventListener("click", connectTelegramWebhook);
   qs("#telegramWebhookInfoBtn").addEventListener("click", telegramWebhookInfo);
   qs("#telegramTestBtn").addEventListener("click", sendTelegramTest);
-  qs("#generateRentBtn").addEventListener("click", async () => {
-    const result = await api("/api/rent-charges/generate", { method: "POST", body: "{}" });
-    toast(`Создано начислений: ${result.created}`);
-    await loadAll();
-  });
   qs("#loadRentBtn").addEventListener("click", async () => {
     await loadRent();
     renderRent();
