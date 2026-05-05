@@ -2746,14 +2746,21 @@ async function submitQuickReadings(event) {
 }
 
 async function loadSessionState() {
-  state.auth = await api("/api/auth/status");
-  applyAccessUi();
-  if (!state.auth.authenticated) {
+  try {
+    state.auth = await api("/api/auth/status");
+    applyAccessUi();
+    if (!state.auth.authenticated) {
+      showAuthOverlay();
+      return false;
+    }
+    hideAuthOverlay();
+    return true;
+  } catch (error) {
+    state.auth = { authenticated: false, role: null };
+    applyAccessUi();
     showAuthOverlay();
-    return false;
+    throw error;
   }
-  hideAuthOverlay();
-  return true;
 }
 
 async function submitPinLogin(event) {
@@ -2911,4 +2918,7 @@ window.addEventListener("error", (event) => {
 });
 
 bindEvents();
-initApp().catch((error) => toast(error.message));
+initApp().catch((error) => {
+  showAuthOverlay();
+  toast(error.message);
+});
