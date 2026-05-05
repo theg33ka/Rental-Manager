@@ -15,7 +15,7 @@ from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import sessionmaker
 
 from rental_manager.database import Base
-from rental_manager.main import apartment_month_state, build_all_debts_breakdown, build_dashboard, create_move_out_utility_lines, expense_period_summary, owner_charge_status_label, owner_expected_ip_for_charge, process_move_out_notifications, render_message_text, rent_report
+from rental_manager.main import apartment_month_state, build_all_debts_breakdown, build_dashboard, create_move_out_utility_lines, expense_period_summary, owner_charge_status_label, owner_expected_ip_for_charge, panel_role_for_pin, process_move_out_notifications, render_message_text, rent_report
 from rental_manager.main import apply_database_import_payload, current_database_snapshot, inspect_database_import_payload, parse_database_import_bytes
 from rental_manager.models import AppSetting, Apartment, Expense, Lease, MessageLog, Meter, MeterReading, RentalObject, RentCharge, Tenant, UtilityBill, UtilityBillLine, UtilityService, Tariff
 from rental_manager.services.billing import (
@@ -92,6 +92,12 @@ class DatabaseImportExportTests(DatabaseTestCase):
     def test_parse_database_import_bytes_rejects_wrong_payload(self) -> None:
         with self.assertRaises(HTTPException):
             parse_database_import_bytes(b'{"format":"nope","version":1,"tables":{}}')
+
+    def test_panel_pin_defaults_resolve_owner_and_guest_roles(self) -> None:
+        with self.Session() as session:
+            self.assertEqual(panel_role_for_pin(session, "1298"), "owner")
+            self.assertEqual(panel_role_for_pin(session, "1212"), "guest")
+            self.assertIsNone(panel_role_for_pin(session, "0000"))
 
 
 async def read_streaming_response_bytes(response) -> bytes:
@@ -451,6 +457,96 @@ class UtilityBillingTests(DatabaseTestCase):
         self.assertEqual(line.bill.period_end, date(2026, 4, 10))
         self.assertEqual(line.note, "01.04.2026 -> 10.04.2026 (9 дн.)")
         self.assertGreater(line.total_amount, 0)
+
+    def test_move_out_utility_uses_last_issued_period_not_latest_draft(self) -> None:
+        with self.Session() as session:
+            rental_object = RentalObject(name="Draft test object", short_code="DTO")
+            apartment = Apartment(name="DTO1", sort_order=1, odn_share_percent=100, active=True, object=rental_object)
+            tenant = Tenant(full_name="Draft tenant", active=True)
+            lease = Lease(
+                apartment=apartment,
+                tenant=tenant,
+                start_date=date(2026, 4, 1),
+                end_date=date(2026, 4, 10),
+                payment_day=1,
+                ip_amount=10000,
+                personal_amount=2000,
+                active=False,
+            )
+            service = UtilityService(object=rental_object, kind="electricity", name="Draft electricity", provider_due_day=24, resident_due_days=7, active=True)
+            session.add_all([rental_object, apartment, tenant, lease, service])
+            session.flush()
+            session.add(Tariff(service_id=service.id, starts_on=date(2026, 1, 1), tiers_json=json.dumps([{"limit": None, "price": 4.18}])))
+            object_meter = Meter(service_id=service.id, object_id=rental_object.id, scope="object", name="Object", active=True)
+            apartment_meter = Meter(service_id=service.id, object_id=rental_object.id, apartment_id=apartment.id, scope="apartment", name="Apartment", active=True)
+            session.add_all([object_meter, apartment_meter])
+            session.flush()
+            session.add_all(
+                [
+                    MeterReading(meter_id=object_meter.id, reading_date=date(2026, 4, 1), value=1000),
+                    MeterReading(meter_id=object_meter.id, reading_date=date(2026, 4, 20), value=1200),
+                    MeterReading(meter_id=apartment_meter.id, reading_date=date(2026, 4, 1), value=10),
+                    MeterReading(meter_id=apartment_meter.id, reading_date=date(2026, 4, 20), value=30),
+                ]
+            )
+            session.flush()
+
+            issued_bill = UtilityBill(
+                service_id=service.id,
+                period_start=date(2026, 4, 1),
+                period_end=date(2026, 4, 5),
+                status="issued",
+                due_date=date(2026, 4, 12),
+                total_consumption=5,
+                apartment_consumption=5,
+                odn_consumption=0,
+                total_cost=100,
+                average_unit_price=4.18,
+            )
+            issued_bill.lines.append(
+                UtilityBillLine(
+                    apartment_id=apartment.id,
+                    lease_id=lease.id,
+                    personal_consumption=5,
+                    odn_consumption=0,
+                    total_amount=100,
+                    paid_amount=0,
+                    status="issued",
+                    note="01.04.2026 -> 05.04.2026 (4 d.)",
+                )
+            )
+            draft_bill = UtilityBill(
+                service_id=service.id,
+                period_start=date(2026, 4, 5),
+                period_end=date(2026, 4, 8),
+                status="draft",
+                total_consumption=3,
+                apartment_consumption=3,
+                odn_consumption=0,
+                total_cost=50,
+                average_unit_price=4.18,
+            )
+            draft_bill.lines.append(
+                UtilityBillLine(
+                    apartment_id=apartment.id,
+                    lease_id=lease.id,
+                    personal_consumption=3,
+                    odn_consumption=0,
+                    total_amount=50,
+                    paid_amount=0,
+                    status="draft",
+                    note="05.04.2026 -> 08.04.2026 (3 d.)",
+                )
+            )
+            session.add_all([issued_bill, draft_bill])
+            session.commit()
+
+            lines, warnings = create_move_out_utility_lines(session, lease)
+
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(warnings)
+        self.assertEqual(lines[0].bill.period_start, date(2026, 4, 5))
+        self.assertEqual(lines[0].bill.period_end, date(2026, 4, 10))
 
     def test_move_out_notifications_send_once_and_create_logs(self) -> None:
         with self.Session() as session:

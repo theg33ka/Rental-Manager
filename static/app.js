@@ -1,4 +1,5 @@
 const state = {
+  auth: { authenticated: false, role: null },
   bootstrap: null,
   rentCharges: [],
   utilityBills: [],
@@ -18,6 +19,21 @@ const state = {
   manualDebt: null,
   quickReadingArmedUntil: 0,
 };
+
+const ownerTabs = ["dashboard", "tenants", "rent", "meters", "utilities", "tariffs", "expenses", "reports", "messages", "automation", "settings"];
+const guestTabs = ["dashboard", "reports"];
+
+function authRole() {
+  return state.auth?.role || null;
+}
+
+function isOwner() {
+  return authRole() === "owner";
+}
+
+function isGuest() {
+  return authRole() === "guest";
+}
 
 const statusText = {
   pending: "ожидается",
@@ -94,6 +110,45 @@ function on(selector, eventName, handler) {
   node.addEventListener(eventName, handler);
 }
 
+function showAuthOverlay() {
+  document.body.classList.add("auth-locked");
+  const overlay = qs("#authOverlay");
+  if (overlay) overlay.hidden = false;
+  const input = qs("#pinCodeInput");
+  if (input) window.setTimeout(() => input.focus(), 40);
+}
+
+function hideAuthOverlay() {
+  document.body.classList.remove("auth-locked");
+  const overlay = qs("#authOverlay");
+  if (overlay) overlay.hidden = true;
+}
+
+function applyAccessUi() {
+  const role = authRole();
+  document.body.dataset.role = role || "anonymous";
+  const allowedTabs = role === "owner" ? ownerTabs : guestTabs;
+  qsa(".tab").forEach((tab) => {
+    const allowed = allowedTabs.includes(tab.dataset.tab);
+    tab.hidden = !allowed;
+    tab.disabled = !allowed;
+  });
+  const activeTab = qs(".tab.active");
+  if (!activeTab || activeTab.hidden) {
+    const dashboardTab = qs('.tab[data-tab="dashboard"]');
+    if (dashboardTab) dashboardTab.click();
+  }
+  const remindersButton = qs("#runRemindersBtn");
+  if (remindersButton) remindersButton.hidden = !isOwner();
+  const logoutButton = qs("#logoutBtn");
+  if (logoutButton) logoutButton.hidden = !role;
+  const badge = qs("#authRoleBadge");
+  if (badge) {
+    badge.textContent = role === "owner" ? "owner" : role === "guest" ? "guest" : "PIN не введён";
+    badge.className = `pill ${role === "owner" ? "ok" : role === "guest" ? "warn" : ""}`.trim();
+  }
+}
+
 async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
   const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData;
@@ -117,31 +172,16 @@ async function api(path, options = {}) {
     let message = "Ошибка запроса";
     const data = parseJson();
     message = data?.detail || rawText || message;
+    if (response.status === 401 && !path.startsWith("/api/auth/")) {
+      state.auth = { authenticated: false, role: null };
+      applyAccessUi();
+      showAuthOverlay();
+    }
     throw new Error(message);
   }
-  return parseJson();
+  const data = parseJson();
+  return data ?? rawText;
 }
-
-async function downloadFile(path, filenameFallback = "download.json") {
-  const response = await fetch(path);
-  if (!response.ok) {
-    const rawText = await response.text();
-    throw new Error(rawText || "Не удалось скачать файл");
-  }
-  const blob = await response.blob();
-  const disposition = response.headers.get("Content-Disposition") || "";
-  const matched = disposition.match(/filename="?([^"]+)"?/i);
-  const filename = matched?.[1] || filenameFallback;
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-}
-
 function toast(message) {
   const node = qs("#toast");
   node.textContent = message;
@@ -372,7 +412,14 @@ function renderTelegramStatus() {
 
 async function loadAll() {
   state.bootstrap = await api("/api/bootstrap");
+  state.auth = { authenticated: true, role: state.bootstrap.auth?.role || authRole() || "owner" };
   applySettings(state.bootstrap.settings);
+  applyAccessUi();
+  if (isGuest()) {
+    hydrateForms();
+    renderGuestView();
+    return;
+  }
   await Promise.all([loadRent(), loadUtilityBills(), loadUtilityTimeline(), loadExpenses(), loadTariffs(), loadMessageTargets(), loadSuspiciousReceipts()]);
   hydrateForms();
   renderAll();
@@ -380,7 +427,14 @@ async function loadAll() {
 
 async function refreshBootstrap() {
   state.bootstrap = await api("/api/bootstrap");
+  state.auth = { authenticated: true, role: state.bootstrap.auth?.role || authRole() || "owner" };
   applySettings(state.bootstrap.settings);
+  applyAccessUi();
+  if (isGuest()) {
+    hydrateForms();
+    renderGuestView();
+    return;
+  }
   hydrateForms();
   renderObjects();
   renderLeases();
@@ -480,6 +534,10 @@ function hydrateForms() {
 }
 
 function renderAll() {
+  if (isGuest()) {
+    renderGuestView();
+    return;
+  }
   renderDashboard();
   renderObjects();
   renderLeases();
@@ -496,6 +554,12 @@ function renderAll() {
   renderAutomation();
   renderManualAllocationModal();
   renderManualDebtModal();
+  setReportLinks();
+}
+
+function renderGuestView() {
+  renderDashboard();
+  renderObjects();
   setReportLinks();
 }
 
@@ -1267,6 +1331,27 @@ function expenseFundCard(fund) {
 
 function renderDashboard() {
   const dashboard = state.bootstrap.dashboard;
+  if (isGuest()) {
+    const summary = dashboard.summary_counts || {};
+    const metrics = [
+      ["Просрочка аренды", Number(summary.rent_overdue || 0)],
+      ["Частичная аренда", Number(summary.rent_partial || 0)],
+      ["Коммуналка просрочена", Number(summary.utility_overdue || 0)],
+      ["Коммуналка выставлена", Number(summary.utility_issued || 0)],
+      ["Долги поставщикам", Number(summary.provider_debts || 0)],
+      ["Показания устарели", Number(summary.stale_readings || 0)],
+      ["Подозрительные чеки", Number(summary.suspicious_receipts || 0)],
+      ["Отчёты открыты", (dashboard.monthly_reports || []).length],
+    ];
+    qs("#summaryGrid").innerHTML = metrics.map(([label, value]) => `<div class="metric"><strong>${value}</strong><span>${label}</span></div>`).join("");
+    renderMonthlyReportTray(dashboard.monthly_reports || []);
+    const cards = metrics
+      .filter(([, value]) => value > 0)
+      .slice(0, 6)
+      .map(([label, value]) => attentionCard("warn", label, `<p class="attention-lead">Сейчас отмечено ${value}.</p><p class="muted">Гостевой режим показывает только общую картину. Подробности и кнопки живут у owner.</p>`, "", `<span class="pill">${label}</span>`));
+    qs("#attentionList").innerHTML = cards.join("") || `<div class="card ok"><h3>Критичных задач не видно</h3><p class="muted">Гостевой режим сегодня без драматургии.</p></div>`;
+    return;
+  }
   const metrics = [
     ["Просрочка аренды", dashboard.rent_overdue.length],
     ["Частичная аренда", dashboard.rent_partial.length],
@@ -1290,7 +1375,6 @@ function renderDashboard() {
   ];
   qs("#attentionList").innerHTML = cards.join("") || `<div class="card ok"><h3>Критичных задач нет</h3><p class="muted">Редкий момент, когда приложение не ругается. Подозрительно, но приятно.</p></div>`;
 }
-
 function renderMonthlyReportTray(reports = []) {
   const tray = qs("#monthlyReportTray");
   if (!reports.length) {
@@ -1301,13 +1385,12 @@ function renderMonthlyReportTray(reports = []) {
     <div class="report-status report-${report.severity}" role="button" tabindex="0" onclick="openMonthlyReport(${report.year}, ${report.month}, '${report.kind || "full"}')">
       <div class="report-status__head">
         <strong>${report.title}</strong>
-        <button class="mini report-accept" title="Отчёт принят" onclick="acceptMonthlyReport(event, ${report.year}, ${report.month}, '${report.kind || "full"}')">✓</button>
+        ${isOwner() ? `<button class="mini report-accept" title="Отчёт принят" onclick="acceptMonthlyReport(event, ${report.year}, ${report.month}, '${report.kind || "full"}')">✓</button>` : ""}
       </div>
       <span>${monthlySeverityText(report)} · ${report.issue_count} проблем</span>
     </div>
   `).join("");
 }
-
 function monthlySeverityText(report) {
   if (report.severity === "critical") return "много проблем";
   if (report.severity === "danger") return "критично";
@@ -1380,11 +1463,10 @@ function renderObjects() {
     <article class="card">
       <h3>Заселено ${summary.occupied}/${summary.total}</h3>
       <div class="pill-row">${objects}</div>
-      <button class="mini" onclick="openTenantsTab()">Подробнее</button>
+      ${isOwner() ? '<button class="mini" onclick="openTenantsTab()">Подробнее</button>' : '<p class="muted">Гостевой режим без телепорта в управление.</p>'}
     </article>
   `;
 }
-
 function renderLeases() {
   const rows = [...state.bootstrap.leases]
     .sort((left, right) => Number(right.active) - Number(left.active) || compareApartmentRefs(left, right) || String(left.tenant).localeCompare(String(right.tenant), "ru"))
@@ -2657,6 +2739,44 @@ async function submitQuickReadings(event) {
   await loadAll();
 }
 
+async function loadSessionState() {
+  state.auth = await api("/api/auth/status");
+  applyAccessUi();
+  if (!state.auth.authenticated) {
+    showAuthOverlay();
+    return false;
+  }
+  hideAuthOverlay();
+  return true;
+}
+
+async function submitPinLogin(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const payload = formData(form);
+  state.auth = await api("/api/auth/pin", { method: "POST", body: JSON.stringify(payload) });
+  applyAccessUi();
+  hideAuthOverlay();
+  form.reset();
+  const remember = qs("#rememberDeviceInput");
+  if (remember) remember.checked = true;
+  await loadAll();
+}
+
+async function logoutPanel() {
+  await api("/api/auth/logout", { method: "POST", body: "{}" });
+  state.auth = { authenticated: false, role: null };
+  state.bootstrap = null;
+  applyAccessUi();
+  showAuthOverlay();
+}
+
+async function initApp() {
+  const authenticated = await loadSessionState();
+  if (!authenticated) return;
+  await loadAll();
+}
+
 function bindEvents() {
   qsa(".tab").forEach((tab) => {
     tab.addEventListener("click", () => {
@@ -2668,6 +2788,8 @@ function bindEvents() {
   });
 
   on("#refreshBtn", "click", loadAll);
+  on("#pinLoginForm", "submit", submitPinLogin);
+  on("#logoutBtn", "click", logoutPanel);
   on("#runRemindersBtn", "click", runRemindersNow);
   on("#importBaselineBtn", "click", importBaseline);
   on("#databaseExportBtn", "click", exportDatabase);
@@ -2755,12 +2877,17 @@ function bindEvents() {
 
   on("#settingsForm", "submit", async (event) => {
     event.preventDefault();
-    const data = formData(event.currentTarget);
+    const form = event.currentTarget;
+    const data = formData(form);
     const settings = await api("/api/settings", { method: "POST", body: JSON.stringify(data) });
     applySettings(settings);
+    form.querySelectorAll('input[type="password"]').forEach((input) => {
+      if (["panel_owner_pin_code", "panel_guest_pin_code", "telegram_bot_token", "telegram_webhook_secret"].includes(input.name)) {
+        input.value = "";
+      }
+    });
     toast("Настройки сохранены");
   });
-
   on("#paletteSelect", "change", (event) => {
     applySettings({ ...state.settings, color_palette: event.currentTarget.value });
   });
@@ -2768,7 +2895,6 @@ function bindEvents() {
   ["reportStart", "reportEnd"].forEach((id) => on(`#${id}`, "change", setReportLinks));
   renderDatabaseImportInspection();
 }
-
 window.addEventListener("unhandledrejection", (event) => {
   const message = event.reason?.message || String(event.reason || "Ошибка");
   toast(message);
@@ -2779,4 +2905,4 @@ window.addEventListener("error", (event) => {
 });
 
 bindEvents();
-loadAll().catch((error) => toast(error.message));
+initApp().catch((error) => toast(error.message));

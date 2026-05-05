@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import secrets
 from datetime import date, datetime, time, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
@@ -11,8 +12,8 @@ import time as time_module
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -127,6 +128,8 @@ DEFAULT_SETTINGS = {
 SECRET_SETTINGS = {
     "telegram_bot_token": "",
     "telegram_webhook_secret": "",
+    "panel_owner_pin_code": "1298",
+    "panel_guest_pin_code": "1212",
 }
 ALL_SETTINGS = {**DEFAULT_SETTINGS, **SECRET_SETTINGS}
 INTERNAL_SETTINGS = {
@@ -137,6 +140,7 @@ INTERNAL_SETTINGS = {
     "notified_monthly_reports": "[]",
     "owner_due_digest_dates": "[]",
     "processed_move_out_notifications": "[]",
+    "panel_auth_sessions": "{}",
 }
 BOOLEAN_SETTINGS = {"notifications_enabled"}
 VALID_REMINDER_CADENCES = {"twice_daily", "daily_evening", "every_two_days", "never"}
@@ -163,6 +167,9 @@ DEFAULT_FALLBACK_KEYS = {
 }
 
 REPORT_START_MONTH = date(2026, 1, 1)
+PANEL_AUTH_COOKIE = "rental_manager_panel_session"
+PANEL_AUTH_MAX_AGE_SECONDS = 60 * 60 * 24 * 180
+PANEL_ALLOWED_GUEST_TAB_PATHS = {"/api/bootstrap"}
 MONTH_NAMES = [
     "январь",
     "февраль",
@@ -225,6 +232,43 @@ def index() -> FileResponse:
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+def is_public_path(path: str) -> bool:
+    return path in {
+        "/",
+        "/healthz",
+        "/api/auth/status",
+        "/api/auth/pin",
+        "/api/auth/logout",
+        "/api/integrations/telegram/webhook",
+    } or path.startswith("/static/")
+
+
+def guest_api_allowed(method: str, path: str) -> bool:
+    normalized_method = method.upper()
+    if normalized_method not in {"GET", "HEAD"}:
+        return False
+    if path in PANEL_ALLOWED_GUEST_TAB_PATHS:
+        return True
+    return path.startswith("/api/reports/")
+
+
+@app.middleware("http")
+async def panel_auth_middleware(request: Request, call_next):
+    path = request.url.path
+    if is_public_path(path):
+        return await call_next(request)
+    if not path.startswith("/api/"):
+        return await call_next(request)
+    with SessionLocal() as auth_session:
+        role = panel_role_from_request(request, auth_session)
+    request.state.panel_role = role
+    if not role:
+        return JSONResponse(status_code=401, content={"detail": "Введите PIN-код для доступа в пульт."})
+    if role != "owner" and not guest_api_allowed(request.method, path):
+        return JSONResponse(status_code=403, content={"detail": "Гостевой PIN-код даёт только обзор и скачивание отчётов."})
+    return await call_next(request)
 
 
 def current_month_range() -> tuple[date, date]:
@@ -358,8 +402,9 @@ def get_settings(session: Session) -> dict[str, str | bool]:
     return settings
 
 
-def save_settings(session: Session, payload: dict[str, Any]) -> dict[str, str | bool]:
+def save_settings(session: Session, payload: dict[str, Any], preserve_panel_token: str = "") -> dict[str, str | bool]:
     allowed = set(ALL_SETTINGS)
+    pin_changed = False
     for key, value in payload.items():
         if key not in allowed:
             continue
@@ -375,8 +420,116 @@ def save_settings(session: Session, payload: dict[str, Any]) -> dict[str, str | 
             setting.value = date.today().isoformat()
         else:
             setting.value = str(value)
+        if key in {"panel_owner_pin_code", "panel_guest_pin_code"}:
+            pin_changed = True
+    if pin_changed:
+        sessions = panel_auth_sessions(session)
+        preserved = {preserve_panel_token: sessions[preserve_panel_token]} if preserve_panel_token and preserve_panel_token in sessions else {}
+        set_internal_json(session, "panel_auth_sessions", preserved)
     session.commit()
     return get_settings(session)
+
+
+def public_settings(session: Session) -> dict[str, str | bool]:
+    settings = get_settings(session)
+    return {
+        "color_palette": settings.get("color_palette", DEFAULT_SETTINGS["color_palette"]),
+    }
+
+
+def panel_auth_sessions(session: Session) -> dict[str, dict[str, Any]]:
+    raw = get_internal_json(session, "panel_auth_sessions", {})
+    if not isinstance(raw, dict):
+        return {}
+    sessions: dict[str, dict[str, Any]] = {}
+    for token, payload in raw.items():
+        if not isinstance(token, str) or not token or not isinstance(payload, dict):
+            continue
+        role = str(payload.get("role") or "").strip().lower()
+        if role not in {"owner", "guest"}:
+            continue
+        sessions[token] = {
+            "role": role,
+            "created_at": str(payload.get("created_at") or ""),
+            "last_seen_at": str(payload.get("last_seen_at") or ""),
+            "user_agent": str(payload.get("user_agent") or "")[:240],
+        }
+    return sessions
+
+
+def save_panel_auth_sessions(session: Session, values: dict[str, dict[str, Any]]) -> None:
+    set_internal_json(session, "panel_auth_sessions", values)
+
+
+def panel_session_record(session: Session, token: str) -> dict[str, Any] | None:
+    if not token:
+        return None
+    return panel_auth_sessions(session).get(token)
+
+
+def panel_role_from_request(request: Request, session: Session) -> str | None:
+    token = str(request.cookies.get(PANEL_AUTH_COOKIE) or "").strip()
+    if not token:
+        return None
+    record = panel_session_record(session, token)
+    if not record:
+        return None
+    sessions = panel_auth_sessions(session)
+    record["last_seen_at"] = utc_now().isoformat()
+    sessions[token] = record
+    save_panel_auth_sessions(session, sessions)
+    session.commit()
+    return str(record.get("role") or "").strip().lower() or None
+
+
+def issue_panel_session(
+    session: Session,
+    role: str,
+    user_agent: str = "",
+) -> str:
+    token = secrets.token_urlsafe(24)
+    timestamp = utc_now().isoformat()
+    sessions = panel_auth_sessions(session)
+    sessions[token] = {
+        "role": role,
+        "created_at": timestamp,
+        "last_seen_at": timestamp,
+        "user_agent": user_agent[:240],
+    }
+    if len(sessions) > 128:
+        tokens_by_age = sorted(
+            sessions.items(),
+            key=lambda item: (
+                str(item[1].get("last_seen_at") or item[1].get("created_at") or ""),
+                item[0],
+            ),
+        )
+        for stale_token, _ in tokens_by_age[:-128]:
+            sessions.pop(stale_token, None)
+    save_panel_auth_sessions(session, sessions)
+    session.commit()
+    return token
+
+
+def revoke_panel_session(session: Session, token: str) -> None:
+    if not token:
+        return
+    sessions = panel_auth_sessions(session)
+    if token in sessions:
+        sessions.pop(token, None)
+        save_panel_auth_sessions(session, sessions)
+        session.commit()
+
+
+def panel_role_for_pin(session: Session, pin_code: str) -> str | None:
+    pin_value = str(pin_code or "").strip()
+    if not pin_value:
+        return None
+    if pin_value == get_setting_value(session, "panel_owner_pin_code"):
+        return "owner"
+    if pin_value == get_setting_value(session, "panel_guest_pin_code"):
+        return "guest"
+    return None
 
 
 DB_EXPORT_FORMAT = "rental-manager-db-export"
@@ -1438,18 +1591,82 @@ def build_object_summary(session: Session) -> dict[str, Any]:
     }
 
 
+@app.get("/api/auth/status")
+def auth_status(request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
+    role = panel_role_from_request(request, session)
+    return {
+        "authenticated": bool(role),
+        "role": role,
+    }
+
+
+@app.post("/api/auth/pin")
+def auth_with_pin(
+    payload: dict[str, Any],
+    request: Request,
+    response: Response,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    role = panel_role_for_pin(session, str(payload.get("pin_code") or ""))
+    if not role:
+        raise HTTPException(401, "Неверный PIN-код.")
+    token = issue_panel_session(session, role, request.headers.get("user-agent", ""))
+    remember_device = payload.get("remember_device", True)
+    max_age = PANEL_AUTH_MAX_AGE_SECONDS if setting_bool_value(remember_device) else None
+    response.set_cookie(
+        PANEL_AUTH_COOKIE,
+        token,
+        httponly=True,
+        samesite="lax",
+        max_age=max_age,
+        expires=max_age,
+        secure=False,
+        path="/",
+    )
+    return {
+        "authenticated": True,
+        "role": role,
+    }
+
+
+@app.post("/api/auth/logout")
+def logout_panel(request: Request, response: Response, session: Session = Depends(get_session)) -> dict[str, bool]:
+    token = str(request.cookies.get(PANEL_AUTH_COOKIE) or "")
+    revoke_panel_session(session, token)
+    response.delete_cookie(PANEL_AUTH_COOKIE, path="/")
+    return {"ok": True}
+
+
 @app.get("/api/bootstrap")
-def bootstrap(session: Session = Depends(get_session)) -> dict[str, Any]:
+def bootstrap(request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
     generate_rent_charges(session)
     session.commit()
+    role = getattr(request.state, "panel_role", None) or panel_role_from_request(request, session)
+    settings_payload = get_settings(session) if role == "owner" else public_settings(session)
+    dashboard_payload = build_dashboard(session)
+    if role != "owner":
+        dashboard_payload = {
+            "object_summary": dashboard_payload["object_summary"],
+            "monthly_reports": dashboard_payload["monthly_reports"],
+            "summary_counts": {
+                "rent_overdue": len(dashboard_payload["rent_overdue"]),
+                "rent_partial": len(dashboard_payload["rent_partial"]),
+                "utility_overdue": len(dashboard_payload["utility_overdue"]),
+                "utility_issued": len(dashboard_payload.get("utility_issued", [])),
+                "provider_debts": len(dashboard_payload["provider_debts"]),
+                "stale_readings": len(dashboard_payload["stale_readings"]),
+                "suspicious_receipts": len(dashboard_payload["suspicious_receipts"]),
+            },
+        }
     return {
         "today": date.today().isoformat(),
-        "objects": [serialize_object(obj) for obj in session.scalars(select(RentalObject).order_by(RentalObject.name)).all()],
-        "leases": [serialize_lease(lease, session) for lease in session.scalars(select(Lease).order_by(Lease.active.desc(), Lease.start_date.desc())).all()],
-        "meters": [serialize_meter(meter) for meter in session.scalars(select(Meter).order_by(Meter.object_id, Meter.scope, Meter.name)).all()],
-        "services": [serialize_service(service) for service in session.scalars(select(UtilityService).order_by(UtilityService.object_id, UtilityService.kind)).all()],
-        "settings": get_settings(session),
-        "dashboard": build_dashboard(session),
+        "auth": {"role": role},
+        "objects": [serialize_object(obj) for obj in session.scalars(select(RentalObject).order_by(RentalObject.name)).all()] if role == "owner" else [],
+        "leases": [serialize_lease(lease, session) for lease in session.scalars(select(Lease).order_by(Lease.active.desc(), Lease.start_date.desc())).all()] if role == "owner" else [],
+        "meters": [serialize_meter(meter) for meter in session.scalars(select(Meter).order_by(Meter.object_id, Meter.scope, Meter.name)).all()] if role == "owner" else [],
+        "services": [serialize_service(service) for service in session.scalars(select(UtilityService).order_by(UtilityService.object_id, UtilityService.kind)).all()] if role == "owner" else [],
+        "settings": settings_payload,
+        "dashboard": dashboard_payload,
     }
 
 
@@ -1459,8 +1676,9 @@ def api_get_settings(session: Session = Depends(get_session)) -> dict[str, str |
 
 
 @app.post("/api/settings")
-def api_save_settings(payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, str | bool]:
-    return save_settings(session, payload)
+def api_save_settings(request: Request, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, str | bool]:
+    current_token = str(request.cookies.get(PANEL_AUTH_COOKIE) or "")
+    return save_settings(session, payload, preserve_panel_token=current_token)
 
 
 @app.get("/api/admin/database-export")
@@ -2555,6 +2773,8 @@ def last_lease_service_period_end(session: Session, lease: Lease, service_id: in
         .where(
             UtilityBill.service_id == service_id,
             UtilityBillLine.lease_id == lease.id,
+            UtilityBill.status != "draft",
+            UtilityBillLine.status != "draft",
         )
         .order_by(UtilityBill.period_end.desc())
     ).all()
