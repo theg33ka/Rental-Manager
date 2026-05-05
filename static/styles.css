@@ -308,7 +308,7 @@ main {
 body.auth-locked main,
 body.auth-locked nav,
 body.auth-locked .topbar {
-  filter: blur(4px);
+  filter: blur(6px) saturate(0.92);
   pointer-events: none;
   user-select: none;
 }
@@ -1066,7 +1066,10 @@ td.actions .button {
   display: none;
   place-items: center;
   padding: 24px;
-  background: rgba(6, 10, 18, 0.72);
+  background:
+    radial-gradient(circle at top, rgba(37, 109, 90, 0.26), transparent 34%),
+    radial-gradient(circle at bottom right, rgba(181, 77, 47, 0.18), transparent 28%),
+    rgba(6, 10, 18, 0.78);
 }
 
 .auth-overlay:not([hidden]) {
@@ -1074,14 +1077,103 @@ td.actions .button {
 }
 
 .auth-card {
-  width: min(420px, calc(100vw - 32px));
-  padding: 24px;
+  width: min(520px, calc(100vw - 32px));
+  padding: 28px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
   box-shadow: var(--shadow);
   display: grid;
-  gap: 14px;
+  gap: 18px;
+}
+
+.auth-card--login {
+  position: relative;
+  overflow: hidden;
+}
+
+.auth-card--login::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 4px;
+  background: linear-gradient(90deg, var(--primary), var(--accent));
+}
+
+.auth-card__hero {
+  display: grid;
+  gap: 8px;
+}
+
+.auth-card__hero h2,
+.auth-card__hero p {
+  margin: 0;
+}
+
+.auth-role-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.auth-role {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--pill-bg);
+}
+
+.auth-role strong {
+  font-size: 15px;
+}
+
+.auth-role span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.auth-role--owner {
+  border-color: color-mix(in srgb, var(--primary) 42%, var(--line));
+  background: color-mix(in srgb, var(--ok-bg) 70%, var(--surface));
+}
+
+.auth-role--guest {
+  border-color: color-mix(in srgb, var(--blue) 42%, var(--line));
+  background: color-mix(in srgb, var(--surface) 78%, var(--pill-bg));
+}
+
+.auth-form {
+  gap: 12px;
+}
+
+.auth-form__label {
+  display: grid;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.auth-form__label input {
+  min-height: 56px;
+  text-align: center;
+  font-size: 28px;
+  letter-spacing: 0.18em;
+  font-variant-numeric: tabular-nums;
+}
+
+.auth-submit {
+  min-height: 48px;
+}
+
+@media (max-width: 640px) {
+  .auth-role-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .auth-form__label input {
+    font-size: 24px;
+  }
 }
 
 @media (max-width: 860px) {

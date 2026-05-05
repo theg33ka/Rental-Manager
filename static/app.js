@@ -336,6 +336,8 @@ function applySettings(settings = {}) {
     personal_recipient_name: "",
     personal_recipient_phone: "",
     personal_recipient_bank: "",
+    panel_owner_pin_code_configured: false,
+    panel_guest_pin_code_configured: false,
     telegram_bot_token_configured: false,
     telegram_webhook_secret_configured: false,
     ...settings,
@@ -347,6 +349,8 @@ function applySettings(settings = {}) {
   const ownerChat = qs("#telegramOwnerChatIdInput");
   const token = qs("#telegramBotTokenInput");
   const secret = qs("#telegramWebhookSecretInput");
+  const ownerPin = qs("#panelOwnerPinCodeInput");
+  const guestPin = qs("#panelGuestPinCodeInput");
   const notificationsEnabled = qs("#notificationsEnabledInput");
   const notificationCutoffDate = qs("#notificationCutoffDateInput");
   const automationRentDue = qs("#automationRentDueCadenceInput");
@@ -367,6 +371,8 @@ function applySettings(settings = {}) {
   if (automationUtility) automationUtility.value = state.settings.automation_utility_cadence || "daily_evening";
   if (token) token.placeholder = state.settings.telegram_bot_token_configured ? "Токен сохранён, пусто = не менять" : "Вставь bot token";
   if (secret) secret.placeholder = state.settings.telegram_webhook_secret_configured ? "Secret сохранён, пусто = не менять" : "Вставь webhook secret";
+  if (ownerPin) ownerPin.placeholder = state.settings.panel_owner_pin_code_configured ? "PIN owner сохранён, пусто = не менять" : "По умолчанию 1298";
+  if (guestPin) guestPin.placeholder = state.settings.panel_guest_pin_code_configured ? "PIN guest сохранён, пусто = не менять" : "По умолчанию 1212";
   if (ipRecipientName) ipRecipientName.value = state.settings.ip_recipient_name || "";
   if (ipRecipientAccount) ipRecipientAccount.value = state.settings.ip_recipient_account || "";
   if (ipRecipientBik) ipRecipientBik.value = state.settings.ip_recipient_bik || "";

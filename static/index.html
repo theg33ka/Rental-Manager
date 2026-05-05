@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="ru">
   <head>
     <meta charset="utf-8" />
@@ -10,28 +10,28 @@
     <header class="topbar">
       <div>
         <p class="eyebrow">Rental Manager</p>
-        <h1>РџСѓР»СЊС‚ Р°СЂРµРЅРґС‹</h1>
+        <h1>Пульт аренды</h1>
       </div>
       <div class="top-actions">
-        <span class="pill" id="authRoleBadge">PIN РЅРµ РІРІРµРґС‘РЅ</span>
-        <button id="logoutBtn" type="button" hidden>Р’С‹Р№С‚Рё</button>
-        <button class="icon-button" id="refreshBtn" title="РћР±РЅРѕРІРёС‚СЊ РґР°РЅРЅС‹Рµ">вџі</button>
-        <button id="runRemindersBtn">РџСЂРѕРіРЅР°С‚СЊ РЅР°РїРѕРјРёРЅР°РЅРёСЏ</button>
+        <span class="pill" id="authRoleBadge">PIN не введён</span>
+        <button id="logoutBtn" type="button" hidden>Выйти</button>
+        <button class="icon-button" id="refreshBtn" title="Обновить данные">⟳</button>
+        <button id="runRemindersBtn">Прогнать напоминания</button>
       </div>
     </header>
 
-    <nav class="tabs" aria-label="Р Р°Р·РґРµР»С‹">
-      <button class="tab active" data-tab="dashboard">Р”Р°С€Р±РѕСЂРґ</button>
-      <button class="tab" data-tab="tenants">Р–РёР»СЊС†С‹</button>
-      <button class="tab" data-tab="rent">РђСЂРµРЅРґР°</button>
-      <button class="tab" data-tab="meters">РЎС‡С‘С‚С‡РёРєРё</button>
-      <button class="tab" data-tab="utilities">РљРѕРјРјСѓРЅР°Р»РєР°</button>
-      <button class="tab" data-tab="tariffs">РўР°СЂРёС„С‹</button>
-      <button class="tab" data-tab="expenses">Р Р°СЃС…РѕРґС‹</button>
-      <button class="tab" data-tab="reports">РћС‚С‡С‘С‚С‹</button>
-      <button class="tab" data-tab="messages">РЎРѕРѕР±С‰РµРЅРёСЏ</button>
-      <button class="tab" data-tab="automation">РђРІС‚РѕРјР°С‚РёР·Р°С†РёСЏ</button>
-      <button class="tab" data-tab="settings">РќР°СЃС‚СЂРѕР№РєРё</button>
+    <nav class="tabs" aria-label="Разделы">
+      <button class="tab active" data-tab="dashboard">Дашборд</button>
+      <button class="tab" data-tab="tenants">Жильцы</button>
+      <button class="tab" data-tab="rent">Аренда</button>
+      <button class="tab" data-tab="meters">Счётчики</button>
+      <button class="tab" data-tab="utilities">Коммуналка</button>
+      <button class="tab" data-tab="tariffs">Тарифы</button>
+      <button class="tab" data-tab="expenses">Расходы</button>
+      <button class="tab" data-tab="reports">Отчёты</button>
+      <button class="tab" data-tab="messages">Сообщения</button>
+      <button class="tab" data-tab="automation">Автоматизация</button>
+      <button class="tab" data-tab="settings">Настройки</button>
     </nav>
 
     <main>
@@ -40,15 +40,15 @@
         <div class="monthly-report-tray" id="monthlyReportTray"></div>
         <section>
           <div class="section-title">
-            <h2>РћР±СЉРµРєС‚С‹ РєСЂР°С‚РєРѕ</h2>
-            <span>РџРѕРґСЂРѕР±РЅРѕСЃС‚Рё СѓРµС…Р°Р»Рё РІ Р¶РёР»СЊС†РѕРІ, РёРј С‚Р°Рј СЃРїРѕРєРѕР№РЅРµРµ</span>
+            <h2>Объекты кратко</h2>
+            <span>Подробности уехали в жильцов, им там спокойнее</span>
           </div>
           <div id="objectCards" class="object-summary"></div>
         </section>
         <section>
           <div class="section-title">
-            <h2>Р”Р°С€Р±РѕСЂРґ</h2>
-            <span>Р“Р»Р°РІРЅС‹Рµ РїСЂРѕР±Р»РµРјС‹ РїРѕ Р¶РёР»СЊС†Р°Рј, РєРѕРјРјСѓРЅР°Р»РєРµ Рё РЅР°РїРѕРјРёРЅР°РЅРёСЏРј. РџС‘СЃС‚СЂРѕ, РЅР°РіР»СЏРґРЅРѕ, Р±РµР· Р°СЂС…РµРѕР»РѕРіРёРё.</span>
+            <h2>Дашборд</h2>
+            <span>Главные проблемы по жильцам, коммуналке и напоминаниям. Пёстро, наглядно, без археологии.</span>
           </div>
           <div id="attentionList" class="attention-grid"></div>
         </section>
@@ -56,53 +56,53 @@
 
       <section class="panel" id="tenants">
         <div class="section-title">
-          <h2>Р—Р°СЃРµР»РµРЅРёРµ</h2>
-          <span>РџРѕР»СЏ РјРѕР¶РЅРѕ РґРѕР·Р°РїРѕР»РЅРёС‚СЊ РїРѕР·Р¶Рµ, РїРѕС‚РѕРјСѓ С‡С‚Рѕ Р¶РёР·РЅСЊ РЅРµ Р¶РґС‘С‚ С„РѕСЂРјСѓ</span>
+          <h2>Заселение</h2>
+          <span>Поля можно дозаполнить позже, потому что жизнь не ждёт форму</span>
         </div>
         <div class="section-title">
-          <button id="cancelLeaseEditBtn" class="mini" type="button" hidden>РћС‚РјРµРЅР°</button>
+          <button id="cancelLeaseEditBtn" class="mini" type="button" hidden>Отмена</button>
         </div>
         <form id="onboardForm" class="form-grid">
-          <label>РљРІР°СЂС‚РёСЂР°<select name="apartment_id" required></select></label>
-          <label>Р¤РРћ<input name="full_name" placeholder="РРІР°РЅРѕРІ РРІР°РЅ РРІР°РЅРѕРІРёС‡" /></label>
-          <label>РўРµР»РµС„РѕРЅ<input name="phone" placeholder="+7..." /></label>
+          <label>Квартира<select name="apartment_id" required></select></label>
+          <label>ФИО<input name="full_name" placeholder="Иванов Иван Иванович" /></label>
+          <label>Телефон<input name="phone" placeholder="+7..." /></label>
           <label>Telegram<input name="telegram" placeholder="@username" /></label>
           <label>WhatsApp<input name="whatsapp" placeholder="+7..." /></label>
-          <label>Р”Р°С‚Р° Р·Р°РµР·РґР°<input type="date" name="start_date" required /></label>
-          <label>Р”Р°С‚Р° РІС‹РµР·РґР°<input type="date" name="end_date" /></label>
-          <label>Р”РµРЅСЊ РѕРїР»Р°С‚С‹<input type="number" min="1" max="31" name="payment_day" placeholder="РїРѕ РґР°С‚Рµ Р·Р°РµР·РґР°" /></label>
-          <label>РџР»Р°С‚С‘Р¶ РЅР° РРџ<input type="number" min="0" step="0.01" name="ip_amount" /></label>
-          <label>Р›РёС‡РЅС‹Р№ РїРµСЂРµРІРѕРґ<input type="number" min="0" step="0.01" name="personal_amount" /></label>
-          <label>Р—Р°Р»РѕРі<input type="number" min="0" step="0.01" name="deposit_amount" /></label>
-          <label>Р“РґРµ С…СЂР°РЅРёС‚СЃСЏ Р·Р°Р»РѕРі<input name="deposit_location" /></label>
-          <label class="checkbox-inline"><input type="checkbox" name="ignored" /> РўРѕР»СЊРєРѕ РґР»СЏ РёРЅС„РѕСЂРјР°С†РёРё</label>
-          <label class="wide">РЈСЃР»РѕРІРёСЏ Р·Р°Р»РѕРіР°<textarea name="deposit_terms" rows="2"></textarea></label>
-          <label class="wide">РљРѕРјРјРµРЅС‚Р°СЂРёР№<textarea name="notes" rows="2"></textarea></label>
-          <button id="onboardSubmitBtn" class="primary wide" type="submit">Р—Р°СЃРµР»РёС‚СЊ</button>
+          <label>Дата заезда<input type="date" name="start_date" required /></label>
+          <label>Дата выезда<input type="date" name="end_date" /></label>
+          <label>День оплаты<input type="number" min="1" max="31" name="payment_day" placeholder="по дате заезда" /></label>
+          <label>Платёж на ИП<input type="number" min="0" step="0.01" name="ip_amount" /></label>
+          <label>Личный перевод<input type="number" min="0" step="0.01" name="personal_amount" /></label>
+          <label>Залог<input type="number" min="0" step="0.01" name="deposit_amount" /></label>
+          <label>Где хранится залог<input name="deposit_location" /></label>
+          <label class="checkbox-inline"><input type="checkbox" name="ignored" /> Только для информации</label>
+          <label class="wide">Условия залога<textarea name="deposit_terms" rows="2"></textarea></label>
+          <label class="wide">Комментарий<textarea name="notes" rows="2"></textarea></label>
+          <button id="onboardSubmitBtn" class="primary wide" type="submit">Заселить</button>
         </form>
 
         <div class="section-title">
-          <h2>РђРєС‚РёРІРЅС‹Рµ Р¶РёР»СЊС†С‹</h2>
-          <span>РљРЅРѕРїРєРё СЃРІСЏР·Рё РїРѕРєР° РѕС‚РєСЂС‹РІР°СЋС‚ СЃС‚Р°РЅРґР°СЂС‚РЅС‹Рµ СЃСЃС‹Р»РєРё</span>
+          <h2>Активные жильцы</h2>
+          <span>Кнопки связи пока открывают стандартные ссылки</span>
         </div>
         <div id="leaseList" class="table-wrap"></div>
 
         <div class="section-title">
-          <h2>РљРІР°СЂС‚РёСЂС‹</h2>
-          <span>РќРµР°РєС‚РёРІРЅС‹Рµ РєРІР°СЂС‚РёСЂС‹ РЅРµ Р»РµР·СѓС‚ РІ РєРѕРЅС‚СЂРѕР»СЊ, РЅР°РїРѕРјРёРЅР°РЅРёСЏ Рё РЅРѕРІС‹Рµ РЅР°С‡РёСЃР»РµРЅРёСЏ. Рђ Р·Р°С‡РµРј РёРј С‚СѓРґР°.</span>
+          <h2>Квартиры</h2>
+          <span>Неактивные квартиры не лезут в контроль, напоминания и новые начисления. А зачем им туда.</span>
         </div>
         <div id="apartmentRegistry" class="table-wrap"></div>
       </section>
 
       <section class="panel" id="rent">
         <div class="section-title">
-          <h2>РђСЂРµРЅРґР°</h2>
-          <span>Р”РІРµ С‡Р°СЃС‚Рё РїР»Р°С‚РµР¶Р° Р·Р°РєСЂС‹РІР°СЋС‚СЃСЏ РѕС‚РґРµР»СЊРЅРѕ</span>
+          <h2>Аренда</h2>
+          <span>Две части платежа закрываются отдельно</span>
         </div>
         <div class="filters">
-          <label>РЎ<input type="date" id="rentStart" /></label>
-          <label>РџРѕ<input type="date" id="rentEnd" /></label>
-          <button id="loadRentBtn">РџРѕРєР°Р·Р°С‚СЊ</button>
+          <label>С<input type="date" id="rentStart" /></label>
+          <label>По<input type="date" id="rentEnd" /></label>
+          <button id="loadRentBtn">Показать</button>
         </div>
         <div id="rentTable" class="table-wrap"></div>
         <div id="rentHistoryPanel" class="stack"></div>
@@ -110,52 +110,52 @@
 
       <section class="panel" id="meters">
         <div class="section-title">
-          <h2>РџРѕРєР°Р·Р°РЅРёСЏ</h2>
-          <span>РњРѕР¶РЅРѕ РІРІРµСЃС‚Рё Р·Р° РїСЂРѕС€Р»СѓСЋ РґР°С‚Сѓ, СЃРёСЃС‚РµРјР° РЅРµ РѕСЃСѓРґРёС‚</span>
+          <h2>Показания</h2>
+          <span>Можно ввести за прошлую дату, система не осудит</span>
         </div>
         <form id="readingForm" class="form-grid compact">
-          <label>РЎС‡С‘С‚С‡РёРє<select name="meter_id" required></select></label>
-          <label>Р”Р°С‚Р°<input type="date" name="reading_date" required /></label>
-          <label>РџРѕРєР°Р·Р°РЅРёРµ<input type="number" step="0.001" name="value" required /></label>
-          <label>РљРѕРјРјРµРЅС‚Р°СЂРёР№<input name="note" /></label>
-          <button class="primary" type="submit">РЎРѕС…СЂР°РЅРёС‚СЊ</button>
+          <label>Счётчик<select name="meter_id" required></select></label>
+          <label>Дата<input type="date" name="reading_date" required /></label>
+          <label>Показание<input type="number" step="0.001" name="value" required /></label>
+          <label>Комментарий<input name="note" /></label>
+          <button class="primary" type="submit">Сохранить</button>
         </form>
         <div id="meterList" class="table-wrap"></div>
       </section>
 
       <section class="panel" id="utilities">
         <div class="section-title">
-          <h2>РљРѕРјРјСѓРЅР°Р»РєР°</h2>
-          <span>РћР±С‰РёР№ СЃС‡С‘С‚С‡РёРє РїР»Р°С‚РёС€СЊ С‚С‹, РєРІР°СЂС‚РёСЂРЅС‹Рµ РЅСѓР¶РЅС‹ РґР»СЏ С‡РµСЃС‚РЅРѕР№ СЂР°СЃРєР»Р°РґРєРё</span>
+          <h2>Коммуналка</h2>
+          <span>Общий счётчик платишь ты, квартирные нужны для честной раскладки</span>
         </div>
         <form id="quickReadingsForm" class="quick-readings">
           <div class="section-title">
             <div>
-              <h2>Р‘С‹СЃС‚СЂР°СЏ РїРµСЂРµРґР°С‡Р° РїРѕРєР°Р·Р°РЅРёР№</h2>
-              <span>Р—Р°РїРѕР»РЅСЏР№ С‚РѕР»СЊРєРѕ С‚Рѕ, С‡С‚Рѕ СЃРЅСЏР». РћСЃС‚Р°Р»СЊРЅРѕРµ РјРѕР»С‡Р° РїСЂРѕРїСѓСЃРєР°РµС‚СЃСЏ.</span>
+              <h2>Быстрая передача показаний</h2>
+              <span>Заполняй только то, что снял. Остальное молча пропускается.</span>
             </div>
-            <label>Р”Р°С‚Р°<input type="date" id="quickReadingDate" name="reading_date" required /></label>
+            <label>Дата<input type="date" id="quickReadingDate" name="reading_date" required /></label>
           </div>
           <div id="quickReadingFields" class="quick-reading-grid"></div>
-          <button class="primary wide" id="quickReadingsSubmit" type="submit">РџРµСЂРµРґР°С‚СЊ РїРѕРєР°Р·Р°РЅРёСЏ</button>
+          <button class="primary wide" id="quickReadingsSubmit" type="submit">Передать показания</button>
         </form>
 
         <div class="utility-actions">
-          <button id="openTariffsBtn" type="button">РћС‚РєСЂС‹С‚СЊ С‚Р°СЂРёС„С‹</button>
+          <button id="openTariffsBtn" type="button">Открыть тарифы</button>
         </div>
 
           <form id="utilityCalcForm" class="form-grid compact">
-            <label>РЈСЃР»СѓРіР°<select name="service_id" id="utilityServiceSelect" required></select></label>
-            <label>РќР°С‡Р°Р»Рѕ РїРµСЂРёРѕРґР°
+            <label>Услуга<select name="service_id" id="utilityServiceSelect" required></select></label>
+            <label>Начало периода
               <select id="utilityPeriodStartSelect"></select>
               <input type="date" name="period_start" id="utilityPeriodStartInput" required />
             </label>
-            <label>РљРѕРЅРµС† РїРµСЂРёРѕРґР°
+            <label>Конец периода
               <select id="utilityPeriodEndSelect"></select>
               <input type="date" name="period_end" id="utilityPeriodEndInput" required />
             </label>
-            <label class="check"><input type="checkbox" name="allow_estimate" /> Р Р°Р·СЂРµС€РёС‚СЊ РїСЂРѕРіРЅРѕР·</label>
-            <button class="primary" type="submit">Р Р°СЃСЃС‡РёС‚Р°С‚СЊ С‡РµСЂРЅРѕРІРёРє</button>
+            <label class="check"><input type="checkbox" name="allow_estimate" /> Разрешить прогноз</label>
+            <button class="primary" type="submit">Рассчитать черновик</button>
           </form>
 
         <div id="utilityTimeline" class="stack"></div>
@@ -164,194 +164,194 @@
 
       <section class="panel" id="tariffs">
         <div class="section-title">
-          <h2>РўР°СЂРёС„С‹</h2>
-          <span>Р­Р»РµРєС‚СЂРёС‡РµСЃС‚РІРѕ РјРѕР¶РЅРѕ Р·Р°РґР°РІР°С‚СЊ СЃС‚СѓРїРµРЅСЏРјРё: 1000:4.18; 2200:4.7; 3000:7; 9</span>
+          <h2>Тарифы</h2>
+          <span>Электричество можно задавать ступенями: 1000:4.18; 2200:4.7; 3000:7; 9</span>
         </div>
         <form id="tariffForm" class="form-grid compact">
-          <label>РЈСЃР»СѓРіР°<select name="service_id" required></select></label>
-          <label>Р”РµР№СЃС‚РІСѓРµС‚ СЃ<input type="date" name="starts_on" required /></label>
-          <label>РќР°Р·РІР°РЅРёРµ<input name="name" placeholder="РўР°СЂРёС„ СЃ РёСЋР»СЏ" /></label>
-          <label class="wide">РЎС‚СѓРїРµРЅРё<input name="tiers" placeholder="1000:4.18; 2200:4.7; 3000:7; 9" required /></label>
-          <button class="primary" type="submit">Р”РѕР±Р°РІРёС‚СЊ С‚Р°СЂРёС„</button>
+          <label>Услуга<select name="service_id" required></select></label>
+          <label>Действует с<input type="date" name="starts_on" required /></label>
+          <label>Название<input name="name" placeholder="Тариф с июля" /></label>
+          <label class="wide">Ступени<input name="tiers" placeholder="1000:4.18; 2200:4.7; 3000:7; 9" required /></label>
+          <button class="primary" type="submit">Добавить тариф</button>
         </form>
         <div id="tariffCards" class="tariff-grid"></div>
       </section>
 
       <section class="panel" id="expenses">
         <div class="section-title">
-          <h2>Р Р°СЃС…РѕРґС‹</h2>
-          <span>Р›РёС‡РЅС‹Рµ РґРµРЅСЊРіРё РјРѕР¶РЅРѕ РїРѕС‚РѕРј РѕС‚РјРµС‚РёС‚СЊ РєРѕРјРїРµРЅСЃРёСЂРѕРІР°РЅРЅС‹РјРё</span>
+          <h2>Расходы</h2>
+          <span>Личные деньги можно потом отметить компенсированными</span>
         </div>
         <form id="expenseForm" class="form-grid">
-          <label>Р”Р°С‚Р°<input type="date" name="expense_date" required /></label>
-          <label>РћР±СЉРµРєС‚<select name="object_id"></select></label>
-          <label>РљРІР°СЂС‚РёСЂР°<select name="apartment_id"></select></label>
-          <label>РљР°С‚РµРіРѕСЂРёСЏ<input name="category" placeholder="СЂРµРјРѕРЅС‚, СЂРµРєР»Р°РјР°..." /></label>
-          <label>РЎСѓРјРјР°<input type="number" min="0" step="0.01" name="amount" required /></label>
-          <label>РСЃС‚РѕС‡РЅРёРє<select name="source_funds"><option value="personal">Р»РёС‡РЅС‹Рµ</option><option value="rental_budget">Р°СЂРµРЅРґРЅС‹Р№ Р±СЋРґР¶РµС‚</option><option value="other">РґСЂСѓРіРѕРµ</option></select></label>
-          <label>РЎРїРѕСЃРѕР± РѕРїР»Р°С‚С‹<input name="payment_method" /></label>
-          <label class="wide">РћРїРёСЃР°РЅРёРµ<textarea name="description" rows="2"></textarea></label>
-          <button class="primary wide" type="submit">Р”РѕР±Р°РІРёС‚СЊ СЂР°СЃС…РѕРґ</button>
+          <label>Дата<input type="date" name="expense_date" required /></label>
+          <label>Объект<select name="object_id"></select></label>
+          <label>Квартира<select name="apartment_id"></select></label>
+          <label>Категория<input name="category" placeholder="ремонт, реклама..." /></label>
+          <label>Сумма<input type="number" min="0" step="0.01" name="amount" required /></label>
+          <label>Источник<select name="source_funds"><option value="personal">личные</option><option value="rental_budget">арендный бюджет</option><option value="other">другое</option></select></label>
+          <label>Способ оплаты<input name="payment_method" /></label>
+          <label class="wide">Описание<textarea name="description" rows="2"></textarea></label>
+          <button class="primary wide" type="submit">Добавить расход</button>
         </form>
         <div id="expenseList" class="table-wrap"></div>
       </section>
 
       <section class="panel" id="reports">
         <div class="section-title">
-          <h2>Excel-РѕС‚С‡С‘С‚С‹</h2>
-          <span>РџРµСЂРёРѕРґ РІС‹Р±РёСЂР°РµС‚СЃСЏ РѕРґРёРЅ СЂР°Р· Рё РїСЂРёРјРµРЅСЏРµС‚СЃСЏ Рє РЅСѓР¶РЅРѕРјСѓ РѕС‚С‡С‘С‚Сѓ</span>
+          <h2>Excel-отчёты</h2>
+          <span>Период выбирается один раз и применяется к нужному отчёту</span>
         </div>
         <div class="report-box">
-          <label>РЎ<input type="date" id="reportStart" /></label>
-          <label>РџРѕ<input type="date" id="reportEnd" /></label>
-          <a class="button" id="rentReport" href="#">РђСЂРµРЅРґР°</a>
-          <a class="button" id="utilitiesReport" href="#">РљРѕРјРјСѓРЅР°Р»РєР°</a>
-          <a class="button" id="expensesReport" href="#">Р Р°СЃС…РѕРґС‹</a>
-          <a class="button primary" id="ownerReport" href="#">Р”Р»СЏ С…РѕР·СЏРёРЅР°</a>
-          <a class="button danger-soft" href="/api/reports/debts.xlsx">Р”РѕР»РіРё</a>
-          <a class="button" id="historyReport" href="/api/reports/history.xlsx">РСЃС‚РѕСЂРёСЏ</a>
+          <label>С<input type="date" id="reportStart" /></label>
+          <label>По<input type="date" id="reportEnd" /></label>
+          <a class="button" id="rentReport" href="#">Аренда</a>
+          <a class="button" id="utilitiesReport" href="#">Коммуналка</a>
+          <a class="button" id="expensesReport" href="#">Расходы</a>
+          <a class="button primary" id="ownerReport" href="#">Для хозяина</a>
+          <a class="button danger-soft" href="/api/reports/debts.xlsx">Долги</a>
+          <a class="button" id="historyReport" href="/api/reports/history.xlsx">История</a>
         </div>
         <div id="monthlyReportDetails" class="monthly-report-details"></div>
       </section>
 
       <section class="panel" id="messages">
         <div class="section-title">
-          <h2>РЎРѕРѕР±С‰РµРЅРёСЏ</h2>
-          <span>Р’С‹Р±РѕСЂРѕС‡РЅР°СЏ СЂСѓС‡РЅР°СЏ СЂР°СЃСЃС‹Р»РєР° С‡РµСЂРµР· Р±РѕС‚Р°. РќРёРєР°РєРѕР№ СЃР°РјРѕРґРµСЏС‚РµР»СЊРЅРѕСЃС‚Рё Р±РµР· С‚РІРѕРµРіРѕ РєР»РёРєР°.</span>
+          <h2>Сообщения</h2>
+          <span>Выборочная ручная рассылка через бота. Никакой самодеятельности без твоего клика.</span>
         </div>
         <div class="card muted-box">
-          <strong>РџР»РµР№СЃС…РѕР»РґРµСЂС‹</strong>
+          <strong>Плейсхолдеры</strong>
           <p class="muted">{tenant_name}, {apartment}, {object}, {ip_due}, {personal_due}, {total_due}, {debt}, {rent_due_date}, {rent_period}, {utility_total}, {utility_due_date}, {period}, {utility_service}, {rent_debt_months}, {rent_debt_months_details}, {utility_debt_details}, {all_debts_breakdown}, {all_debt_total}, {custom_text}, {amount}, {channel}, {receipt_status}, {receipt_summary}</p>
         </div>
         <div id="messageTargets" class="table-wrap"></div>
         <div id="messagePreviewPanel" class="stack"></div>
         <div class="section-title">
-          <h2>Р СѓС‡РЅРѕР№ РєРѕРЅС‚СЂРѕР»СЊ РїР»Р°С‚РµР¶РµР№</h2>
-          <span>Р”Р»СЏ РЅР°Р»РёС‡РєРё, РїРµСЂРµРІРѕРґРѕРІ СЃ С‚РІРѕРµР№ РєР°СЂС‚С‹ Рё РїСЂРѕС‡РёС… Р¶РёР·РЅРµРЅРЅС‹С… РєСѓР»СЊР±РёС‚РѕРІ.</span>
+          <h2>Ручной контроль платежей</h2>
+          <span>Для налички, переводов с твоей карты и прочих жизненных кульбитов.</span>
         </div>
         <form id="manualPaymentForm" class="form-grid compact">
-          <label>Р–РёР»РµС†
+          <label>Жилец
             <select name="lease_id" id="manualPaymentLeaseSelect" required></select>
           </label>
-          <label>РўРёРї РїР»Р°С‚РµР¶Р°
+          <label>Тип платежа
             <select name="kind" id="manualPaymentKindSelect">
-              <option value="rent">РђСЂРµРЅРґР°</option>
-              <option value="utility">РљРѕРјРјСѓРЅР°Р»РєР°</option>
+              <option value="rent">Аренда</option>
+              <option value="utility">Коммуналка</option>
             </select>
           </label>
-          <label>РљР°РЅР°Р» Р°СЂРµРЅРґС‹
+          <label>Канал аренды
             <select name="channel" id="manualPaymentChannelSelect">
-              <option value="personal">РџРµСЂРµРІРѕРґ</option>
-              <option value="ip">РРџ</option>
-              <option value="expense_fund">РњРЅРµ РЅР° СЂР°СЃС…РѕРґС‹</option>
+              <option value="personal">Перевод</option>
+              <option value="ip">ИП</option>
+              <option value="expense_fund">Мне на расходы</option>
             </select>
           </label>
-          <label>РСЃС‚РѕС‡РЅРёРє
+          <label>Источник
             <select name="source">
-              <option value="cash">РќР°Р»РёС‡РЅС‹Рµ</option>
-              <option value="owner_card">РЎ РјРѕРµР№ РєР°СЂС‚С‹</option>
-              <option value="manual">Р СѓС‡РЅР°СЏ РѕС‚РјРµС‚РєР°</option>
+              <option value="cash">Наличные</option>
+              <option value="owner_card">С моей карты</option>
+              <option value="manual">Ручная отметка</option>
             </select>
           </label>
-          <label>Р”Р°С‚Р° Рё РІСЂРµРјСЏ
+          <label>Дата и время
             <input type="datetime-local" name="paid_at" id="manualPaymentPaidAtInput" />
           </label>
-          <label id="manualPaymentTargetMonthLabel">Р—Р°С‡РµСЃС‚СЊ Р·Р° РјРµСЃСЏС†
+          <label id="manualPaymentTargetMonthLabel">Зачесть за месяц
             <select name="target_month" id="manualPaymentTargetMonthSelect"></select>
           </label>
-          <label id="manualPaymentTargetYearLabel">Р“РѕРґ
+          <label id="manualPaymentTargetYearLabel">Год
             <input type="number" min="2020" step="1" name="target_year" id="manualPaymentTargetYearInput" />
           </label>
-          <label>РЎСѓРјРјР°
+          <label>Сумма
             <input type="number" min="0" step="0.01" name="amount" required />
           </label>
-          <label class="wide">РљРѕРјРјРµРЅС‚Р°СЂРёР№
-            <textarea name="notes" rows="2" placeholder="РќР°РїСЂРёРјРµСЂ: РЅР°Р»РёС‡РєР°, РїРµСЂРµРІРѕРґ СЃ РјРѕРµР№ РєР°СЂС‚С‹, РІР·Р°РёРјРѕР·Р°С‡С‘С‚"></textarea>
+          <label class="wide">Комментарий
+            <textarea name="notes" rows="2" placeholder="Например: наличка, перевод с моей карты, взаимозачёт"></textarea>
           </label>
-          <button class="primary wide" type="submit">Р”РѕР±Р°РІРёС‚СЊ РїР»Р°С‚С‘Р¶ РІСЂСѓС‡РЅСѓСЋ</button>
+          <button class="primary wide" type="submit">Добавить платёж вручную</button>
         </form>
         <div id="suspiciousReceiptsPanel" class="stack"></div>
 
         <div class="section-title">
-          <h2>РЁР°Р±Р»РѕРЅС‹</h2>
-          <span>РўРµРєСЃС‚С‹ РІСЃРµС… РѕСЃРЅРѕРІРЅС‹С… СЃРѕРѕР±С‰РµРЅРёР№ Р¶РёРІСѓС‚ С‚СѓС‚. Рђ Р·Р°С‡РµРј РґРµСЂР¶Р°С‚СЊ РёС… РїРѕ СѓРіР»Р°Рј?</span>
+          <h2>Шаблоны</h2>
+          <span>Тексты всех основных сообщений живут тут. А зачем держать их по углам?</span>
         </div>
         <form id="messageTemplatesForm" class="form-grid">
-          <label class="wide">РђСЂРµРЅРґР°: СЃРµРіРѕРґРЅСЏ СЃСЂРѕРє
+          <label class="wide">Аренда: сегодня срок
             <textarea name="message_rent_due" id="messageRentDueInput" rows="3"></textarea>
           </label>
-          <label class="wide">РђСЂРµРЅРґР°: РїСЂРѕСЃСЂРѕС‡РєР°
+          <label class="wide">Аренда: просрочка
             <textarea name="message_rent_overdue" id="messageRentOverdueInput" rows="3"></textarea>
           </label>
-          <label class="wide">РљРѕРјРјСѓРЅР°Р»РєР°
+          <label class="wide">Коммуналка
             <textarea name="message_utility_bill" id="messageUtilityBillInput" rows="3"></textarea>
           </label>
-          <label class="wide">Р’СЃРµ РґРѕР»РіРё
+          <label class="wide">Все долги
             <textarea name="message_all_debts" id="messageAllDebtsInput" rows="8"></textarea>
           </label>
-          <label class="wide">РћС‚РІРµС‚ Р¶РёР»СЊС†Сѓ: С‡РµРє РїСЂРёРЅСЏС‚
+          <label class="wide">Ответ жильцу: чек принят
             <textarea name="message_receipt_received" id="messageReceiptReceivedInput" rows="3"></textarea>
           </label>
-          <label class="wide">РћС‚РІРµС‚ Р¶РёР»СЊС†Сѓ: СЂСѓС‡РЅР°СЏ РїСЂРѕРІРµСЂРєР°
+          <label class="wide">Ответ жильцу: ручная проверка
             <textarea name="message_receipt_review" id="messageReceiptReviewInput" rows="3"></textarea>
           </label>
-          <label class="wide">РћС‚РІРµС‚ Р¶РёР»СЊС†Сѓ: РґСѓР±Р»РёРєР°С‚ С‡РµРєР°
+          <label class="wide">Ответ жильцу: дубликат чека
             <textarea name="message_receipt_duplicate" id="messageReceiptDuplicateInput" rows="3"></textarea>
           </label>
-          <label class="wide">РЈРІРµРґРѕРјР»РµРЅРёРµ РІР»Р°РґРµР»СЊС†Сѓ Рѕ С‡РµРєРµ
+          <label class="wide">Уведомление владельцу о чеке
             <textarea name="message_owner_receipt_alert" id="messageOwnerReceiptAlertInput" rows="3"></textarea>
           </label>
-          <button class="primary wide" type="submit">РЎРѕС…СЂР°РЅРёС‚СЊ С€Р°Р±Р»РѕРЅС‹</button>
+          <button class="primary wide" type="submit">Сохранить шаблоны</button>
         </form>
       </section>
 
       <section class="panel" id="automation">
         <div class="section-title">
-          <h2>РђРІС‚РѕРјР°С‚РёР·Р°С†РёСЏ</h2>
-          <span>Р—РґРµСЃСЊ Р¶РёРІС‘С‚ С‡Р°СЃС‚РѕС‚Р° Р°РІС‚РѕРЅР°РїРѕРјРёРЅР°РЅРёР№ Рё РєСЂР°С‚РєР°СЏ СЃРІРѕРґРєР°, РєРѕРјСѓ СѓР¶Рµ РїРёСЃР°Р»Рё. Р’СЃС‘ РїРѕ РґРµР»Сѓ, Р° Р·Р°С‡РµРј РёРЅР°С‡Рµ.</span>
+          <h2>Автоматизация</h2>
+          <span>Здесь живёт частота автонапоминаний и краткая сводка, кому уже писали. Всё по делу, а зачем иначе.</span>
         </div>
         <form id="automationSettingsForm" class="form-grid compact">
-          <label>РђСЂРµРЅРґР°: РґРµРЅСЊ РѕРїР»Р°С‚С‹
-            <input value="РѕРґРёРЅ СЂР°Р· РІ 10:00 РќРѕРІРѕСЃРёР±РёСЂСЃРєР°" disabled />
+          <label>Аренда: день оплаты
+            <input value="один раз в 10:00 Новосибирска" disabled />
           </label>
-          <label>РђСЂРµРЅРґР°: РїСЂРѕСЃСЂРѕС‡РєР° Рё С‡Р°СЃС‚РёС‡РЅР°СЏ РѕРїР»Р°С‚Р°
+          <label>Аренда: просрочка и частичная оплата
             <select name="automation_rent_overdue_cadence" id="automationRentOverdueCadenceInput">
-              <option value="twice_daily">2 СЂР°Р·Р° РІ РґРµРЅСЊ РєР°Р¶РґС‹Р№ РґРµРЅСЊ</option>
-              <option value="daily_evening">РІРµС‡РµСЂРѕРј РєР°Р¶РґРѕРіРѕ РґРЅСЏ</option>
-              <option value="every_two_days">СЂР°Р· РІ РґРІР° РґРЅСЏ</option>
-              <option value="never">РІС‹РєР»СЋС‡РµРЅРѕ</option>
+              <option value="twice_daily">2 раза в день каждый день</option>
+              <option value="daily_evening">вечером каждого дня</option>
+              <option value="every_two_days">раз в два дня</option>
+              <option value="never">выключено</option>
             </select>
           </label>
-          <label>РљРѕРјРјСѓРЅР°Р»РєР°
+          <label>Коммуналка
             <select name="automation_utility_cadence" id="automationUtilityCadenceInput">
-              <option value="twice_daily">2 СЂР°Р·Р° РІ РґРµРЅСЊ РєР°Р¶РґС‹Р№ РґРµРЅСЊ</option>
-              <option value="daily_evening">РІРµС‡РµСЂРѕРј РєР°Р¶РґРѕРіРѕ РґРЅСЏ</option>
-              <option value="every_two_days">СЂР°Р· РІ РґРІР° РґРЅСЏ</option>
-              <option value="never">РІС‹РєР»СЋС‡РµРЅРѕ</option>
+              <option value="twice_daily">2 раза в день каждый день</option>
+              <option value="daily_evening">вечером каждого дня</option>
+              <option value="every_two_days">раз в два дня</option>
+              <option value="never">выключено</option>
             </select>
           </label>
-          <button class="primary" type="submit">РЎРѕС…СЂР°РЅРёС‚СЊ С‡Р°СЃС‚РѕС‚Сѓ</button>
+          <button class="primary" type="submit">Сохранить частоту</button>
         </form>
         <div id="automationList" class="stack"></div>
       </section>
 
       <section class="panel" id="settings">
         <div class="section-title">
-          <h2>РќР°СЃС‚СЂРѕР№РєРё</h2>
-          <span>Р¦РІРµС‚, СЃРїРѕРєРѕР№СЃС‚РІРёРµ Рё С‡СѓС‚СЊ РјРµРЅСЊС€Рµ С…Р°РѕСЃР°</span>
+          <h2>Настройки</h2>
+          <span>Цвет, спокойствие и чуть меньше хаоса</span>
         </div>
         <form id="settingsForm" class="form-grid compact">
-          <label>РџСѓР±Р»РёС‡РЅС‹Р№ URL РїСЂРёР»РѕР¶РµРЅРёСЏ
+          <label>Публичный URL приложения
             <input name="app_base_url" id="appBaseUrlInput" placeholder="https://your-app.example.com" />
           </label>
           <label>Telegram owner chat id
             <input name="telegram_owner_chat_id" id="telegramOwnerChatIdInput" placeholder="123456789" />
           </label>
           <label>Telegram bot token
-            <input type="password" name="telegram_bot_token" id="telegramBotTokenInput" placeholder="РћСЃС‚Р°РІСЊ РїСѓСЃС‚С‹Рј, С‡С‚РѕР±С‹ РЅРµ РјРµРЅСЏС‚СЊ" />
+            <input type="password" name="telegram_bot_token" id="telegramBotTokenInput" placeholder="Оставь пустым, чтобы не менять" />
           </label>
           <label>Telegram webhook secret
-            <input type="password" name="telegram_webhook_secret" id="telegramWebhookSecretInput" placeholder="РћСЃС‚Р°РІСЊ РїСѓСЃС‚С‹Рј, С‡С‚РѕР±С‹ РЅРµ РјРµРЅСЏС‚СЊ" />
+            <input type="password" name="telegram_webhook_secret" id="telegramWebhookSecretInput" placeholder="Оставь пустым, чтобы не менять" />
           </label>
           <label>PIN owner
             <input type="password" inputmode="numeric" name="panel_owner_pin_code" id="panelOwnerPinCodeInput" placeholder="Оставь пустым, чтобы не менять" />
@@ -361,64 +361,64 @@
           </label>
           <label>Цветовая палитра
             <select name="color_palette" id="paletteSelect">
-              <option value="classic">РљР»Р°СЃСЃРёС‡РµСЃРєР°СЏ</option>
-              <option value="forest">Р›РµСЃРЅР°СЏ</option>
-              <option value="contrast">РљРѕРЅС‚СЂР°СЃС‚РЅР°СЏ</option>
-              <option value="dark-classic">РўС‘РјРЅР°СЏ РєР»Р°СЃСЃРёС‡РµСЃРєР°СЏ</option>
-              <option value="neon">РўС‘РјРЅР°СЏ РЅРµРѕРЅРѕРІР°СЏ</option>
+              <option value="classic">Классическая</option>
+              <option value="forest">Лесная</option>
+              <option value="contrast">Контрастная</option>
+              <option value="dark-classic">Тёмная классическая</option>
+              <option value="neon">Тёмная неоновая</option>
             </select>
           </label>
-          <label class="check wide"><input type="checkbox" name="notifications_enabled" id="notificationsEnabledInput" /> РђРІС‚РѕРјР°С‚РёС‡РµСЃРєРёРµ РЅР°РїРѕРјРёРЅР°РЅРёСЏ Р¶РёР»СЊС†Р°Рј РІРєР»СЋС‡РµРЅС‹</label>
-          <label>РРіРЅРѕСЂРёСЂРѕРІР°С‚СЊ СЃС‚Р°СЂС‹Рµ РґРѕР»РіРё РґРѕ
+          <label class="check wide"><input type="checkbox" name="notifications_enabled" id="notificationsEnabledInput" /> Автоматические напоминания жильцам включены</label>
+          <label>Игнорировать старые долги до
             <input type="date" name="notification_cutoff_date" id="notificationCutoffDateInput" />
           </label>
-          <label class="wide">РџРѕР»СѓС‡Р°С‚РµР»СЊ РРџ
-            <input name="ip_recipient_name" id="ipRecipientNameInput" placeholder="РРџ Р§Р°РЅС‚СѓСЂРёСЏ Р­СЂР°СЃС‚ РњРёС‚СЂРёРґР°С‚РѕРІРёС‡" />
+          <label class="wide">Получатель ИП
+            <input name="ip_recipient_name" id="ipRecipientNameInput" placeholder="ИП Чантурия Эраст Митридатович" />
           </label>
-          <label>РЎС‡С‘С‚ РРџ
+          <label>Счёт ИП
             <input name="ip_recipient_account" id="ipRecipientAccountInput" placeholder="4080..." />
           </label>
-          <label>Р‘РРљ РРџ
+          <label>БИК ИП
             <input name="ip_recipient_bik" id="ipRecipientBikInput" placeholder="045004641" />
           </label>
-          <label class="wide">РџРѕР»СѓС‡Р°С‚РµР»СЊ РїРµСЂРµРІРѕРґР°
-            <input name="personal_recipient_name" id="personalRecipientNameInput" placeholder="Р­СЂРЅРµСЃС‚ Рљ." />
+          <label class="wide">Получатель перевода
+            <input name="personal_recipient_name" id="personalRecipientNameInput" placeholder="Эрнест К." />
           </label>
-          <label>РўРµР»РµС„РѕРЅ РїРѕР»СѓС‡Р°С‚РµР»СЏ
+          <label>Телефон получателя
             <input name="personal_recipient_phone" id="personalRecipientPhoneInput" placeholder="+7 913 385-44-41" />
           </label>
-          <label>Р‘Р°РЅРє РїРѕР»СѓС‡Р°С‚РµР»СЏ
-            <input name="personal_recipient_bank" id="personalRecipientBankInput" placeholder="РЎР±РµСЂР±Р°РЅРє" />
+          <label>Банк получателя
+            <input name="personal_recipient_bank" id="personalRecipientBankInput" placeholder="Сбербанк" />
           </label>
-          <button class="primary" type="submit">РЎРѕС…СЂР°РЅРёС‚СЊ РЅР°СЃС‚СЂРѕР№РєРё</button>
+          <button class="primary" type="submit">Сохранить настройки</button>
         </form>
         <p class="muted">PIN-коды сохраняются на сервере. Пустое поле значит «не трогай, оно и так живое».</p>
         <div class="settings-actions">
-          <button id="telegramWebhookBtn" type="button">РџРѕРґРєР»СЋС‡РёС‚СЊ Telegram webhook</button>
-          <button id="telegramTestBtn" type="button">РћС‚РїСЂР°РІРёС‚СЊ С‚РµСЃС‚ РІ Telegram</button>
-          <button id="telegramWebhookInfoBtn" type="button">РџСЂРѕРІРµСЂРёС‚СЊ webhook</button>
-          <button id="importBaselineBtn" type="button">РРјРїРѕСЂС‚РёСЂРѕРІР°С‚СЊ РґР°РЅРЅС‹Рµ РёР· СЃС‚Р°СЂРѕР№ Р±Р°Р·С‹</button>
+          <button id="telegramWebhookBtn" type="button">Подключить Telegram webhook</button>
+          <button id="telegramTestBtn" type="button">Отправить тест в Telegram</button>
+          <button id="telegramWebhookInfoBtn" type="button">Проверить webhook</button>
+          <button id="importBaselineBtn" type="button">Импортировать данные из старой базы</button>
         </div>
         <section class="card stack">
           <div class="section-title">
-            <h3>РРјРїРѕСЂС‚ Рё СЌРєСЃРїРѕСЂС‚ Р±Р°Р·С‹</h3>
-            <span>РџРµСЂРµРµР·Рґ С…РѕСЃС‚РёРЅРіР° Р±РµР· СЂРёС‚СѓР°Р»РѕРІ. РќРѕ СЃ Р·Р°С‰РёС‚РѕР№ РѕС‚ СЃР»СѓС‡Р°Р№РЅРѕРіРѕ В«РѕР№В».</span>
+            <h3>Импорт и экспорт базы</h3>
+            <span>Переезд хостинга без ритуалов. Но с защитой от случайного «ой».</span>
           </div>
           <div class="settings-actions">
-            <button id="databaseExportBtn" type="button" class="primary">Р­РєСЃРїРѕСЂС‚РёСЂРѕРІР°С‚СЊ Р±Р°Р·Сѓ С†РµР»РёРєРѕРј</button>
+            <button id="databaseExportBtn" type="button" class="primary">Экспортировать базу целиком</button>
           </div>
           <div class="form-grid compact">
-            <label class="wide">Р¤Р°Р№Р» СЌРєСЃРїРѕСЂС‚Р°
+            <label class="wide">Файл экспорта
               <input id="databaseImportFile" type="file" accept=".json,application/json" />
             </label>
-            <label class="check wide"><input id="databaseImportCreateBackup" type="checkbox" checked /> РџРµСЂРµРґ РёРјРїРѕСЂС‚РѕРј СЃРѕС…СЂР°РЅРёС‚СЊ СЂРµР·РµСЂРІРЅСѓСЋ РєРѕРїРёСЋ С‚РµРєСѓС‰РµР№ Р±Р°Р·С‹</label>
-            <label class="check wide"><input id="databaseImportConfirmReplace" type="checkbox" /> РЇ РїРѕРЅРёРјР°СЋ, С‡С‚Рѕ РёРјРїРѕСЂС‚ РїРѕР»РЅРѕСЃС‚СЊСЋ Р·Р°РјРµРЅРёС‚ С‚РµРєСѓС‰СѓСЋ Р±Р°Р·Сѓ</label>
-            <label>РџРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ
-              <input id="databaseImportConfirmationText" placeholder='Р’РІРµРґРё: РРњРџРћР Рў' />
+            <label class="check wide"><input id="databaseImportCreateBackup" type="checkbox" checked /> Перед импортом сохранить резервную копию текущей базы</label>
+            <label class="check wide"><input id="databaseImportConfirmReplace" type="checkbox" /> Я понимаю, что импорт полностью заменит текущую базу</label>
+            <label>Подтверждение
+              <input id="databaseImportConfirmationText" placeholder='Введи: ИМПОРТ' />
             </label>
             <div class="settings-actions wide">
-              <button id="databaseImportInspectBtn" type="button">РџСЂРѕРІРµСЂРёС‚СЊ С„Р°Р№Р»</button>
-              <button id="databaseImportApplyBtn" type="button" class="danger">РРјРїРѕСЂС‚РёСЂРѕРІР°С‚СЊ Рё Р·Р°РјРµРЅРёС‚СЊ Р±Р°Р·Сѓ</button>
+              <button id="databaseImportInspectBtn" type="button">Проверить файл</button>
+              <button id="databaseImportApplyBtn" type="button" class="danger">Импортировать и заменить базу</button>
             </div>
           </div>
           <div id="databaseImportStatusBox" class="card muted-box"></div>
@@ -428,16 +428,28 @@
     </main>
 
     <div id="authOverlay" class="auth-overlay" hidden>
-      <div class="auth-card">
-        <p class="eyebrow">Rental Manager</p>
-        <h2>Вход по PIN</h2>
-        <p class="muted">Owner получает полный пульт. Guest видит только общую картину и отчёты. А зачем гостю кнопка «выставить счёт»?</p>
-        <form id="pinLoginForm" class="stack">
-          <label>PIN-код
-            <input id="pinCodeInput" name="pin_code" type="password" inputmode="numeric" autocomplete="current-password" required />
+      <div class="auth-card auth-card--login">
+        <div class="auth-card__hero">
+          <p class="eyebrow">Rental Manager</p>
+          <h2>Вход в пульт аренды</h2>
+          <p class="muted">PIN owner открывает полный контроль. PIN guest показывает только обзор и отчёты. Лишние кнопки гостю не достаются, и это даже к лучшему.</p>
+        </div>
+        <div class="auth-role-grid" aria-hidden="true">
+          <article class="auth-role auth-role--owner">
+            <strong>Owner</strong>
+            <span>Настройки, расчёты, сообщения, действия</span>
+          </article>
+          <article class="auth-role auth-role--guest">
+            <strong>Guest</strong>
+            <span>Общая информация и скачивание отчётов</span>
+          </article>
+        </div>
+        <form id="pinLoginForm" class="stack auth-form">
+          <label class="auth-form__label">PIN-код
+            <input id="pinCodeInput" name="pin_code" type="password" inputmode="numeric" autocomplete="current-password" maxlength="12" required />
           </label>
           <label class="check"><input id="rememberDeviceInput" name="remember_device" type="checkbox" checked /> Запомнить это устройство</label>
-          <button class="primary" type="submit">Войти</button>
+          <button class="primary auth-submit" type="submit">Войти</button>
         </form>
       </div>
     </div>
