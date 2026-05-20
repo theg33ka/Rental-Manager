@@ -1,8 +1,6 @@
 package ru.rentalmanager.mobile;
 
 import android.content.Context;
-import android.webkit.CookieManager;
-
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -29,7 +27,7 @@ final class NotificationRepository {
             connection.setReadTimeout(12000);
             connection.setRequestProperty("Accept", "application/json");
             connection.setRequestProperty("User-Agent", "RentalManagerAndroid/1.0");
-            String cookies = CookieManager.getInstance().getCookie(baseUrl);
+            String cookies = NotificationPrefs.prefs(context).getString(ApiClient.KEY_SESSION_COOKIE, "");
             if (cookies != null && !cookies.trim().isEmpty()) {
                 connection.setRequestProperty("Cookie", cookies);
             }

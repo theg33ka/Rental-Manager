@@ -20,6 +20,13 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 public class NotificationSettingsActivity extends Activity {
+    private final int bg = Color.rgb(7, 10, 14);
+    private final int surface = Color.rgb(18, 23, 31);
+    private final int field = Color.rgb(26, 33, 43);
+    private final int text = Color.rgb(243, 247, 251);
+    private final int muted = Color.rgb(142, 153, 167);
+    private final int blue = Color.rgb(10, 132, 255);
+
     private EditText baseUrl;
     private EditText quietStart;
     private EditText quietEnd;
@@ -40,14 +47,14 @@ public class NotificationSettingsActivity extends Activity {
     private void buildUi() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(Color.rgb(246, 247, 248));
+        root.setBackgroundColor(bg);
 
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.VERTICAL);
         header.setPadding(dp(20), dp(20), dp(20), dp(12));
         TextView title = text("Уведомления", 30, true);
         TextView subtitle = text("Пуши, частота, тишина ночью и постоянный сигнал по должникам. А зачем иначе телефон?", 14, false);
-        subtitle.setTextColor(Color.rgb(99, 104, 112));
+        subtitle.setTextColor(muted);
         header.addView(title);
         header.addView(subtitle);
         root.addView(header);
@@ -212,7 +219,7 @@ public class NotificationSettingsActivity extends Activity {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setPadding(dp(16), dp(14), dp(16), dp(14));
-        card.setBackgroundColor(Color.WHITE);
+        card.setBackgroundColor(surface);
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
         params.setMargins(0, 0, 0, dp(12));
         card.setLayoutParams(params);
@@ -228,7 +235,7 @@ public class NotificationSettingsActivity extends Activity {
 
     private TextView hint(String value) {
         TextView view = text(value, 13, false);
-        view.setTextColor(Color.rgb(105, 112, 119));
+        view.setTextColor(muted);
         view.setPadding(0, dp(6), 0, 0);
         return view;
     }
@@ -238,7 +245,7 @@ public class NotificationSettingsActivity extends Activity {
         wrap.setOrientation(LinearLayout.VERTICAL);
         wrap.setPadding(0, dp(6), 0, dp(6));
         TextView label = text(value, 13, false);
-        label.setTextColor(Color.rgb(105, 112, 119));
+        label.setTextColor(muted);
         wrap.addView(label);
         wrap.addView(field, new LinearLayout.LayoutParams(-1, dp(48)));
         return wrap;
@@ -248,7 +255,7 @@ public class NotificationSettingsActivity extends Activity {
         TextView view = new TextView(this);
         view.setText(value);
         view.setTextSize(sp);
-        view.setTextColor(Color.rgb(31, 33, 36));
+        view.setTextColor(text);
         if (bold) view.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
         return view;
     }
@@ -257,6 +264,9 @@ public class NotificationSettingsActivity extends Activity {
         EditText view = new EditText(this);
         view.setSingleLine(true);
         view.setHint(hint);
+        view.setHintTextColor(muted);
+        view.setTextColor(text);
+        view.setBackgroundColor(field);
         view.setTextSize(15);
         view.setPadding(dp(12), 0, dp(12), 0);
         return view;
@@ -265,6 +275,7 @@ public class NotificationSettingsActivity extends Activity {
     private CheckBox check(String value) {
         CheckBox view = new CheckBox(this);
         view.setText(value);
+        view.setTextColor(text);
         view.setTextSize(15);
         view.setPadding(0, dp(4), 0, dp(4));
         return view;
@@ -284,7 +295,7 @@ public class NotificationSettingsActivity extends Activity {
         button.setAllCaps(false);
         if (primary) {
             button.setTextColor(Color.WHITE);
-            button.setBackgroundColor(Color.rgb(37, 109, 90));
+            button.setBackgroundColor(blue);
         }
         return button;
     }
