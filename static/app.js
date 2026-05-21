@@ -203,6 +203,8 @@ async function downloadFile(path, fallbackFilename = "download") {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+window.downloadFile = downloadFile;
+
 function toast(message) {
   const node = qs("#toast");
   node.textContent = message;
@@ -1896,6 +1898,8 @@ async function exportDatabase() {
   await downloadFile("/api/admin/database-export", "rental-manager-db-export.json");
   toast("Экспорт базы скачан");
 }
+
+window.exportDatabase = exportDatabase;
 
 async function inspectDatabaseImport() {
   const file = selectedDatabaseImportFile();

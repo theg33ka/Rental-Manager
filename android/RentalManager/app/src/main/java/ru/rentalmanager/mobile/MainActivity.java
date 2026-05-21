@@ -83,8 +83,10 @@ public class MainActivity extends Activity {
     private JSONArray tariffs = new JSONArray();
     private JSONArray messageTargets = new JSONArray();
     private JSONArray suspiciousReceipts = new JSONArray();
+    private JSONArray progressRentCharges = new JSONArray();
     private String currentTab = "dashboard";
     private String servicesMode = "utilities";
+    private String progressRentMonthKey = "";
     private long bootstrapLoadedAt = 0L;
     private long paymentsLoadedAt = 0L;
     private long servicesLoadedAt = 0L;
@@ -94,6 +96,7 @@ public class MainActivity extends Activity {
     private boolean reconnectLoopRunning = false;
     private boolean lastConnectionOk = true;
     private boolean activityResumed = false;
+    private boolean progressRentLoading = false;
     private Handler reconnectHandler;
     private Calendar selectedMonth = Calendar.getInstance();
     private float monthTouchStartX = 0f;
@@ -358,7 +361,7 @@ public class MainActivity extends Activity {
     }
 
     private void loadPayments() throws Exception {
-        rentCharges = api.getArray("/api/rent-charges?start=2026-01-01&end=" + progressDataEnd());
+        rentCharges = api.getArray("/api/rent-charges");
         suspiciousReceipts = api.getArray("/api/payment-receipts/suspicious");
         paymentsLoadedAt = System.currentTimeMillis();
     }
@@ -458,6 +461,7 @@ public class MainActivity extends Activity {
     }
 
     private void addMonthProgressCard(JSONObject dashboard) {
+        ensureProgressRentData();
         MonthScore score = buildMonthScore(dashboard);
         LinearLayout card = card();
         card.setPadding(dp(14), dp(12), dp(14), dp(12));
@@ -541,9 +545,10 @@ public class MainActivity extends Activity {
 
     private MonthScore buildMonthScore(JSONObject dashboard) {
         MonthScore score = new MonthScore();
-        boolean detailedData = rentCharges.length() > 0 || utilityBills.length() > 0;
+        JSONArray scoreRentCharges = rentChargesForSelectedMonth();
+        boolean detailedData = scoreRentCharges.length() > 0 || utilityBills.length() > 0;
 
-        forEach(rentCharges, charge -> {
+        forEach(scoreRentCharges, charge -> {
             if (!sameSelectedMonth(scoreDateForItem("rent", charge))) return;
             addTaskByStatus(score, charge.optString("status"), charge.optString("due_date"), true);
         });
@@ -598,6 +603,43 @@ public class MainActivity extends Activity {
             if (!sameSelectedMonth(date)) return;
             addTaskByStatus(score, critical ? "overdue" : item.optString("status", "issued"), item.optString("due_date"), critical);
         });
+    }
+
+    private JSONArray rentChargesForSelectedMonth() {
+        if (selectedMonthKey().equals(progressRentMonthKey)) {
+            return progressRentCharges;
+        }
+        JSONArray result = new JSONArray();
+        for (int i = 0; i < rentCharges.length(); i++) {
+            JSONObject item = rentCharges.optJSONObject(i);
+            if (item != null && sameSelectedMonth(scoreDateForItem("rent", item))) {
+                result.put(item);
+            }
+        }
+        return result;
+    }
+
+    private void ensureProgressRentData() {
+        String key = selectedMonthKey();
+        if (key.equals(progressRentMonthKey) || progressRentLoading || !NotificationPrefs.hasCustomBaseUrl(this)) return;
+        progressRentLoading = true;
+        String start = selectedMonthStart();
+        String end = selectedMonthEnd();
+        new Thread(() -> {
+            try {
+                JSONArray loaded = api.getArray("/api/rent-charges?start=" + start + "&end=" + end);
+                runOnUiThread(() -> {
+                    progressRentCharges = loaded;
+                    progressRentMonthKey = key;
+                    progressRentLoading = false;
+                    if ("dashboard".equals(currentTab) && key.equals(selectedMonthKey())) {
+                        renderDashboard();
+                    }
+                });
+            } catch (Exception ignored) {
+                runOnUiThread(() -> progressRentLoading = false);
+            }
+        }, "rental-progress-rent").start();
     }
 
     private String scoreDateForItem(String key, JSONObject item) {
@@ -1935,10 +1977,19 @@ public class MainActivity extends Activity {
         return selectedMonthKey().compareTo(monthKey(today())) > 0;
     }
 
-    private String progressDataEnd() {
-        Calendar calendar = Calendar.getInstance();
-        calendar.add(Calendar.MONTH, 18);
+    private String selectedMonthStart() {
+        Calendar calendar = (Calendar) selectedMonth.clone();
+        calendar.set(Calendar.DAY_OF_MONTH, 1);
+        return formatIsoDate(calendar);
+    }
+
+    private String selectedMonthEnd() {
+        Calendar calendar = (Calendar) selectedMonth.clone();
         calendar.set(Calendar.DAY_OF_MONTH, calendar.getActualMaximum(Calendar.DAY_OF_MONTH));
+        return formatIsoDate(calendar);
+    }
+
+    private String formatIsoDate(Calendar calendar) {
         java.text.SimpleDateFormat format = new java.text.SimpleDateFormat("yyyy-MM-dd", Locale.US);
         return format.format(calendar.getTime());
     }
