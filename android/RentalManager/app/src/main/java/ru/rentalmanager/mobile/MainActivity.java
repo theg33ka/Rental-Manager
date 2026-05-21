@@ -100,6 +100,7 @@ public class MainActivity extends Activity {
     private Handler reconnectHandler;
     private Calendar selectedMonth = Calendar.getInstance();
     private float monthTouchStartX = 0f;
+    private float monthTouchStartY = 0f;
 
     private final Runnable reconnectRunnable = new Runnable() {
         @Override
@@ -205,13 +206,21 @@ public class MainActivity extends Activity {
     }
 
     private void addNav(String title, String tab) {
-        Button button = navButton(title, tab.equals(currentTab));
+        Button button = navButton(navTitle(title, tab), tab.equals(currentTab));
         button.setOnClickListener(v -> {
             currentTab = tab;
             buildBottomNav();
             loadCurrentTab(false);
         });
         bottomBar.addView(button, new LinearLayout.LayoutParams(0, -1, 1));
+    }
+
+    private String navTitle(String title, String tab) {
+        if ("dashboard".equals(tab)) return "⌂\n" + title;
+        if ("tenants".equals(tab)) return "◉\n" + title;
+        if ("payments".equals(tab)) return "₽\n" + title;
+        if ("services".equals(tab)) return "▦\n" + title;
+        return "⋯\n" + title;
     }
 
     private void checkAuthAndLoad() {
@@ -495,13 +504,17 @@ public class MainActivity extends Activity {
         View.OnTouchListener monthSwipe = (view, event) -> {
             if (event.getAction() == MotionEvent.ACTION_DOWN) {
                 monthTouchStartX = event.getX();
+                monthTouchStartY = event.getY();
                 return true;
             }
             if (event.getAction() == MotionEvent.ACTION_UP) {
                 float dx = event.getX() - monthTouchStartX;
+                float dy = event.getY() - monthTouchStartY;
                 if (Math.abs(dx) > dp(48)) {
                     shiftSelectedMonth(dx < 0 ? 1 : -1);
                     renderDashboard();
+                } else if (Math.abs(dx) < dp(18) && Math.abs(dy) < dp(18)) {
+                    showMonthTasksDialog(dashboard);
                 }
                 return true;
             }
@@ -668,6 +681,132 @@ public class MainActivity extends Activity {
         } else {
             score.warning++;
         }
+    }
+
+    private void showMonthTasksDialog(JSONObject dashboard) {
+        LinearLayout form = dialogForm();
+        List<MonthTask> tasks = buildMonthTasks(dashboard);
+        if (progressRentLoading) {
+            form.addView(monthTaskCard("Аренда за месяц догружается", "Откройте список ещё раз через пару секунд.", gray));
+        }
+        addTaskSection(form, tasks, "Долги", 0, red);
+        addTaskSection(form, tasks, "В работе и предстоит", 1, orange);
+        addTaskSection(form, tasks, "Выполнено", 2, green);
+        if (form.getChildCount() == 0) {
+            form.addView(monthTaskCard("Нет данных по выбранному месяцу", "Для будущего месяца задачи появятся после генерации начислений.", gray));
+        }
+        new AlertDialog.Builder(this)
+            .setTitle("Дела: " + monthTitle(selectedMonth))
+            .setView(wrapDialog(form))
+            .setPositiveButton("Закрыть", null)
+            .show();
+    }
+
+    private List<MonthTask> buildMonthTasks(JSONObject dashboard) {
+        List<MonthTask> tasks = new ArrayList<>();
+        forEach(rentChargesForSelectedMonth(), charge -> addRentMonthTasks(tasks, charge));
+        forEach(utilityBills, bill -> addUtilityMonthTasks(tasks, bill));
+        forEach(arr(dashboard, "monthly_reports"), report -> {
+            if (report.optInt("year") == selectedMonth.get(Calendar.YEAR)
+                && report.optInt("month") == selectedMonth.get(Calendar.MONTH) + 1) {
+                tasks.add(new MonthTask(1, "Месячный отчёт", joinNonEmpty(severityLabel(report.optString("severity")), report.optString("issue_count") + " проблем"), orange));
+            }
+        });
+        if (sameSelectedMonth(today())) {
+            forEach(arr(dashboard, "stale_readings"), item ->
+                tasks.add(new MonthTask(1, shortObjectName(item.optString("object")) + " " + item.optString("service"), "показания не переданы", orange))
+            );
+        }
+        return tasks;
+    }
+
+    private void addRentMonthTasks(List<MonthTask> tasks, JSONObject charge) {
+        String apartment = compactApartment(charge);
+        double ipDue = charge.optDouble("ip_due");
+        double ipPaid = charge.optDouble("ip_paid");
+        double personalDue = charge.optDouble("personal_due");
+        double personalPaid = charge.optDouble("personal_paid");
+        String due = compactDate(charge.optString("due_date"));
+        List<String> doneParts = new ArrayList<>();
+
+        if (personalDue > 0.009) {
+            String paidAt = paymentDate(arr(charge, "payments"), "personal");
+            if (personalPaid + 0.009 >= personalDue) {
+                doneParts.add("по номеру ✅ " + fallbackDate(paidAt, due));
+            } else {
+                int group = isFutureDate(charge.optString("due_date")) ? 1 : 0;
+                String suffix = group == 0 ? "Долги" : "предстоит";
+                tasks.add(new MonthTask(group, apartment + " платёж по номеру " + due, suffix, group == 0 ? red : gray));
+            }
+        }
+
+        if (ipDue > 0.009) {
+            String paidAt = firstNonEmpty(paymentDate(arr(charge, "payments"), "ip"), paymentDate(arr(charge, "payments"), "expense_fund"));
+            if (ipPaid + 0.009 >= ipDue) {
+                doneParts.add("ИП ✅ " + fallbackDate(paidAt, due));
+            } else {
+                int group = isFutureDate(charge.optString("due_date")) ? 1 : 0;
+                String suffix = group == 0 ? "Долги" : "предстоит";
+                tasks.add(new MonthTask(group, apartment + " платёж на ИП " + due, suffix, group == 0 ? red : gray));
+            }
+        }
+
+        if (!doneParts.isEmpty()) {
+            tasks.add(new MonthTask(2, apartment + " аренда", join(" | ", doneParts), green));
+        }
+        if ("deferred".equals(charge.optString("status"))) {
+            tasks.add(new MonthTask(1, apartment + " отсрочка", compactDate(charge.optString("deferral_until")), orange));
+        }
+    }
+
+    private void addUtilityMonthTasks(List<MonthTask> tasks, JSONObject bill) {
+        if (!sameSelectedMonth(scoreDateForItem("utility", bill))) return;
+        String service = bill.optString("service", "коммуналка");
+        String object = shortObjectName(bill.optString("object"));
+        String due = compactDate(bill.optString("due_date"));
+        if (bill.optBoolean("provider_paid")) {
+            tasks.add(new MonthTask(2, object + " поставщик " + service, "✅ " + compactDate(bill.optString("provider_paid_at")), green));
+        } else {
+            boolean future = isFutureDate(bill.optString("due_date"));
+            tasks.add(new MonthTask(future ? 1 : 1, object + " поставщик " + service + " " + due, future ? "предстоит" : "в работе", future ? gray : orange));
+        }
+        forEach(arr(bill, "lines"), line -> {
+            String apartment = compactApartment(line);
+            String lineDue = compactDate(line.optString("due_date"));
+            String paidAt = paymentDate(arr(line, "payments"), "utilities");
+            if (isDoneStatus(line.optString("status"))) {
+                tasks.add(new MonthTask(2, apartment + " коммуналка " + service, "✅ " + fallbackDate(paidAt, lineDue), green));
+            } else if (isFutureDate(line.optString("due_date"))) {
+                tasks.add(new MonthTask(1, apartment + " коммуналка " + service + " " + lineDue, "предстоит", gray));
+            } else if (isCriticalStatus(line.optString("status"))) {
+                tasks.add(new MonthTask(0, apartment + " коммуналка " + service + " " + lineDue, "Долги", red));
+            } else {
+                tasks.add(new MonthTask(1, apartment + " коммуналка " + service + " " + lineDue, statusLabel(line.optString("status")), orange));
+            }
+        });
+    }
+
+    private void addTaskSection(LinearLayout form, List<MonthTask> tasks, String title, int group, int color) {
+        boolean hasItems = false;
+        for (MonthTask task : tasks) {
+            if (task.group == group) {
+                if (!hasItems) {
+                    form.addView(section(title));
+                    hasItems = true;
+                }
+                form.addView(monthTaskCard(task.title, task.detail, task.color == 0 ? color : task.color));
+            }
+        }
+    }
+
+    private LinearLayout monthTaskCard(String title, String detail, int color) {
+        LinearLayout card = cardWithAccent(color);
+        card.setPadding(dp(12), dp(8), dp(12), dp(8));
+        card.addView(label(title, 15, text, true));
+        if (detail != null && !detail.trim().isEmpty()) {
+            card.addView(label(detail, 12, color == gray ? muted : color, true));
+        }
+        return card;
     }
 
     private void addGroupedAttentionCards(JSONObject dashboard) {
@@ -1605,15 +1744,38 @@ public class MainActivity extends Activity {
     }
 
     private Button smallButton(String title, View.OnClickListener listener) {
-        Button button = secondaryButton(title);
+        Button button = semanticSmallButton(title);
         button.setTextSize(12);
         button.setOnClickListener(listener);
         return button;
     }
 
     private Button smallButton(String title) {
-        Button button = secondaryButton(title);
+        Button button = semanticSmallButton(title);
         button.setTextSize(12);
+        return button;
+    }
+
+    private Button semanticSmallButton(String title) {
+        String lower = title == null ? "" : title.toLowerCase(Locale.forLanguageTag("ru-RU"));
+        if (lower.contains("выезд") || lower.contains("удал") || lower.contains("скры") || lower.contains("отключ")) {
+            return accentButton(title, red);
+        }
+        if (lower.contains("прин") || lower.contains("компенс") || lower.contains("оплачен") || lower.contains("включ")) {
+            return accentButton(title, green);
+        }
+        if (lower.contains("отср") || lower.contains("выстав") || lower.contains("напом")) {
+            return accentButton(title, orange);
+        }
+        if ("ип".equals(lower) || lower.contains("перевод") || lower.contains("оплата")) {
+            return accentButton(title, blue);
+        }
+        return secondaryButton(title);
+    }
+
+    private Button accentButton(String title, int accent) {
+        Button button = styledButton(title, surface2, accent);
+        button.setBackground(round(surface2, 255, dp(14), accent));
         return button;
     }
 
@@ -1623,7 +1785,9 @@ public class MainActivity extends Activity {
 
     private Button navButton(String title, boolean active) {
         Button button = styledButton(title, active ? Color.rgb(31, 38, 51) : Color.TRANSPARENT, active ? text : muted);
-        button.setTextSize(12);
+        button.setTextSize(11);
+        button.setGravity(Gravity.CENTER);
+        button.setLines(2);
         return button;
     }
 
@@ -1942,6 +2106,53 @@ public class MainActivity extends Activity {
         return "";
     }
 
+    private String join(String delimiter, List<String> values) {
+        StringBuilder builder = new StringBuilder();
+        for (String value : values) {
+            if (value == null || value.trim().isEmpty()) continue;
+            if (builder.length() > 0) builder.append(delimiter);
+            builder.append(value.trim());
+        }
+        return builder.toString();
+    }
+
+    private String compactApartment(JSONObject item) {
+        String object = shortObjectName(item.optString("object"));
+        String apartment = item.optString("apartment", "").trim();
+        if (object.isEmpty()) return apartment;
+        if (apartment.isEmpty()) return object;
+        return object + apartment;
+    }
+
+    private String shortObjectName(String value) {
+        String raw = value == null ? "" : value.trim();
+        String lower = raw.toLowerCase(Locale.forLanguageTag("ru-RU")).replace("ё", "е");
+        if (lower.contains("бел") || lower.contains("бд")) return "БД";
+        if (lower.contains("чер") || lower.contains("чд")) return "ЧД";
+        if (lower.contains("бан")) return "Баня";
+        return raw;
+    }
+
+    private String paymentDate(JSONArray payments, String channel) {
+        String result = "";
+        for (int i = 0; i < payments.length(); i++) {
+            JSONObject payment = payments.optJSONObject(i);
+            if (payment == null || !channel.equals(payment.optString("channel"))) continue;
+            result = compactDate(payment.optString("paid_at"));
+        }
+        return result;
+    }
+
+    private String fallbackDate(String value, String fallback) {
+        return value == null || value.trim().isEmpty() ? fallback : value;
+    }
+
+    private String compactDate(String value) {
+        String iso = isoDate(value);
+        if (iso.length() < 10) return "";
+        return iso.substring(8, 10) + "." + iso.substring(5, 7);
+    }
+
     private boolean sameSelectedMonth(String value) {
         String key = monthKey(value);
         return !key.isEmpty() && key.equals(selectedMonthKey());
@@ -2127,6 +2338,20 @@ public class MainActivity extends Activity {
         int color = 0;
         final Set<String> seen = new LinkedHashSet<>();
         final List<String> lines = new ArrayList<>();
+    }
+
+    private static final class MonthTask {
+        final int group;
+        final String title;
+        final String detail;
+        final int color;
+
+        MonthTask(int group, String title, String detail, int color) {
+            this.group = group;
+            this.title = title;
+            this.detail = detail;
+            this.color = color;
+        }
     }
 
     private class MonthProgressView extends View {

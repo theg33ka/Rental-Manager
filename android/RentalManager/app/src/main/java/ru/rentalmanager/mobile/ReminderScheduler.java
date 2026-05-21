@@ -17,6 +17,9 @@ final class ReminderScheduler {
         if (scheduler == null) return;
         if (!NotificationPrefs.notificationsEnabled(context)) {
             scheduler.cancel(JOB_ID);
+            NotificationHelper.cancel(context, NotificationHelper.NOTIFICATION_DIGEST);
+            NotificationHelper.cancel(context, NotificationHelper.NOTIFICATION_STICKY_DEBT);
+            context.stopService(new android.content.Intent(context, PersistentDebtService.class));
             return;
         }
         long period = Math.max(MIN_PERIOD_MS, NotificationPrefs.intervalMinutes(context) * 60L * 1000L);
@@ -32,5 +35,7 @@ final class ReminderScheduler {
         JobScheduler scheduler = (JobScheduler) context.getSystemService(Context.JOB_SCHEDULER_SERVICE);
         if (scheduler != null) scheduler.cancel(JOB_ID);
         NotificationHelper.cancel(context, NotificationHelper.NOTIFICATION_DIGEST);
+        NotificationHelper.cancel(context, NotificationHelper.NOTIFICATION_STICKY_DEBT);
+        context.stopService(new android.content.Intent(context, PersistentDebtService.class));
     }
 }

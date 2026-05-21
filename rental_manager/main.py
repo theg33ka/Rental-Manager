@@ -1379,6 +1379,17 @@ def lease_payment_target_options(session: Session, lease: Lease) -> dict[str, li
     }
 
 
+def serialize_payment_brief(receipt: PaymentReceipt) -> dict[str, Any]:
+    return {
+        "id": receipt.id,
+        "channel": receipt.channel,
+        "channel_label": receipt_channel_label(receipt.channel),
+        "amount": money(receipt.amount),
+        "status": receipt.status,
+        "paid_at": receipt.paid_at.isoformat(),
+    }
+
+
 def serialize_rent_charge(charge: RentCharge, session: Session | None = None) -> dict[str, Any]:
     update_rent_charge_status(charge)
     reminder_template_key = "message_rent_due" if charge.status == "pending" and charge.due_date == date.today() else "message_rent_overdue"
@@ -1407,6 +1418,11 @@ def serialize_rent_charge(charge: RentCharge, session: Session | None = None) ->
         "status": charge.status,
         "ip_status": status_for_amount(charge.ip_due, charge.ip_paid),
         "personal_status": status_for_amount(charge.personal_due, charge.personal_paid),
+        "payments": [
+            serialize_payment_brief(receipt)
+            for receipt in sorted(charge.receipts, key=lambda item: (item.paid_at, item.id))
+            if receipt.status == "accepted"
+        ],
         "deferral_until": charge.deferral_until.isoformat() if charge.deferral_until else None,
         "deferral_days_left": deferral_days_left,
         "deferral_note": charge.deferral_note,
@@ -1453,6 +1469,16 @@ def serialize_meter(meter: Meter) -> dict[str, Any]:
 
 def serialize_bill_line(line: UtilityBillLine, session: Session | None = None) -> dict[str, Any]:
     update_utility_line_status(line)
+    payments = []
+    if session:
+        payments = [
+            serialize_payment_brief(receipt)
+            for receipt in session.scalars(
+                select(PaymentReceipt)
+                .where(PaymentReceipt.utility_line_id == line.id, PaymentReceipt.status == "accepted")
+                .order_by(PaymentReceipt.paid_at, PaymentReceipt.id)
+            ).all()
+        ]
     return {
         "id": line.id,
         "bill_id": line.bill_id,
@@ -1471,6 +1497,7 @@ def serialize_bill_line(line: UtilityBillLine, session: Session | None = None) -
         "due_date": line.due_date.isoformat() if line.due_date else None,
         "note": line.note,
         "period_label": line.note,
+        "payments": payments,
         "bill_period_start": line.bill.period_start.isoformat(),
         "bill_period_end": line.bill.period_end.isoformat(),
         "bill_period_label": f"{line.bill.period_start:%d.%m.%Y} -> {line.bill.period_end:%d.%m.%Y} ({(line.bill.period_end - line.bill.period_start).days} дн.)",

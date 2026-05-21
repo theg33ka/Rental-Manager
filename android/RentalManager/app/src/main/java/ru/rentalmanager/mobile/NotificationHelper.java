@@ -15,7 +15,7 @@ final class NotificationHelper {
     static final String CHANNEL_REMINDERS = "rental_manager_reminders_sound_v2";
     static final String CHANNEL_REMINDERS_VIBRATE = "rental_manager_reminders_vibrate_v2";
     static final String CHANNEL_REMINDERS_SILENT = "rental_manager_reminders_silent_v2";
-    static final String CHANNEL_STICKY = "rental_manager_sticky_sound_v2";
+    static final String CHANNEL_STICKY = "rental_manager_status_panel_v3";
     static final int NOTIFICATION_DIGEST = 5101;
     static final int NOTIFICATION_STICKY_DEBT = 5102;
 
@@ -58,18 +58,23 @@ final class NotificationHelper {
 
         NotificationChannel sticky = new NotificationChannel(
             CHANNEL_STICKY,
-            "Постоянные предупреждения",
-            NotificationManager.IMPORTANCE_HIGH
+            "Статус Rental Manager",
+            NotificationManager.IMPORTANCE_LOW
         );
-        sticky.setDescription("Показывается, пока есть квартиры-должники без отсрочки.");
-        sticky.enableVibration(true);
+        sticky.setDescription("Компактная статус-панель, пока есть квартиры-должники без отсрочки.");
+        sticky.enableVibration(false);
+        sticky.setSound(null, null);
         sticky.setLightColor(Color.rgb(255, 69, 58));
         manager.createNotificationChannel(sticky);
     }
 
     static void notifyDigest(Context context, DashboardDigest digest, boolean manual) {
         ensureChannels(context);
-        updateStickyDebt(context, digest);
+        boolean statusPanelActive = updateStickyDebt(context, digest);
+        if (statusPanelActive && !manual) {
+            cancel(context, NOTIFICATION_DIGEST);
+            return;
+        }
         if (!NotificationPrefs.notificationsEnabled(context) && !manual) return;
         if (!manual && isQuietNow(context)) return;
         if (!manual && !digest.hasAlerts() && digest.networkOk && digest.authorized) {
@@ -93,11 +98,11 @@ final class NotificationHelper {
         manager.notify(NOTIFICATION_DIGEST, builder.build());
     }
 
-    static void updateStickyDebt(Context context, DashboardDigest digest) {
+    static boolean updateStickyDebt(Context context, DashboardDigest digest) {
         if (!NotificationPrefs.stickyDebtEnabled(context) || digest.debtorApartmentCount <= 0 || !canPostNotifications(context)) {
             cancel(context, NOTIFICATION_STICKY_DEBT);
             context.stopService(new Intent(context, PersistentDebtService.class));
-            return;
+            return false;
         }
         Intent service = new Intent(context, PersistentDebtService.class);
         service.putExtra("title", "Квартиры с долгами: " + digest.debtorApartmentCount);
@@ -112,6 +117,7 @@ final class NotificationHelper {
             NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
             if (manager != null) manager.notify(NOTIFICATION_STICKY_DEBT, stickyNotification(context, digest.title(), digest.text()));
         }
+        return true;
     }
 
     static Notification stickyNotification(Context context, String title, String text) {
@@ -120,12 +126,13 @@ final class NotificationHelper {
             .setSmallIcon(R.drawable.ic_stat_rental)
             .setContentTitle(title)
             .setContentText(text)
-            .setStyle(new Notification.BigTextStyle().bigText(text))
+            .setSubText("статус")
             .setContentIntent(openAppIntent(context))
             .setCategory(Notification.CATEGORY_STATUS)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
-            .setPriority(Notification.PRIORITY_MAX)
-            .setDefaults(Notification.DEFAULT_ALL)
+            .setPriority(Notification.PRIORITY_LOW)
+            .setDefaults(0)
+            .setOnlyAlertOnce(true)
             .setOngoing(true)
             .setAutoCancel(false)
             .setShowWhen(true)
