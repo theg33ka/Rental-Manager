@@ -55,26 +55,25 @@ final class NotificationRepository {
             return digest;
         }
 
-        addCount(context, digest, dashboard, "rent_overdue", NotificationPrefs.KEY_RENT_OVERDUE, "просрочка аренды");
-        addCount(context, digest, dashboard, "rent_partial", NotificationPrefs.KEY_RENT_PARTIAL, "частичная аренда");
-        addCount(context, digest, dashboard, "rent_today", NotificationPrefs.KEY_RENT_TODAY, "сегодня срок аренды");
-        addCount(context, digest, dashboard, "utility_overdue", NotificationPrefs.KEY_UTILITY_OVERDUE, "просрочена коммуналка");
-        addCount(context, digest, dashboard, "utility_partial", NotificationPrefs.KEY_UTILITY_OVERDUE, "частичная коммуналка");
-        addCount(context, digest, dashboard, "utility_issued", NotificationPrefs.KEY_UTILITY_ISSUED, "коммуналка выставлена");
-        addCount(context, digest, dashboard, "provider_debts", NotificationPrefs.KEY_PROVIDER_DEBTS, "поставщик не закрыт");
-        addCount(context, digest, dashboard, "stale_readings", NotificationPrefs.KEY_STALE_READINGS, "счётчики давно молчат");
-        addCount(context, digest, dashboard, "suspicious_receipts", NotificationPrefs.KEY_SUSPICIOUS_RECEIPTS, "подозрительные чеки");
-        addCount(context, digest, dashboard, "monthly_reports", NotificationPrefs.KEY_MONTHLY_REPORTS, "открытые месячные отчёты");
-        addCount(context, digest, dashboard, "manual_debts", NotificationPrefs.KEY_MANUAL_DEBTS, "ручные долги");
-
         Set<String> debtors = new LinkedHashSet<>();
         collectDebtors(debtors, dashboard.optJSONArray("rent_overdue"));
         collectDebtors(debtors, dashboard.optJSONArray("rent_partial"));
         collectDebtors(debtors, dashboard.optJSONArray("utility_overdue"));
         collectDebtors(debtors, dashboard.optJSONArray("utility_partial"));
         collectDebtors(debtors, dashboard.optJSONArray("manual_debts"));
-        digest.debtorApartments.addAll(debtors);
         digest.debtorApartmentCount = debtors.size();
+        if (digest.debtorApartmentCount > 0) {
+            digest.alertCount += digest.debtorApartmentCount;
+            digest.lines.add("Квартиры с долгами: " + digest.debtorApartmentCount);
+        }
+
+        addCount(context, digest, dashboard, "rent_today", NotificationPrefs.KEY_RENT_TODAY, "Срок аренды сегодня");
+        addCount(context, digest, dashboard, "rent_deferred", NotificationPrefs.KEY_RENT_OVERDUE, "Отсрочки");
+        addCount(context, digest, dashboard, "utility_issued", NotificationPrefs.KEY_UTILITY_ISSUED, "Коммуналка выставлена");
+        addCount(context, digest, dashboard, "provider_debts", NotificationPrefs.KEY_PROVIDER_DEBTS, "Поставщик не оплачен");
+        addStaleReadings(context, digest, dashboard);
+        addCount(context, digest, dashboard, "suspicious_receipts", NotificationPrefs.KEY_SUSPICIOUS_RECEIPTS, "Чеки на проверку");
+        addCount(context, digest, dashboard, "monthly_reports", NotificationPrefs.KEY_MONTHLY_REPORTS, "Месячные отчёты");
 
         return digest;
     }
@@ -87,6 +86,19 @@ final class NotificationRepository {
         digest.lines.add(label + ": " + count);
     }
 
+    private static void addStaleReadings(Context context, DashboardDigest digest, JSONObject dashboard) {
+        if (!NotificationPrefs.eventEnabled(context, NotificationPrefs.KEY_STALE_READINGS)) return;
+        JSONArray items = dashboard.optJSONArray("stale_readings");
+        if (items == null || items.length() == 0) return;
+        Set<String> objects = new LinkedHashSet<>();
+        for (int i = 0; i < items.length(); i++) {
+            JSONObject item = items.optJSONObject(i);
+            if (item != null) objects.add(shortObjectName(item.optString("object", "")));
+        }
+        digest.alertCount += items.length();
+        digest.lines.add("Не переданы показания: " + join(objects, "/"));
+    }
+
     private static void collectDebtors(Set<String> result, JSONArray items) {
         if (items == null) return;
         for (int i = 0; i < items.length(); i++) {
@@ -94,12 +106,27 @@ final class NotificationRepository {
             if (item == null) continue;
             String object = item.optString("object", "").trim();
             String apartment = item.optString("apartment", "").trim();
-            String tenant = item.optString("tenant", "").trim();
             String title = (object + " " + apartment).trim();
             if (title.isEmpty()) title = "квартира";
-            if (!tenant.isEmpty()) title = title + " — " + tenant;
             result.add(title);
         }
+    }
+
+    private static String shortObjectName(String value) {
+        String lower = value.toLowerCase();
+        if (lower.contains("бел") || lower.contains("бд")) return "БД";
+        if (lower.contains("чер") || lower.contains("чёр") || lower.contains("чд")) return "ЧД";
+        if (lower.contains("бан")) return "Баня";
+        return value == null || value.trim().isEmpty() ? "объект" : value.trim();
+    }
+
+    private static String join(Set<String> values, String delimiter) {
+        StringBuilder builder = new StringBuilder();
+        for (String value : values) {
+            if (builder.length() > 0) builder.append(delimiter);
+            builder.append(value);
+        }
+        return builder.toString();
     }
 
     private static String readAll(InputStream stream) throws Exception {

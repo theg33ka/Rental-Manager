@@ -7,16 +7,23 @@ import android.app.DownloadManager;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.InputType;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
@@ -32,11 +39,19 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 
 public class MainActivity extends Activity {
     private static final int REQUEST_NOTIFICATIONS = 7102;
+    private static final long CACHE_TTL_MS = 60_000L;
+    private static final long CONNECTION_CHECK_MIN_MS = 2_000L;
+    private static final long RECONNECT_INTERVAL_MS = 10_000L;
 
     private final int bg = Color.rgb(7, 10, 14);
     private final int surface = Color.rgb(18, 23, 31);
@@ -48,6 +63,7 @@ public class MainActivity extends Activity {
     private final int green = Color.rgb(48, 209, 88);
     private final int orange = Color.rgb(255, 159, 10);
     private final int red = Color.rgb(255, 69, 58);
+    private final int gray = Color.rgb(105, 112, 124);
 
     private ApiClient api;
     private LinearLayout root;
@@ -65,6 +81,27 @@ public class MainActivity extends Activity {
     private JSONArray suspiciousReceipts = new JSONArray();
     private String currentTab = "dashboard";
     private String servicesMode = "utilities";
+    private long bootstrapLoadedAt = 0L;
+    private long paymentsLoadedAt = 0L;
+    private long servicesLoadedAt = 0L;
+    private long moreLoadedAt = 0L;
+    private long lastConnectionCheckAt = 0L;
+    private boolean prefetchRunning = false;
+    private boolean reconnectLoopRunning = false;
+    private boolean lastConnectionOk = true;
+    private boolean activityResumed = false;
+    private Handler reconnectHandler;
+    private Calendar selectedMonth = Calendar.getInstance();
+    private float monthTouchStartX = 0f;
+
+    private final Runnable reconnectRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!reconnectLoopRunning || reconnectHandler == null) return;
+            checkServerConnection(true);
+            reconnectHandler.postDelayed(this, RECONNECT_INTERVAL_MS);
+        }
+    };
 
     interface Job {
         Object run() throws Exception;
@@ -78,6 +115,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         api = new ApiClient(this);
+        reconnectHandler = new Handler(Looper.getMainLooper());
         NotificationHelper.ensureChannels(this);
         requestNotificationPermission();
         buildShell();
@@ -85,6 +123,7 @@ public class MainActivity extends Activity {
         if (!NotificationPrefs.hasCustomBaseUrl(this)) {
             showHostDialog();
         } else {
+            checkServerConnection(true);
             checkAuthAndLoad();
         }
     }
@@ -92,7 +131,17 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        activityResumed = true;
         if (screenSubtitle != null) screenSubtitle.setText(api.baseUrl());
+        checkServerConnection(false);
+        if (!lastConnectionOk) startReconnectLoop();
+    }
+
+    @Override
+    protected void onPause() {
+        activityResumed = false;
+        stopReconnectLoop();
+        super.onPause();
     }
 
     private void buildShell() {
@@ -115,10 +164,7 @@ public class MainActivity extends Activity {
         titleBox.addView(screenSubtitle);
         header.addView(titleBox, new LinearLayout.LayoutParams(0, -2, 1));
 
-        Button host = pillButton("Хост", false);
         Button refresh = pillButton("Обновить", false);
-        header.addView(host);
-        header.addView(space(8), new LinearLayout.LayoutParams(dp(8), 1));
         header.addView(refresh);
         root.addView(header);
 
@@ -138,7 +184,6 @@ public class MainActivity extends Activity {
         root.addView(bottomBar, new LinearLayout.LayoutParams(-1, dp(72)));
         setContentView(root);
 
-        host.setOnClickListener(v -> showHostDialog());
         refresh.setOnClickListener(v -> loadCurrentTab(true));
         buildBottomNav();
     }
@@ -173,6 +218,44 @@ public class MainActivity extends Activity {
         });
     }
 
+    private void checkServerConnection(boolean force) {
+        if (!NotificationPrefs.hasCustomBaseUrl(this)) return;
+        long now = System.currentTimeMillis();
+        if (!force && now - lastConnectionCheckAt < CONNECTION_CHECK_MIN_MS) return;
+        lastConnectionCheckAt = now;
+        new Thread(() -> {
+            try {
+                api.getJson("/healthz");
+                runOnUiThread(() -> setConnectionStatus(true, "связь есть"));
+            } catch (Exception ex) {
+                runOnUiThread(() -> setConnectionStatus(false, "связи нет"));
+            }
+        }, "rental-health").start();
+    }
+
+    private void setConnectionStatus(boolean ok, String status) {
+        if (screenSubtitle == null) return;
+        lastConnectionOk = ok;
+        screenSubtitle.setText((ok ? "● " : "● ") + status + " · " + api.baseUrl());
+        screenSubtitle.setTextColor(ok ? green : red);
+        if (ok) {
+            stopReconnectLoop();
+        } else if (activityResumed) {
+            startReconnectLoop();
+        }
+    }
+
+    private void startReconnectLoop() {
+        if (reconnectLoopRunning || reconnectHandler == null || !NotificationPrefs.hasCustomBaseUrl(this)) return;
+        reconnectLoopRunning = true;
+        reconnectHandler.postDelayed(reconnectRunnable, RECONNECT_INTERVAL_MS);
+    }
+
+    private void stopReconnectLoop() {
+        reconnectLoopRunning = false;
+        if (reconnectHandler != null) reconnectHandler.removeCallbacks(reconnectRunnable);
+    }
+
     private void showLogin() {
         screenTitle.setText("Вход");
         screenSubtitle.setText(api.baseUrl());
@@ -195,57 +278,154 @@ public class MainActivity extends Activity {
     }
 
     private void loadCurrentTab(boolean force) {
+        if (!force && currentTabReady()) {
+            renderCurrentTab();
+            if (currentTabStale()) {
+                refreshCurrentTab(false);
+            }
+            return;
+        }
+        refreshCurrentTab(true);
+    }
+
+    private boolean currentTabReady() {
+        if ("dashboard".equals(currentTab) || "tenants".equals(currentTab)) return bootstrapLoadedAt > 0;
+        if ("payments".equals(currentTab)) return bootstrapLoadedAt > 0 && paymentsLoadedAt > 0;
+        if ("services".equals(currentTab)) return bootstrapLoadedAt > 0 && servicesLoadedAt > 0;
+        return bootstrapLoadedAt > 0 && moreLoadedAt > 0;
+    }
+
+    private boolean currentTabStale() {
+        long now = System.currentTimeMillis();
+        if (bootstrapLoadedAt <= 0 || now - bootstrapLoadedAt > CACHE_TTL_MS) return true;
+        if ("payments".equals(currentTab)) return paymentsLoadedAt <= 0 || now - paymentsLoadedAt > CACHE_TTL_MS;
+        if ("services".equals(currentTab)) return servicesLoadedAt <= 0 || now - servicesLoadedAt > CACHE_TTL_MS;
+        if ("more".equals(currentTab)) return moreLoadedAt <= 0 || now - moreLoadedAt > CACHE_TTL_MS;
+        return false;
+    }
+
+    private void renderCurrentTab() {
+        if ("dashboard".equals(currentTab)) renderDashboard();
+        else if ("tenants".equals(currentTab)) renderTenants();
+        else if ("payments".equals(currentTab)) renderPayments();
+        else if ("services".equals(currentTab)) renderServices();
+        else renderMore();
+    }
+
+    private void refreshCurrentTab(boolean visible) {
+        if (visible && !currentTabReady()) showLoadingCard();
         if ("dashboard".equals(currentTab)) {
-            runApi("Загружаю дашборд", () -> {
-                bootstrap = api.getJson("/api/bootstrap");
+            runApi("Обновляю дашборд", visible, () -> {
+                loadBootstrap();
                 return bootstrap;
-            }, value -> renderDashboard());
+            }, value -> {
+                renderDashboard();
+                prefetchSecondaryData();
+            });
         } else if ("tenants".equals(currentTab)) {
-            runApi("Загружаю жильцов", () -> {
-                bootstrap = api.getJson("/api/bootstrap");
+            runApi("Обновляю жильцов", visible, () -> {
+                loadBootstrap();
                 return bootstrap;
             }, value -> renderTenants());
         } else if ("payments".equals(currentTab)) {
-            runApi("Загружаю оплаты", () -> {
-                bootstrap = api.getJson("/api/bootstrap");
-                rentCharges = api.getArray("/api/rent-charges");
-                suspiciousReceipts = api.getArray("/api/payment-receipts/suspicious");
+            runApi("Обновляю оплаты", visible, () -> {
+                loadBootstrap();
+                loadPayments();
                 return null;
             }, value -> renderPayments());
         } else if ("services".equals(currentTab)) {
-            runApi("Загружаю учёт", () -> {
-                bootstrap = api.getJson("/api/bootstrap");
-                utilityBills = api.getArray("/api/utility-bills");
-                utilityTimeline = api.getArray("/api/utilities/timeline");
-                expenses = api.getArray("/api/expenses");
-                tariffs = api.getArray("/api/tariffs");
+            runApi("Обновляю учёт", visible, () -> {
+                loadBootstrap();
+                loadServices();
                 return null;
             }, value -> renderServices());
         } else {
-            runApi("Загружаю настройки", () -> {
-                bootstrap = api.getJson("/api/bootstrap");
-                messageTargets = api.getArray("/api/messages/targets");
+            runApi("Обновляю настройки", visible, () -> {
+                loadBootstrap();
+                loadMoreData();
                 return null;
             }, value -> renderMore());
         }
     }
 
+    private void loadBootstrap() throws Exception {
+        bootstrap = api.getJson("/api/bootstrap");
+        bootstrapLoadedAt = System.currentTimeMillis();
+    }
+
+    private void loadPayments() throws Exception {
+        rentCharges = api.getArray("/api/rent-charges");
+        suspiciousReceipts = api.getArray("/api/payment-receipts/suspicious");
+        paymentsLoadedAt = System.currentTimeMillis();
+    }
+
+    private void loadServices() throws Exception {
+        utilityBills = api.getArray("/api/utility-bills");
+        utilityTimeline = api.getArray("/api/utilities/timeline");
+        expenses = api.getArray("/api/expenses");
+        tariffs = api.getArray("/api/tariffs");
+        servicesLoadedAt = System.currentTimeMillis();
+    }
+
+    private void loadMoreData() throws Exception {
+        messageTargets = api.getArray("/api/messages/targets");
+        moreLoadedAt = System.currentTimeMillis();
+    }
+
+    private void prefetchSecondaryData() {
+        if (prefetchRunning) return;
+        prefetchRunning = true;
+        new Thread(() -> {
+            try {
+                if (paymentsLoadedAt <= 0 || System.currentTimeMillis() - paymentsLoadedAt > CACHE_TTL_MS) loadPayments();
+                if (servicesLoadedAt <= 0 || System.currentTimeMillis() - servicesLoadedAt > CACHE_TTL_MS) loadServices();
+                if (moreLoadedAt <= 0 || System.currentTimeMillis() - moreLoadedAt > CACHE_TTL_MS) loadMoreData();
+            } catch (Exception ignored) {
+                // Фоновая предзагрузка не должна ломать открытый экран. Ей и так стыдно.
+            } finally {
+                prefetchRunning = false;
+            }
+        }, "rental-prefetch").start();
+    }
+
+    private void invalidateAllCaches() {
+        bootstrapLoadedAt = 0L;
+        paymentsLoadedAt = 0L;
+        servicesLoadedAt = 0L;
+        moreLoadedAt = 0L;
+    }
+
+    private void showLoadingCard() {
+        content.removeAllViews();
+        LinearLayout card = card();
+        card.addView(label("Загружаю", 22, text, true));
+        card.addView(label("Один короткий запрос к серверу. Если долго - связь опять решила подумать.", 14, muted, false));
+        content.addView(card);
+    }
+
     private void renderDashboard() {
         screenTitle.setText("Пульт");
-        screenSubtitle.setText(api.baseUrl());
         content.removeAllViews();
         JSONObject dashboard = obj(bootstrap, "dashboard");
-        addHero("Дела по аренде", "Критичные карточки сверху, спокойные снизу. Всё нативно, без браузерных подпорок.");
+        if (showSection("dashboard_hero")) {
+            addHero("Дела по аренде", "Сводка по платежам, отчётам, счётчикам и коммунальным задачам.");
+        }
 
-        LinearLayout grid = new LinearLayout(this);
-        grid.setOrientation(LinearLayout.VERTICAL);
-        content.addView(grid);
-        addMetricRow(grid, "Просрочка аренды", len(dashboard, "rent_overdue"), "Коммуналка", len(dashboard, "utility_overdue"));
-        addMetricRow(grid, "Сегодня оплата", len(dashboard, "rent_today"), "Отчёты", len(dashboard, "monthly_reports"));
-        addMetricRow(grid, "Чеки проверить", len(dashboard, "suspicious_receipts"), "Счётчики", len(dashboard, "stale_readings"));
+        if (showSection("dashboard_progress")) {
+            addMonthProgressCard(dashboard);
+        }
+
+        if (showSection("dashboard_metrics")) {
+            LinearLayout grid = new LinearLayout(this);
+            grid.setOrientation(LinearLayout.VERTICAL);
+            content.addView(grid);
+            addMetricRow(grid, "Просрочка аренды", len(dashboard, "rent_overdue"), "Коммуналка", len(dashboard, "utility_overdue"));
+            addMetricRow(grid, "Сегодня оплата", len(dashboard, "rent_today"), "Отчёты", len(dashboard, "monthly_reports"));
+            addMetricRow(grid, "Чеки проверить", len(dashboard, "suspicious_receipts"), "Счётчики", len(dashboard, "stale_readings"));
+        }
 
         JSONArray reports = arr(dashboard, "monthly_reports");
-        if (reports.length() > 0) {
+        if (showSection("dashboard_reports") && reports.length() > 0) {
             content.addView(section("Месячные отчёты"));
             forEach(reports, item -> {
                 LinearLayout card = card();
@@ -258,81 +438,275 @@ public class MainActivity extends Activity {
             });
         }
 
-        content.addView(section("Требует внимания"));
-        addAttentionCards(dashboard, "rent_overdue", "Просрочена аренда", red, "payments");
-        addAttentionCards(dashboard, "rent_partial", "Частичная аренда", orange, "payments");
-        addAttentionCards(dashboard, "rent_today", "Сегодня срок оплаты", blue, "payments");
-        addAttentionCards(dashboard, "utility_overdue", "Долг по коммуналке", red, "services");
-        addAttentionCards(dashboard, "utility_issued", "Коммуналка выставлена", orange, "services");
-        addAttentionCards(dashboard, "manual_debts", "Ручной долг", orange, "payments");
-        addAttentionCards(dashboard, "stale_readings", "Давно нет показаний", blue, "services");
-        addAttentionCards(dashboard, "suspicious_receipts", "Подозрительный чек", red, "payments");
+        if (showSection("dashboard_attention")) {
+            content.addView(section("Требует внимания"));
+            addGroupedAttentionCards(dashboard);
+        }
         if (content.getChildCount() < 5) {
             LinearLayout ok = card();
             ok.addView(label("Критичных задач нет", 19, text, true));
-            ok.addView(label("Тихий день. Подозрительно, но приятно.", 14, muted, false));
+            ok.addView(label("Все обязательные действия на текущий момент закрыты.", 14, muted, false));
             content.addView(ok);
         }
     }
 
-    private void addAttentionCards(JSONObject dashboard, String key, String title, int color, String targetTab) {
-        JSONArray items = arr(dashboard, key);
-        forEach(items, item -> {
-            LinearLayout card = cardWithAccent(color);
-            card.addView(label(title, 17, text, true));
-            String where = joinNonEmpty(item.optString("object"), item.optString("apartment"));
-            String person = item.optString("tenant");
-            String amount = item.has("debt") ? money(item.optDouble("debt")) : item.has("total_cost") ? money(item.optDouble("total_cost")) : "";
-            card.addView(label(joinNonEmpty(where, person, amount), 14, muted, false));
+    private void addMonthProgressCard(JSONObject dashboard) {
+        MonthScore score = buildMonthScore(dashboard);
+        LinearLayout card = card();
+        card.setPadding(dp(14), dp(12), dp(14), dp(12));
+
+        TextView month = label(monthTitle(selectedMonth), 21, text, true);
+        month.setGravity(Gravity.CENTER);
+        card.addView(month);
+        TextView hint = label("Свайп влево или вправо меняет месяц", 12, muted, false);
+        hint.setGravity(Gravity.CENTER);
+        card.addView(hint);
+
+        MonthProgressView chart = new MonthProgressView(this);
+        chart.setScore(score);
+        card.addView(chart, new LinearLayout.LayoutParams(-1, dp(138)));
+
+        LinearLayout legend = row();
+        legend.addView(legendItem("Выполнено", green), new LinearLayout.LayoutParams(0, -2, 1));
+        legend.addView(legendItem("В работе", orange), new LinearLayout.LayoutParams(0, -2, 1));
+        legend.addView(legendItem("Долги", red), new LinearLayout.LayoutParams(0, -2, 1));
+        legend.addView(legendItem("Будущие", gray), new LinearLayout.LayoutParams(0, -2, 1));
+        card.addView(legend);
+
+        card.setOnTouchListener((view, event) -> {
+            if (event.getAction() == MotionEvent.ACTION_DOWN) {
+                monthTouchStartX = event.getX();
+                return true;
+            }
+            if (event.getAction() == MotionEvent.ACTION_UP) {
+                float dx = event.getX() - monthTouchStartX;
+                if (Math.abs(dx) > dp(48)) {
+                    shiftSelectedMonth(dx < 0 ? 1 : -1);
+                    renderDashboard();
+                }
+                return true;
+            }
+            return true;
+        });
+        content.addView(card);
+    }
+
+    private TextView legendItem(String title, int color) {
+        TextView view = label("● " + title, 11, color, true);
+        view.setGravity(Gravity.CENTER);
+        return view;
+    }
+
+    private void shiftSelectedMonth(int delta) {
+        selectedMonth.add(Calendar.MONTH, delta);
+    }
+
+    private MonthScore buildMonthScore(JSONObject dashboard) {
+        MonthScore score = new MonthScore();
+        boolean detailedData = rentCharges.length() > 0 || utilityBills.length() > 0;
+
+        forEach(rentCharges, charge -> {
+            if (!sameSelectedMonth(firstNonEmpty(charge.optString("period_start"), charge.optString("due_date")))) return;
+            addTaskByStatus(score, charge.optString("status"), charge.optString("due_date"), true);
+        });
+
+        forEach(utilityBills, bill -> {
+            if (!sameSelectedMonth(firstNonEmpty(bill.optString("period_end"), bill.optString("due_date")))) return;
+            addTaskByStatus(score, bill.optBoolean("provider_paid") ? "paid" : "issued", bill.optString("due_date"), false);
+            JSONArray lines = arr(bill, "lines");
+            forEach(lines, line -> addTaskByStatus(score, line.optString("status"), line.optString("due_date"), true));
+        });
+
+        forEach(arr(dashboard, "monthly_reports"), report -> {
+            if (report.optInt("year") == selectedMonth.get(Calendar.YEAR)
+                && report.optInt("month") == selectedMonth.get(Calendar.MONTH) + 1) {
+                addTaskByStatus(score, report.optString("severity", "open"), null, false);
+            }
+        });
+
+        if (sameSelectedMonth(today())) {
+            forEach(arr(dashboard, "stale_readings"), item -> score.warning++);
+            forEach(arr(dashboard, "provider_debts"), item -> addTaskByStatus(score, "issued", item.optString("due_date"), false));
+        }
+
+        if (!detailedData) {
+            collectScoreFromDashboard(score, dashboard, "rent_overdue", true);
+            collectScoreFromDashboard(score, dashboard, "rent_partial", true);
+            collectScoreFromDashboard(score, dashboard, "rent_today", false);
+            collectScoreFromDashboard(score, dashboard, "rent_deferred", false);
+            collectScoreFromDashboard(score, dashboard, "utility_overdue", true);
+            collectScoreFromDashboard(score, dashboard, "utility_partial", true);
+            collectScoreFromDashboard(score, dashboard, "utility_issued", false);
+            collectScoreFromDashboard(score, dashboard, "manual_debts", true);
+            collectScoreFromDashboard(score, dashboard, "suspicious_receipts", true);
+        }
+
+        return score;
+    }
+
+    private void collectScoreFromDashboard(MonthScore score, JSONObject dashboard, String key, boolean critical) {
+        forEach(arr(dashboard, key), item -> {
+            String date = firstNonEmpty(item.optString("period_start"), item.optString("bill_period_end"), item.optString("period_end"), item.optString("due_date"));
+            if (!sameSelectedMonth(date)) return;
+            addTaskByStatus(score, critical ? "overdue" : item.optString("status", "issued"), item.optString("due_date"), critical);
+        });
+    }
+
+    private void addTaskByStatus(MonthScore score, String status, String dueDate, boolean debtCanBeCritical) {
+        if (isFutureDate(dueDate)) {
+            score.upcoming++;
+        } else if (isDoneStatus(status)) {
+            score.done++;
+        } else if (debtCanBeCritical && isCriticalStatus(status)) {
+            score.critical++;
+        } else {
+            score.warning++;
+        }
+    }
+
+    private void addGroupedAttentionCards(JSONObject dashboard) {
+        Map<String, IssueGroup> groups = new LinkedHashMap<>();
+        collectAttention(groups, dashboard, "rent_overdue", "Просрочена аренда", red, "payments");
+        collectAttention(groups, dashboard, "rent_partial", "Частичная аренда", orange, "payments");
+        collectAttention(groups, dashboard, "rent_today", "Срок оплаты сегодня", orange, "payments");
+        collectAttention(groups, dashboard, "rent_deferred", "Отсрочка", orange, "payments");
+        collectAttention(groups, dashboard, "utility_overdue", "Долг по коммуналке", red, "services");
+        collectAttention(groups, dashboard, "utility_partial", "Частичная коммуналка", orange, "services");
+        collectAttention(groups, dashboard, "utility_issued", "Коммуналка к оплате", orange, "services");
+        collectAttention(groups, dashboard, "manual_debts", "Ручной долг", orange, "payments");
+        collectAttention(groups, dashboard, "stale_readings", "Нет показаний", orange, "services");
+        collectAttention(groups, dashboard, "provider_debts", "Поставщик не оплачен", orange, "services");
+        collectAttention(groups, dashboard, "suspicious_receipts", "Чек на проверку", red, "payments");
+
+        for (IssueGroup group : groups.values()) {
+            LinearLayout card = cardWithAccent(group.color);
+            card.setPadding(dp(14), dp(10), dp(14), dp(10));
+            card.addView(label(group.title, 17, text, true));
+            if (!group.tenant.isEmpty()) {
+                card.addView(label(group.tenant, 12, muted, false));
+            }
+            for (String line : group.lines) {
+                card.addView(label(line, 13, muted, false));
+            }
             Button open = secondaryButton("Открыть");
             open.setOnClickListener(v -> {
-                currentTab = targetTab;
+                currentTab = group.targetTab;
                 buildBottomNav();
                 loadCurrentTab(false);
             });
-            card.addView(open);
+            card.addView(open, new LinearLayout.LayoutParams(-1, dp(42)));
             content.addView(card);
+        }
+    }
+
+    private void collectAttention(Map<String, IssueGroup> groups, JSONObject dashboard, String key, String title, int color, String targetTab) {
+        forEach(arr(dashboard, key), item -> {
+            int effectiveColor = isFutureDate(item.optString("due_date")) ? gray : color;
+            String groupKey = attentionGroupKey(item, key);
+            IssueGroup group = groups.get(groupKey);
+            if (group == null) {
+                group = new IssueGroup();
+                group.title = attentionGroupTitle(item, title);
+                group.tenant = item.optString("tenant", "");
+                group.targetTab = targetTab;
+                group.color = effectiveColor;
+                groups.put(groupKey, group);
+            }
+            if (severityRank(effectiveColor) > severityRank(group.color)) group.color = effectiveColor;
+            if ("payments".equals(targetTab)) group.targetTab = "payments";
+            String issueKey = key + ":" + item.optInt("id", item.hashCode());
+            if (group.seen.add(issueKey)) {
+                group.lines.add(attentionLine(key, title, item));
+            }
         });
+    }
+
+    private String attentionGroupKey(JSONObject item, String fallback) {
+        String object = item.optString("object", "").trim();
+        String apartment = item.optString("apartment", "").trim();
+        if (!apartment.isEmpty()) return object + "|" + apartment;
+        String service = item.optString("service", "").trim();
+        if (!service.isEmpty()) return object + "|" + service;
+        return fallback + "|" + item.optInt("id", item.hashCode());
+    }
+
+    private String attentionGroupTitle(JSONObject item, String fallback) {
+        String where = joinNonEmpty(item.optString("object"), item.optString("apartment"));
+        if (!where.isEmpty()) return where;
+        String service = joinNonEmpty(item.optString("object"), item.optString("service"));
+        return service.isEmpty() ? fallback : service;
+    }
+
+    private String attentionLine(String key, String title, JSONObject item) {
+        String period = periodMonth(item);
+        String amount = item.has("debt") ? money(item.optDouble("debt")) : item.has("total_cost") ? money(item.optDouble("total_cost")) : "";
+        String due = item.optString("due_date", "");
+        if (key.startsWith("rent")) {
+            return joinNonEmpty(title + (period.isEmpty() ? "" : " за " + period), amount.isEmpty() ? "" : "долг " + amount, due.isEmpty() ? "" : "срок " + due);
+        }
+        if (key.startsWith("utility")) {
+            return joinNonEmpty(title + (item.optString("service").isEmpty() ? "" : " · " + item.optString("service")) + (period.isEmpty() ? "" : " за " + period), amount.isEmpty() ? "" : "долг " + amount, due.isEmpty() ? "" : "срок " + due);
+        }
+        if ("manual_debts".equals(key)) {
+            return joinNonEmpty(item.optString("title", title) + (period.isEmpty() ? "" : " за " + period), amount.isEmpty() ? "" : "долг " + amount, due.isEmpty() ? "" : "срок " + due);
+        }
+        if ("stale_readings".equals(key)) {
+            String last = item.optString("last_date", "");
+            String days = item.has("days") && !item.isNull("days") ? item.optInt("days") + " дн." : "";
+            return joinNonEmpty(title + " · " + item.optString("service"), last.isEmpty() ? "нет последнего показания" : "последнее " + last, days);
+        }
+        if ("provider_debts".equals(key)) {
+            return joinNonEmpty(title + " · " + item.optString("service") + (period.isEmpty() ? "" : " за " + period), item.has("total_cost") ? money(item.optDouble("total_cost")) : "", due.isEmpty() ? "" : "срок " + due);
+        }
+        return joinNonEmpty(title, item.optString("tenant"), amount);
     }
 
     private void renderTenants() {
         screenTitle.setText("Жильцы");
         content.removeAllViews();
-        addHero("Заселение и квартиры", "Карточки вместо таблиц. Да, таблицы тоже умеем, но пальцем по ним грустно.");
-        Button add = primaryButton("Заселить жильца");
-        add.setOnClickListener(v -> showOnboardDialog(null));
-        content.addView(add, new LinearLayout.LayoutParams(-1, dp(52)));
+        if (showSection("tenants_hero")) {
+            addHero("Заселение и квартиры", "Карточки вместо таблиц. Да, таблицы тоже умеем, но пальцем по ним грустно.");
+        }
+        if (showSection("tenants_onboard")) {
+            Button add = primaryButton("Заселить жильца");
+            add.setOnClickListener(v -> showOnboardDialog(null));
+            content.addView(add, new LinearLayout.LayoutParams(-1, dp(52)));
+        }
 
-        content.addView(section("Активные договоры"));
-        JSONArray leases = arr(bootstrap, "leases");
-        forEach(leases, lease -> {
-            if (!lease.optBoolean("active", true)) return;
-            LinearLayout card = card();
-            card.addView(label(lease.optString("tenant", "Жилец"), 19, text, true));
-            card.addView(label(joinNonEmpty(lease.optString("object"), lease.optString("apartment")) + " · с " + lease.optString("start_date"), 14, muted, false));
-            card.addView(label("ИП " + money(lease.optDouble("ip_amount")) + " · перевод " + money(lease.optDouble("personal_amount")), 14, muted, false));
-            LinearLayout actions = row();
-            actions.addView(smallButton("Изменить", v -> showOnboardDialog(lease)), new LinearLayout.LayoutParams(0, dp(42), 1));
-            actions.addView(smallButton(lease.optBoolean("ignored") ? "Учитывать" : "Скрыть", v -> toggleLeaseIgnore(lease)), new LinearLayout.LayoutParams(0, dp(42), 1));
-            actions.addView(smallButton("Выезд", v -> moveOut(lease)), new LinearLayout.LayoutParams(0, dp(42), 1));
-            card.addView(actions);
-            content.addView(card);
-        });
-
-        content.addView(section("Квартиры"));
-        JSONArray objects = arr(bootstrap, "objects");
-        forEach(objects, object -> {
-            JSONArray apartments = arr(object, "apartments");
-            forEach(apartments, apartment -> {
+        if (showSection("tenants_active_leases")) {
+            content.addView(section("Активные договоры"));
+            JSONArray leases = arr(bootstrap, "leases");
+            forEach(leases, lease -> {
+                if (!lease.optBoolean("active", true)) return;
                 LinearLayout card = card();
-                card.addView(label(object.optString("name") + " · " + apartment.optString("name"), 17, text, true));
-                card.addView(label(apartment.optBoolean("active", true) ? "активна" : "неактивна", 13, apartment.optBoolean("active", true) ? green : muted, false));
-                Button toggle = secondaryButton(apartment.optBoolean("active", true) ? "Отключить" : "Включить");
-                toggle.setOnClickListener(v -> toggleApartment(apartment));
-                card.addView(toggle);
+                card.addView(label(lease.optString("tenant", "Жилец"), 19, text, true));
+                card.addView(label(joinNonEmpty(lease.optString("object"), lease.optString("apartment")) + " · с " + lease.optString("start_date"), 14, muted, false));
+                card.addView(label("ИП " + money(lease.optDouble("ip_amount")) + " · перевод " + money(lease.optDouble("personal_amount")), 14, muted, false));
+                LinearLayout actions = row();
+                actions.addView(smallButton("Изменить", v -> showOnboardDialog(lease)), new LinearLayout.LayoutParams(0, dp(42), 1));
+                actions.addView(smallButton(lease.optBoolean("ignored") ? "Учитывать" : "Скрыть", v -> toggleLeaseIgnore(lease)), new LinearLayout.LayoutParams(0, dp(42), 1));
+                actions.addView(smallButton("Выезд", v -> moveOut(lease)), new LinearLayout.LayoutParams(0, dp(42), 1));
+                card.addView(actions);
                 content.addView(card);
             });
-        });
+        }
+
+        if (showSection("tenants_apartments")) {
+            content.addView(section("Квартиры"));
+            JSONArray objects = arr(bootstrap, "objects");
+            forEach(objects, object -> {
+                JSONArray apartments = arr(object, "apartments");
+                forEach(apartments, apartment -> {
+                    LinearLayout card = card();
+                    card.addView(label(object.optString("name") + " · " + apartment.optString("name"), 17, text, true));
+                    card.addView(label(apartment.optBoolean("active", true) ? "активна" : "неактивна", 13, apartment.optBoolean("active", true) ? green : muted, false));
+                    Button toggle = secondaryButton(apartment.optBoolean("active", true) ? "Отключить" : "Включить");
+                    toggle.setOnClickListener(v -> toggleApartment(apartment));
+                    card.addView(toggle);
+                    content.addView(card);
+                });
+            });
+        }
     }
 
     private void showOnboardDialog(JSONObject existing) {
@@ -413,28 +787,34 @@ public class MainActivity extends Activity {
     private void renderPayments() {
         screenTitle.setText("Оплаты");
         content.removeAllViews();
-        addHero("Аренда и платежи", "Долги, отсрочки, ручные оплаты и чеки. Деньги любят порядок, кто бы спорил.");
-        LinearLayout actions = row();
-        actions.addView(smallButton("Сгенерировать", v -> runApi("Генерирую", () -> api.postJson("/api/rent-charges/generate", new JSONObject()), value -> loadCurrentTab(true))), new LinearLayout.LayoutParams(0, dp(44), 1));
-        actions.addView(smallButton("Ручная оплата", v -> showManualPaymentDialog()), new LinearLayout.LayoutParams(0, dp(44), 1));
-        content.addView(actions);
+        if (showSection("payments_hero")) {
+            addHero("Аренда и платежи", "Долги, отсрочки, ручные оплаты и чеки. Деньги любят порядок, кто бы спорил.");
+        }
+        if (showSection("payments_actions")) {
+            LinearLayout actions = row();
+            actions.addView(smallButton("Сгенерировать", v -> runApi("Генерирую", () -> api.postJson("/api/rent-charges/generate", new JSONObject()), value -> loadCurrentTab(true))), new LinearLayout.LayoutParams(0, dp(44), 1));
+            actions.addView(smallButton("Ручная оплата", v -> showManualPaymentDialog()), new LinearLayout.LayoutParams(0, dp(44), 1));
+            content.addView(actions);
+        }
 
-        content.addView(section("Аренда"));
-        forEach(rentCharges, charge -> {
-            LinearLayout card = cardWithAccent(statusColor(charge.optString("status")));
-            card.addView(label(joinNonEmpty(charge.optString("object"), charge.optString("apartment")), 18, text, true));
-            card.addView(label(charge.optString("tenant") + " · срок " + charge.optString("due_date"), 14, muted, false));
-            card.addView(label("К оплате " + money(charge.optDouble("total_due")) + " · долг " + money(charge.optDouble("debt")), 14, muted, false));
-            card.addView(label(charge.optString("status"), 13, statusColor(charge.optString("status")), true));
-            LinearLayout row1 = row();
-            row1.addView(smallButton("ИП", v -> payRent(charge, "ip")), new LinearLayout.LayoutParams(0, dp(42), 1));
-            row1.addView(smallButton("Перевод", v -> payRent(charge, "personal")), new LinearLayout.LayoutParams(0, dp(42), 1));
-            row1.addView(smallButton("Отсрочка", v -> deferRent(charge)), new LinearLayout.LayoutParams(0, dp(42), 1));
-            card.addView(row1);
-            content.addView(card);
-        });
+        if (showSection("payments_rent")) {
+            content.addView(section("Аренда"));
+            forEach(rentCharges, charge -> {
+                LinearLayout card = cardWithAccent(statusColor(charge.optString("status")));
+                card.addView(label(joinNonEmpty(charge.optString("object"), charge.optString("apartment")), 18, text, true));
+                card.addView(label(charge.optString("tenant") + " · срок " + charge.optString("due_date"), 14, muted, false));
+                card.addView(label("К оплате " + money(charge.optDouble("total_due")) + " · долг " + money(charge.optDouble("debt")), 14, muted, false));
+                card.addView(label(charge.optString("status"), 13, statusColor(charge.optString("status")), true));
+                LinearLayout row1 = row();
+                row1.addView(smallButton("ИП", v -> payRent(charge, "ip")), new LinearLayout.LayoutParams(0, dp(42), 1));
+                row1.addView(smallButton("Перевод", v -> payRent(charge, "personal")), new LinearLayout.LayoutParams(0, dp(42), 1));
+                row1.addView(smallButton("Отсрочка", v -> deferRent(charge)), new LinearLayout.LayoutParams(0, dp(42), 1));
+                card.addView(row1);
+                content.addView(card);
+            });
+        }
 
-        if (suspiciousReceipts.length() > 0) {
+        if (showSection("payments_suspicious") && suspiciousReceipts.length() > 0) {
             content.addView(section("Чеки на проверку"));
             forEach(suspiciousReceipts, receipt -> {
                 LinearLayout card = cardWithAccent(red);
@@ -489,13 +869,17 @@ public class MainActivity extends Activity {
     private void renderServices() {
         screenTitle.setText("Учёт");
         content.removeAllViews();
-        addHero("Коммуналка, счётчики, расходы", "Всё, что обычно расползается по вкладкам, собрано в один рабочий экран.");
-        LinearLayout tabs = row();
-        tabs.addView(modeButton("Коммуналка", "utilities"), new LinearLayout.LayoutParams(0, dp(44), 1));
-        tabs.addView(modeButton("Счётчики", "meters"), new LinearLayout.LayoutParams(0, dp(44), 1));
-        tabs.addView(modeButton("Тарифы", "tariffs"), new LinearLayout.LayoutParams(0, dp(44), 1));
-        tabs.addView(modeButton("Расходы", "expenses"), new LinearLayout.LayoutParams(0, dp(44), 1));
-        content.addView(tabs);
+        if (showSection("services_hero")) {
+            addHero("Коммуналка, счётчики, расходы", "Всё, что обычно расползается по вкладкам, собрано в один рабочий экран.");
+        }
+        if (showSection("services_modes")) {
+            LinearLayout tabs = row();
+            tabs.addView(modeButton("Коммуналка", "utilities"), new LinearLayout.LayoutParams(0, dp(44), 1));
+            tabs.addView(modeButton("Счётчики", "meters"), new LinearLayout.LayoutParams(0, dp(44), 1));
+            tabs.addView(modeButton("Тарифы", "tariffs"), new LinearLayout.LayoutParams(0, dp(44), 1));
+            tabs.addView(modeButton("Расходы", "expenses"), new LinearLayout.LayoutParams(0, dp(44), 1));
+            content.addView(tabs);
+        }
         if ("meters".equals(servicesMode)) renderMeters();
         else if ("tariffs".equals(servicesMode)) renderTariffs();
         else if ("expenses".equals(servicesMode)) renderExpenses();
@@ -503,9 +887,12 @@ public class MainActivity extends Activity {
     }
 
     private void renderUtilities() {
-        Button calculate = primaryButton("Рассчитать коммуналку");
-        calculate.setOnClickListener(v -> showUtilityCalcDialog());
-        content.addView(calculate, new LinearLayout.LayoutParams(-1, dp(52)));
+        if (showSection("services_utility_calculate")) {
+            Button calculate = primaryButton("Рассчитать коммуналку");
+            calculate.setOnClickListener(v -> showUtilityCalcDialog());
+            content.addView(calculate, new LinearLayout.LayoutParams(-1, dp(52)));
+        }
+        if (!showSection("services_utility_bills")) return;
         content.addView(section("Счета"));
         forEach(utilityBills, bill -> {
             LinearLayout card = cardWithAccent(bill.optBoolean("provider_paid") ? green : orange);
@@ -522,9 +909,12 @@ public class MainActivity extends Activity {
     }
 
     private void renderMeters() {
-        Button add = primaryButton("Добавить показание");
-        add.setOnClickListener(v -> showReadingDialog());
-        content.addView(add, new LinearLayout.LayoutParams(-1, dp(52)));
+        if (showSection("services_meter_add")) {
+            Button add = primaryButton("Добавить показание");
+            add.setOnClickListener(v -> showReadingDialog());
+            content.addView(add, new LinearLayout.LayoutParams(-1, dp(52)));
+        }
+        if (!showSection("services_meter_list")) return;
         content.addView(section("Счётчики"));
         forEach(arr(bootstrap, "meters"), meter -> {
             LinearLayout card = card();
@@ -535,9 +925,12 @@ public class MainActivity extends Activity {
     }
 
     private void renderTariffs() {
-        Button add = primaryButton("Добавить тариф");
-        add.setOnClickListener(v -> showTariffDialog());
-        content.addView(add, new LinearLayout.LayoutParams(-1, dp(52)));
+        if (showSection("services_tariff_add")) {
+            Button add = primaryButton("Добавить тариф");
+            add.setOnClickListener(v -> showTariffDialog());
+            content.addView(add, new LinearLayout.LayoutParams(-1, dp(52)));
+        }
+        if (!showSection("services_tariff_list")) return;
         content.addView(section("Тарифы"));
         forEach(tariffs, tariff -> {
             LinearLayout card = card();
@@ -548,9 +941,12 @@ public class MainActivity extends Activity {
     }
 
     private void renderExpenses() {
-        Button add = primaryButton("Добавить расход");
-        add.setOnClickListener(v -> showExpenseDialog());
-        content.addView(add, new LinearLayout.LayoutParams(-1, dp(52)));
+        if (showSection("services_expense_add")) {
+            Button add = primaryButton("Добавить расход");
+            add.setOnClickListener(v -> showExpenseDialog());
+            content.addView(add, new LinearLayout.LayoutParams(-1, dp(52)));
+        }
+        if (!showSection("services_expense_list")) return;
         content.addView(section("Расходы"));
         forEach(expenses, expense -> {
             LinearLayout card = cardWithAccent("pending".equals(expense.optString("compensation_status")) ? orange : green);
@@ -567,14 +963,25 @@ public class MainActivity extends Activity {
     private void renderMore() {
         screenTitle.setText("Ещё");
         content.removeAllViews();
-        addHero("Отчёты, сообщения, настройки", "Редкие, но важные действия. Прячем не потому что стыдно, а потому что каждый день они не нужны.");
+        if (showSection("more_hero")) {
+            addHero("Отчёты, сообщения, настройки", "Редкие, но важные действия. Прячем не потому что стыдно, а потому что каждый день они не нужны.");
+        }
 
+        LinearLayout ui = card();
+        ui.addView(label("Видимость экранов", 19, text, true));
+        ui.addView(label("Выбери, какие блоки показывать на каждой странице. Спрячем лишнее, пусть не шумит.", 14, muted, false));
+        ui.addView(primaryButton("Настроить страницы", v -> showPageSectionsDialog()));
+        content.addView(ui);
+
+        if (showSection("more_notifications")) {
         LinearLayout notif = card();
         notif.addView(label("Пуш-уведомления", 19, text, true));
         notif.addView(label("Частота, тихие часы, типы событий и постоянный debt-alert.", 14, muted, false));
         notif.addView(primaryButton("Настроить", v -> startActivity(new Intent(this, NotificationSettingsActivity.class))));
         content.addView(notif);
+        }
 
+        if (showSection("more_reports")) {
         LinearLayout reports = card();
         reports.addView(label("Excel-отчёты", 19, text, true));
         EditText start = input("2026-05-01", false);
@@ -594,20 +1001,26 @@ public class MainActivity extends Activity {
             }));
         }
         content.addView(reports);
+        }
 
+        if (showSection("more_messages")) {
         LinearLayout messages = card();
         messages.addView(label("Сообщения жильцам", 19, text, true));
         messages.addView(label("Превью и отправка через Telegram-бота.", 14, muted, false));
         messages.addView(primaryButton("Открыть получателей", v -> showMessageTargets()));
         messages.addView(secondaryButton("Прогнать напоминания", v -> runApi("Напоминания", () -> api.postJson("/api/reminders/run", new JSONObject()), value -> toast("Напоминания обработаны"))));
         content.addView(messages);
+        }
 
+        if (showSection("more_server_settings")) {
         LinearLayout settings = card();
         settings.addView(label("Настройки сервера", 19, text, true));
+        settings.addView(secondaryButton("Сменить хост", v -> showHostDialog()));
         settings.addView(secondaryButton("Открыть", v -> showServerSettingsDialog()));
         settings.addView(secondaryButton("Экспорт базы", v -> download("/api/admin/database-export", "rental-manager-db.json")));
         settings.addView(secondaryButton("Выйти из PIN-сессии", v -> logout()));
         content.addView(settings);
+        }
     }
 
     private void showMessageTargets() {
@@ -620,6 +1033,76 @@ public class MainActivity extends Activity {
             list.addView(card);
         });
         new AlertDialog.Builder(this).setTitle("Получатели").setView(wrapDialog(list)).setPositiveButton("Закрыть", null).show();
+    }
+
+    private boolean showSection(String key) {
+        return NotificationPrefs.prefs(this).getBoolean("ui_" + key, true);
+    }
+
+    private void showPageSectionsDialog() {
+        LinearLayout form = dialogForm();
+        List<CheckBox> boxes = new ArrayList<>();
+        addSectionGroup(form, boxes, "Дом", new String[][]{
+            {"dashboard_hero", "Верхняя карточка"},
+            {"dashboard_metrics", "Счётчики состояния"},
+            {"dashboard_reports", "Месячные отчёты"},
+            {"dashboard_attention", "Требует внимания"}
+        });
+        addSectionGroup(form, boxes, "Жильцы", new String[][]{
+            {"tenants_hero", "Верхняя карточка"},
+            {"tenants_onboard", "Кнопка заселения"},
+            {"tenants_active_leases", "Активные договоры"},
+            {"tenants_apartments", "Квартиры"}
+        });
+        addSectionGroup(form, boxes, "Оплаты", new String[][]{
+            {"payments_hero", "Верхняя карточка"},
+            {"payments_actions", "Быстрые действия"},
+            {"payments_rent", "Арендные начисления"},
+            {"payments_suspicious", "Чеки на проверку"}
+        });
+        addSectionGroup(form, boxes, "Учёт", new String[][]{
+            {"services_hero", "Верхняя карточка"},
+            {"services_modes", "Переключатель подразделов"},
+            {"services_utility_calculate", "Кнопка расчёта коммуналки"},
+            {"services_utility_bills", "Счета коммуналки"},
+            {"services_meter_add", "Кнопка показания"},
+            {"services_meter_list", "Список счётчиков"},
+            {"services_tariff_add", "Кнопка тарифа"},
+            {"services_tariff_list", "Список тарифов"},
+            {"services_expense_add", "Кнопка расхода"},
+            {"services_expense_list", "Список расходов"}
+        });
+        addSectionGroup(form, boxes, "Ещё", new String[][]{
+            {"more_hero", "Верхняя карточка"},
+            {"more_notifications", "Пуш-уведомления"},
+            {"more_reports", "Excel-отчёты"},
+            {"more_messages", "Сообщения"},
+            {"more_server_settings", "Настройки сервера"}
+        });
+        new AlertDialog.Builder(this)
+            .setTitle("Что показывать")
+            .setView(wrapDialog(form))
+            .setPositiveButton("Сохранить", (dialog, which) -> {
+                SharedPreferences.Editor editor = NotificationPrefs.prefs(this).edit();
+                for (CheckBox box : boxes) {
+                    editor.putBoolean("ui_" + box.getTag().toString(), box.isChecked());
+                }
+                editor.apply();
+                renderCurrentTab();
+            })
+            .setNegativeButton("Отмена", null)
+            .show();
+    }
+
+    private void addSectionGroup(LinearLayout form, List<CheckBox> boxes, String title, String[][] items) {
+        form.addView(section(title));
+        for (String[] item : items) {
+            CheckBox box = checkbox(item[1]);
+            box.setTag(item[0]);
+            box.setChecked(showSection(item[0]));
+            boxes.add(box);
+            form.addView(box);
+        }
     }
 
     private void showServerSettingsDialog() {
@@ -899,7 +1382,9 @@ public class MainActivity extends Activity {
             .setView(input)
             .setPositiveButton("Сохранить", (dialog, which) -> {
                 NotificationPrefs.setBaseUrl(this, input.getText().toString());
+                invalidateAllCaches();
                 screenSubtitle.setText(api.baseUrl());
+                checkServerConnection(true);
                 checkAuthAndLoad();
             })
             .setNegativeButton("Отмена", null)
@@ -924,18 +1409,29 @@ public class MainActivity extends Activity {
     }
 
     private void runApi(String loading, Job job, Done done) {
-        toast(loading + "...");
+        runApi(loading, true, job, done);
+    }
+
+    private void runApi(String loading, boolean notify, Job job, Done done) {
+        if (notify) toast(loading + "...");
         new Thread(() -> {
             try {
                 Object result = job.run();
-                runOnUiThread(() -> done.run(result));
+                runOnUiThread(() -> {
+                    setConnectionStatus(true, "связь есть");
+                    done.run(result);
+                });
             } catch (ApiClient.ApiException ex) {
                 runOnUiThread(() -> {
                     if (ex.statusCode == 401 || ex.statusCode == 403) showLogin();
+                    else setConnectionStatus(false, "ошибка " + ex.statusCode);
                     toast(ex.getMessage());
                 });
             } catch (Exception ex) {
-                runOnUiThread(() -> toast(ex.getMessage() == null ? "Ошибка" : ex.getMessage()));
+                runOnUiThread(() -> {
+                    setConnectionStatus(false, "связи нет");
+                    toast(ex.getMessage() == null ? "Ошибка" : ex.getMessage());
+                });
             }
         }, "rental-api").start();
     }

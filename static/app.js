@@ -182,6 +182,27 @@ async function api(path, options = {}) {
   const data = parseJson();
   return data ?? rawText;
 }
+
+async function downloadFile(path, fallbackFilename = "download") {
+  const response = await fetch(path, { credentials: "same-origin" });
+  if (!response.ok) {
+    const rawText = await response.text();
+    throw new Error(rawText || "Не удалось скачать файл");
+  }
+  const blob = await response.blob();
+  const contentDisposition = response.headers.get("Content-Disposition") || "";
+  const match = contentDisposition.match(/filename=\"?([^\";]+)\"?/i);
+  const filename = (match && match[1]) || fallbackFilename;
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 function toast(message) {
   const node = qs("#toast");
   node.textContent = message;
