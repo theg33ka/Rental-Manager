@@ -10,7 +10,7 @@ public class PersistentDebtService extends Service {
         String title = intent == null ? "" : intent.getStringExtra("title");
         String text = intent == null ? "" : intent.getStringExtra("text");
         if (title == null || title.trim().isEmpty()) title = "Есть квартиры-должники";
-        if (text == null || text.trim().isEmpty()) text = "Пока долг без отсрочки висит на дашборде, уведомление тоже висит. А куда ему деваться?";
+        if (text == null || text.trim().isEmpty()) text = "Постоянное уведомление активно, пока на дашборде есть долги без отсрочки.";
         startForeground(NotificationHelper.NOTIFICATION_STICKY_DEBT, NotificationHelper.stickyNotification(this, title, text));
         return START_STICKY;
     }

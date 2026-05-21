@@ -170,6 +170,7 @@ REPORT_START_MONTH = date(2026, 1, 1)
 PANEL_AUTH_COOKIE = "rental_manager_panel_session"
 PANEL_AUTH_MAX_AGE_SECONDS = 60 * 60 * 24 * 180
 PANEL_ALLOWED_GUEST_TAB_PATHS = {"/api/bootstrap"}
+MOBILE_APK_PATH = ROOT_DIR / "android" / "RentalManager" / "build" / "rental-manager-mobile.apk"
 MONTH_NAMES = [
     "январь",
     "февраль",
@@ -234,10 +235,22 @@ def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/mobile-app.apk")
+def mobile_app_apk() -> FileResponse:
+    if not MOBILE_APK_PATH.exists():
+        raise HTTPException(status_code=404, detail="APK ещё не собран")
+    return FileResponse(
+        MOBILE_APK_PATH,
+        media_type="application/vnd.android.package-archive",
+        filename="rental-manager-mobile.apk",
+    )
+
+
 def is_public_path(path: str) -> bool:
     return path in {
         "/",
         "/healthz",
+        "/mobile-app.apk",
         "/api/auth/status",
         "/api/auth/pin",
         "/api/auth/logout",

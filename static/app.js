@@ -292,8 +292,11 @@ function editingLease() {
   return state.bootstrap?.leases?.find((lease) => lease.id === state.editingLeaseId) || null;
 }
 
-function statusPill(status) {
-  const cls = status === "overdue" || status === "suspicious"
+function statusPill(status, dueDate = "") {
+  const future = isFutureDue(dueDate) && !["paid", "paid_ahead", "accepted", "compensated", "not_required"].includes(status);
+  const cls = future
+    ? "future"
+    : status === "overdue" || status === "suspicious"
     ? "danger"
     : status === "partial" || status === "deferred"
       ? "warn"
@@ -301,6 +304,12 @@ function statusPill(status) {
         ? "ok"
         : "";
   return `<span class="pill ${cls}">${statusText[status] || status}</span>`;
+}
+
+function isFutureDue(value) {
+  const parsed = parseLocalDate(value);
+  const current = parseLocalDate(appToday());
+  return Boolean(parsed && current && parsed > current);
 }
 
 function appToday() {
@@ -719,7 +728,7 @@ function renderDashboard() {
   dashboard.provider_debts.forEach((item) => cards.push(attentionCard("danger", "Поставщик не отмечен как оплаченный", `${item.object}: ${item.service} за ${formatDateRange(item.period_start, item.period_end)}. Сумма ${money(item.total_cost)}.`, `<button class="mini primary" onclick="providerPaid(${item.id})">Поставщик оплачен</button><button class="mini" onclick="openUtilitiesTab()">Открыть коммуналку</button>`, attentionBadges(item.period_end, null, "деньги у поставщика ещё не закрыты"))));
   dashboard.stale_readings.forEach((item) => cards.push(attentionCard("warn", "Давно нет показаний", `${item.object}: ${item.service}. Последнее: ${item.last_date ? formatDate(item.last_date) : "нет"}.`, `<button class="mini" onclick="openMetersTab()">Открыть счётчики</button><button class="mini" onclick="openUtilitiesTab()">Быстрая передача</button>`, attentionBadges(item.last_date || appToday(), null, item.days ? `${item.days} дн. без обновления` : "пока пусто"))));
   dashboard.suspicious_receipts.forEach((item) => cards.push(attentionCard("danger", "Подозрительный чек", `${money(item.amount)}. ${item.recipient_name || "получатель не распознан"}. ${item.notes || ""}`, `<button class="mini" onclick="openMessagesTab()">Открыть сообщения</button>`, attentionBadges(item.created_at, null, "нужна ручная проверка"))));
-  qs("#attentionList").innerHTML = cards.join("") || `<div class="card ok"><h3>Критичных задач нет</h3><p class="muted">Редкий момент, когда приложение не ругается. Подозрительно, но приятно.</p></div>`;
+  qs("#attentionList").innerHTML = cards.join("") || `<div class="card ok"><h3>Критичных задач нет</h3><p class="muted">Все обязательные действия на текущий момент закрыты.</p></div>`;
 }
 
 const dashboardIssueMeta = {
@@ -733,11 +742,13 @@ const dashboardIssueMeta = {
   manual_debt: { priority: 74, tone: "manual-debt", title: "Ручной долг" },
 };
 
-function issuePriority(issueKind) {
+function issuePriority(issueKind, item = null) {
+  if (item && isFutureDue(item.due_date)) return 1;
   return dashboardIssueMeta[issueKind]?.priority || 1;
 }
 
-function issueTone(issueKind) {
+function issueTone(issueKind, item = null) {
+  if (item && isFutureDue(item.due_date)) return "future";
   return dashboardIssueMeta[issueKind]?.tone || "warn";
 }
 
@@ -799,14 +810,14 @@ function collectTenantAttentionGroups(dashboard) {
       key: entryKey,
       id: item.id,
       kind: issueKind,
-      tone: issueTone(issueKind),
+      tone: issueTone(issueKind, item),
       title: issueTitle(issueKind),
       text: issueKind === "manual_debt" ? manualDebtIssueLine(item) : issueKind.startsWith("utility") ? utilityIssueLine(item, issueKind) : rentIssueLine(item, issueKind),
       reminder: item.reminder,
       date: issueDate(item, issueKind),
       item,
     };
-    if (!existing || issuePriority(issueKind) > issuePriority(existing.kind)) {
+    if (!existing || issuePriority(issueKind, item) > issuePriority(existing.kind, existing.item)) {
       group.issueMap.set(entryKey, nextIssue);
     }
     if (issueKind === "manual_debt") group.manualDebtMap.set(item.id, item);
@@ -826,7 +837,7 @@ function collectTenantAttentionGroups(dashboard) {
   return [...groups.values()]
     .map((group) => {
       const issues = [...group.issueMap.values()].sort((left, right) =>
-        issuePriority(right.kind) - issuePriority(left.kind) || String(left.date).localeCompare(String(right.date))
+        issuePriority(right.kind, right.item) - issuePriority(left.kind, left.item) || String(left.date).localeCompare(String(right.date))
       );
       const rentItems = [...group.rentMap.values()].sort((left, right) => String(left.due_date).localeCompare(String(right.due_date)));
       const utilityItems = [...group.utilityMap.values()].sort((left, right) => String(left.bill_period_end || left.due_date).localeCompare(String(right.bill_period_end || right.due_date)));
@@ -844,7 +855,7 @@ function collectTenantAttentionGroups(dashboard) {
       };
     })
     .sort((left, right) =>
-      issuePriority(right.topIssue?.kind) - issuePriority(left.topIssue?.kind) ||
+      issuePriority(right.topIssue?.kind, right.topIssue?.item) - issuePriority(left.topIssue?.kind, left.topIssue?.item) ||
       `${left.object} ${left.apartment}`.localeCompare(`${right.object} ${right.apartment}`, "ru")
     );
 }
@@ -1168,7 +1179,7 @@ function renderManualDebtModal() {
       <td>${escapeHtml(debt.title || "")}<br><span class="muted">${escapeHtml(debt.period_label || formatDate(debt.due_date))}</span></td>
       <td>${money(debt.amount)}<br><span class="muted">оплачено ${money(debt.paid_amount)}</span></td>
       <td>${money(debt.debt)}</td>
-      <td>${statusPill(debt.status)}</td>
+      <td>${statusPill(debt.status, debt.due_date)}</td>
       <td class="actions">
         <button class="mini" type="button" onclick="editManualDebt(${debt.id})">Ред.</button>
         <button class="mini danger-soft" type="button" onclick="deleteManualDebt(${debt.id})">Удалить</button>
@@ -1308,7 +1319,7 @@ function tenantAttentionCard(group) {
     </div>
   `;
   return attentionCard(
-    issueTone(group.topIssue?.kind),
+    group.topIssue?.tone || issueTone(group.topIssue?.kind, group.topIssue?.item),
     `${group.object}, ${group.apartment}<br><span class="muted">${group.tenant}</span>`,
     `<p class="attention-lead">${attentionLeadText(group)}</p><div class="attention-issue-list">${issueList}</div>${reminderBlock}`,
     `<div class="attention-card__footer-actions"><button class="mini primary" onclick="openManualAllocation(${group.leaseId})">Зачесть вручную</button><button class="mini" onclick="openPaymentHistory(${group.leaseId})">История</button>${group.primaryRent ? `<button class="mini" onclick="deferRent(${group.primaryRent.id})">Отсрочка</button>` : `<button class="mini" type="button" disabled>Отсрочка</button>`}</div>`,
@@ -1317,12 +1328,13 @@ function tenantAttentionCard(group) {
 }
 
 function providerDebtCard(item) {
+  const future = isFutureDue(item.due_date);
   return attentionCard(
-    "provider",
+    future ? "future" : "provider",
     "Не оплачены услуги поставщика",
     `<p class="attention-lead">${item.object}: ${item.service}</p><div class="attention-issue-list"><article class="attention-issue"><strong>Период</strong><div>${formatDateRange(item.period_start, item.period_end)}. Сумма ${money(item.total_cost)}.</div></article></div>`,
     `<div class="attention-card__footer-actions"><button class="mini primary" onclick="providerPaid(${item.id})">Поставщик оплачен</button><button class="mini" onclick="openUtilitiesTab()">Коммуналка</button></div>`,
-    `<span class="pill">${formatDate(item.period_end)}</span>`,
+    `<span class="pill ${future ? "future" : ""}">${future ? "предстоит" : formatDate(item.period_end)}</span>`,
   );
 }
 
@@ -1350,7 +1362,7 @@ function expenseFundCard(fund) {
   return attentionCard(
     "expense-fund",
     "Расчёт расходов не сходится",
-    `<p class="attention-lead">Получено ${money(fund.received)}, расходов к покрытию ${money(fund.spent)}.</p><div class="attention-issue-list"><article class="attention-issue"><strong>Остаток</strong><div>${money(fund.balance)} пока висит как неиспользованное пополнение.</div></article></div>`,
+    `<p class="attention-lead">Получено ${money(fund.received)}, расходов к покрытию ${money(fund.spent)}.</p><div class="attention-issue-list"><article class="attention-issue"><strong>Остаток</strong><div>${money(fund.balance)} учтено как неиспользованное пополнение.</div></article></div>`,
     `<div class="attention-card__footer-actions"><button class="mini" onclick="openExpensesTab()">Расходы</button></div>`,
     `<span class="pill">контроль денег на расходы</span>`,
   );
@@ -1376,7 +1388,7 @@ function renderDashboard() {
       .filter(([, value]) => value > 0)
       .slice(0, 6)
       .map(([label, value]) => attentionCard("warn", label, `<p class="attention-lead">Сейчас отмечено ${value}.</p><p class="muted">Гостевой режим показывает только общую картину. Подробности и кнопки живут у owner.</p>`, "", `<span class="pill">${label}</span>`));
-    qs("#attentionList").innerHTML = cards.join("") || `<div class="card ok"><h3>Критичных задач не видно</h3><p class="muted">Гостевой режим сегодня без драматургии.</p></div>`;
+    qs("#attentionList").innerHTML = cards.join("") || `<div class="card ok"><h3>Критичных задач не видно</h3><p class="muted">В гостевом режиме открытых проблем нет.</p></div>`;
     return;
   }
   const metrics = [
@@ -1400,12 +1412,12 @@ function renderDashboard() {
     ...dashboard.stale_readings.map(staleReadingCard),
     ...dashboard.suspicious_receipts.map(suspiciousReceiptCard),
   ];
-  qs("#attentionList").innerHTML = cards.join("") || `<div class="card ok"><h3>Критичных задач нет</h3><p class="muted">Редкий момент, когда приложение не ругается. Подозрительно, но приятно.</p></div>`;
+  qs("#attentionList").innerHTML = cards.join("") || `<div class="card ok"><h3>Критичных задач нет</h3><p class="muted">Все обязательные действия на текущий момент закрыты.</p></div>`;
 }
 function renderMonthlyReportTray(reports = []) {
   const tray = qs("#monthlyReportTray");
   if (!reports.length) {
-    tray.innerHTML = `<div class="report-status report-ok"><strong>Месячные отчёты закрыты</strong><span>Ничего не торчит. Почти скучно.</span></div>`;
+    tray.innerHTML = `<div class="report-status report-ok"><strong>Месячные отчёты закрыты</strong><span>Открытых проблем по отчётам нет.</span></div>`;
     return;
   }
   tray.innerHTML = reports.map((report) => `
@@ -1611,7 +1623,7 @@ function renderRent() {
       <td>${money(charge.ip_due)}<br><span class="muted">оплачено ${money(charge.ip_paid)}</span></td>
       <td>${money(charge.personal_due)}<br><span class="muted">оплачено ${money(charge.personal_paid)}</span></td>
       <td>${money(charge.debt)}</td>
-      <td>${statusPill(charge.status)}</td>
+      <td>${statusPill(charge.status, charge.due_date)}</td>
       <td class="actions">${rentActions(charge)}</td>
     </tr>
   `).join("");
@@ -2123,7 +2135,7 @@ function renderUtilities() {
         <td>${line.odn_consumption}</td>
         <td>${money(line.total_amount)}</td>
         <td>${money(line.paid_amount)}</td>
-        <td>${statusPill(line.status)}</td>
+        <td>${statusPill(line.status, line.due_date)}</td>
         <td class="actions">${utilityActions(line)}</td>
       </tr>
     `).join("");
@@ -2131,7 +2143,7 @@ function renderUtilities() {
       <h3>${bill.object}: ${bill.service}</h3>
       <p class="muted">${bill.period_label}. По дому: ${money(bill.total_cost)} и ${bill.total_consumption}. Жильцам сейчас: ${money(bill.resident_total_amount)}.</p>
       <div class="pill-row">
-        ${statusPill(bill.status)}
+        ${statusPill(bill.status, bill.due_date)}
         ${bill.is_forecast ? '<span class="pill warn">прогноз</span>' : ""}
         ${bill.provider_paid ? '<span class="pill ok">поставщик оплачен</span>' : '<span class="pill warn">поставщик не отмечен</span>'}
         <span class="pill">личное ${bill.apartment_consumption}</span>
@@ -2194,7 +2206,7 @@ function renderUtilities() {
         <td>${line.odn_consumption}</td>
         <td>${money(line.total_amount)}</td>
         <td>${money(line.paid_amount)}</td>
-        <td>${statusPill(line.status)}</td>
+        <td>${statusPill(line.status, line.due_date)}</td>
         <td class="actions">${utilityActions(line)}</td>
       </tr>
     `).join("");
@@ -2202,7 +2214,7 @@ function renderUtilities() {
       <h3>${bill.object}: ${bill.service}</h3>
       <p class="muted">${bill.period_label}. По дому: ${money(bill.total_cost)} и ${bill.total_consumption}. Жильцам сейчас: ${money(bill.resident_total_amount)}.</p>
       <div class="pill-row">
-        ${statusPill(bill.status)}
+        ${statusPill(bill.status, bill.due_date)}
         ${bill.is_forecast ? '<span class="pill warn">прогноз</span>' : ""}
         ${bill.provider_paid ? '<span class="pill ok">поставщик оплачен</span>' : '<span class="pill warn">поставщик не отмечен</span>'}
         <span class="pill">личное ${bill.apartment_consumption}</span>
@@ -2367,7 +2379,7 @@ function renderAutomation() {
     .filter((target) => (target.rent_items?.length || 0) + (target.utility_items?.length || 0) + (target.manual_debt_items?.length || 0) > 0)
     .sort((left, right) => `${left.object} ${left.apartment}`.localeCompare(`${right.object} ${right.apartment}`, "ru"));
   if (!targets.length) {
-    root.innerHTML = `<article class="card ok"><h3>Сейчас автоматизация скучает</h3><p class="muted">Активных долгов и счетов нет, напоминать особо некому. А зачем спамить в пустоту.</p></article>`;
+    root.innerHTML = `<article class="card ok"><h3>Автоматизация без активных задач</h3><p class="muted">Активных долгов и счетов для напоминаний сейчас нет.</p></article>`;
     return;
   }
   root.innerHTML = `
@@ -2727,7 +2739,7 @@ async function runRemindersNow() {
     toast(`Автонапоминания выключены. Граница сейчас ${formatDate(result.cutoff_date)}.`);
     return;
   }
-  toast(`Напоминания: отправлено ${result.sent}, дубликаты ${result.skipped_duplicate}, старые долги под молчанием ${result.skipped_legacy}`);
+  toast(`Напоминания: отправлено ${result.sent}, дубликаты ${result.skipped_duplicate}, старые долги пропущены ${result.skipped_legacy}`);
   await loadAll();
 }
 

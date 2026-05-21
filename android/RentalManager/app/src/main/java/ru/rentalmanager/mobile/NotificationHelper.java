@@ -12,10 +12,10 @@ import android.graphics.Color;
 import android.os.Build;
 
 final class NotificationHelper {
-    static final String CHANNEL_REMINDERS = "rental_manager_reminders";
-    static final String CHANNEL_REMINDERS_VIBRATE = "rental_manager_reminders_vibrate";
-    static final String CHANNEL_REMINDERS_SILENT = "rental_manager_reminders_silent";
-    static final String CHANNEL_STICKY = "rental_manager_sticky";
+    static final String CHANNEL_REMINDERS = "rental_manager_reminders_sound_v2";
+    static final String CHANNEL_REMINDERS_VIBRATE = "rental_manager_reminders_vibrate_v2";
+    static final String CHANNEL_REMINDERS_SILENT = "rental_manager_reminders_silent_v2";
+    static final String CHANNEL_STICKY = "rental_manager_sticky_sound_v2";
     static final int NOTIFICATION_DIGEST = 5101;
     static final int NOTIFICATION_STICKY_DEBT = 5102;
 
@@ -41,7 +41,7 @@ final class NotificationHelper {
             "Напоминания с вибрацией",
             NotificationManager.IMPORTANCE_HIGH
         );
-        vibrate.setDescription("Без звука, но с вибрацией. Ночью не орёт, уже хорошо.");
+        vibrate.setDescription("Без звука, но с вибрацией.");
         vibrate.setSound(null, null);
         vibrate.enableVibration(true);
         manager.createNotificationChannel(vibrate);
@@ -62,8 +62,8 @@ final class NotificationHelper {
             NotificationManager.IMPORTANCE_HIGH
         );
         sticky.setDescription("Показывается, пока есть квартиры-должники без отсрочки.");
-        sticky.enableVibration(false);
-        sticky.setSound(null, null);
+        sticky.enableVibration(true);
+        sticky.setLightColor(Color.rgb(255, 69, 58));
         manager.createNotificationChannel(sticky);
     }
 
@@ -80,11 +80,13 @@ final class NotificationHelper {
         NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
         if (manager == null) return;
         Notification.Builder builder = baseBuilder(context, reminderChannel(context))
-            .setSmallIcon(R.drawable.ic_launcher)
+            .setSmallIcon(R.drawable.ic_stat_rental)
             .setContentTitle(digest.title())
             .setContentText(digest.text())
             .setStyle(new Notification.BigTextStyle().bigText(digest.bigText()))
             .setContentIntent(openAppIntent(context))
+            .setCategory(Notification.CATEGORY_REMINDER)
+            .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setAutoCancel(true)
             .setShowWhen(true);
         applyMode(context, builder);
@@ -98,7 +100,7 @@ final class NotificationHelper {
             return;
         }
         Intent service = new Intent(context, PersistentDebtService.class);
-        service.putExtra("title", "Должники без отсрочки: " + digest.debtorApartmentCount);
+        service.putExtra("title", "Квартиры с долгами: " + digest.debtorApartmentCount);
         service.putExtra("text", digest.text());
         try {
             if (Build.VERSION.SDK_INT >= 26) {
@@ -115,11 +117,15 @@ final class NotificationHelper {
     static Notification stickyNotification(Context context, String title, String text) {
         ensureChannels(context);
         return baseBuilder(context, CHANNEL_STICKY)
-            .setSmallIcon(R.drawable.ic_launcher)
+            .setSmallIcon(R.drawable.ic_stat_rental)
             .setContentTitle(title)
             .setContentText(text)
             .setStyle(new Notification.BigTextStyle().bigText(text))
             .setContentIntent(openAppIntent(context))
+            .setCategory(Notification.CATEGORY_STATUS)
+            .setVisibility(Notification.VISIBILITY_PUBLIC)
+            .setPriority(Notification.PRIORITY_MAX)
+            .setDefaults(Notification.DEFAULT_ALL)
             .setOngoing(true)
             .setAutoCancel(false)
             .setShowWhen(true)

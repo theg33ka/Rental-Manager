@@ -53,7 +53,7 @@ public class NotificationSettingsActivity extends Activity {
         header.setOrientation(LinearLayout.VERTICAL);
         header.setPadding(dp(20), dp(20), dp(20), dp(12));
         TextView title = text("Уведомления", 30, true);
-        TextView subtitle = text("Пуши, частота, тишина ночью и постоянный сигнал по должникам. А зачем иначе телефон?", 14, false);
+        TextView subtitle = text("Пуш-уведомления, частота проверок, тихие часы и постоянное предупреждение по долгам.", 14, false);
         subtitle.setTextColor(muted);
         header.addView(title);
         header.addView(subtitle);

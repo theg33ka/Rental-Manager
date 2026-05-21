@@ -683,6 +683,11 @@ section {
   color: var(--primary-strong);
 }
 
+.pill.future {
+  background: #2a3038;
+  color: var(--muted);
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
@@ -900,6 +905,12 @@ td.actions .button {
   color: var(--utility-issued-ink);
 }
 
+.attention-card.future {
+  border-left-color: #6b7280;
+  background: #20262e;
+  color: #d8dde5;
+}
+
 .attention-card.provider {
   border-left-color: var(--provider-border);
   background: var(--provider-bg);
@@ -935,6 +946,7 @@ td.actions .button {
 .attention-card.utility-partial .muted,
 .attention-card.utility-issued .muted,
 .attention-card.provider .muted,
+.attention-card.future .muted,
 .attention-card.reading .muted,
 .attention-card.receipt .muted,
 .attention-card.expense-fund .muted,

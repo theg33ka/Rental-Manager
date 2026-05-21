@@ -14,6 +14,7 @@
       </div>
       <div class="top-actions">
         <span class="pill" id="authRoleBadge">PIN не введён</span>
+        <a class="button" id="mobileAppDownload" href="/mobile-app.apk" download>Скачать Android APK</a>
         <button id="logoutBtn" type="button" hidden>Выйти</button>
         <button class="icon-button" id="refreshBtn" title="Обновить данные">⟳</button>
         <button id="runRemindersBtn">Прогнать напоминания</button>
@@ -89,7 +90,7 @@
 
         <div class="section-title">
           <h2>Квартиры</h2>
-          <span>Неактивные квартиры не лезут в контроль, напоминания и новые начисления. А зачем им туда.</span>
+          <span>Неактивные квартиры исключаются из контроля, напоминаний и новых начислений.</span>
         </div>
         <div id="apartmentRegistry" class="table-wrap"></div>
       </section>
@@ -111,7 +112,7 @@
       <section class="panel" id="meters">
         <div class="section-title">
           <h2>Показания</h2>
-          <span>Можно ввести за прошлую дату, система не осудит</span>
+          <span>Можно внести показание за прошлую дату</span>
         </div>
         <form id="readingForm" class="form-grid compact">
           <label>Счётчик<select name="meter_id" required></select></label>
@@ -132,7 +133,7 @@
           <div class="section-title">
             <div>
               <h2>Быстрая передача показаний</h2>
-              <span>Заполняй только то, что снял. Остальное молча пропускается.</span>
+              <span>Заполняйте только снятые показания, пустые поля не отправляются.</span>
             </div>
             <label>Дата<input type="date" id="quickReadingDate" name="reading_date" required /></label>
           </div>
@@ -217,7 +218,7 @@
       <section class="panel" id="messages">
         <div class="section-title">
           <h2>Сообщения</h2>
-          <span>Выборочная ручная рассылка через бота. Никакой самодеятельности без твоего клика.</span>
+          <span>Выборочная ручная рассылка через бота после подтверждения.</span>
         </div>
         <div class="card muted-box">
           <strong>Плейсхолдеры</strong>
@@ -227,7 +228,7 @@
         <div id="messagePreviewPanel" class="stack"></div>
         <div class="section-title">
           <h2>Ручной контроль платежей</h2>
-          <span>Для налички, переводов с твоей карты и прочих жизненных кульбитов.</span>
+          <span>Для наличных платежей, переводов с карты владельца и ручных корректировок.</span>
         </div>
         <form id="manualPaymentForm" class="form-grid compact">
           <label>Жилец
@@ -274,7 +275,7 @@
 
         <div class="section-title">
           <h2>Шаблоны</h2>
-          <span>Тексты всех основных сообщений живут тут. А зачем держать их по углам?</span>
+          <span>Тексты основных сообщений и уведомлений для жильцов.</span>
         </div>
         <form id="messageTemplatesForm" class="form-grid">
           <label class="wide">Аренда: сегодня срок
@@ -308,7 +309,7 @@
       <section class="panel" id="automation">
         <div class="section-title">
           <h2>Автоматизация</h2>
-          <span>Здесь живёт частота автонапоминаний и краткая сводка, кому уже писали. Всё по делу, а зачем иначе.</span>
+          <span>Частота автонапоминаний и краткая сводка отправленных сообщений.</span>
         </div>
         <form id="automationSettingsForm" class="form-grid compact">
           <label>Аренда: день оплаты

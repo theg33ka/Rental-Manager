@@ -52,6 +52,10 @@ public class MainActivity extends Activity {
     private static final long CACHE_TTL_MS = 60_000L;
     private static final long CONNECTION_CHECK_MIN_MS = 2_000L;
     private static final long RECONNECT_INTERVAL_MS = 10_000L;
+    private static final String[] MONTH_NAMES_RU = {
+        "январь", "февраль", "март", "апрель", "май", "июнь",
+        "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"
+    };
 
     private final int bg = Color.rgb(7, 10, 14);
     private final int surface = Color.rgb(18, 23, 31);
@@ -260,7 +264,7 @@ public class MainActivity extends Activity {
         screenTitle.setText("Вход");
         screenSubtitle.setText(api.baseUrl());
         content.removeAllViews();
-        addHero("Нативный пульт аренды", "PIN owner открывает полный контроль. Guest оставим для отчётов, а всё серьёзное пусть не шляется без спроса.");
+        addHero("Пульт аренды", "Войдите по PIN-коду владельца для полного доступа или по гостевому PIN для просмотра отчётов.");
         LinearLayout card = card();
         EditText pin = input("PIN-код", true);
         pin.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
@@ -381,9 +385,12 @@ public class MainActivity extends Activity {
                 if (servicesLoadedAt <= 0 || System.currentTimeMillis() - servicesLoadedAt > CACHE_TTL_MS) loadServices();
                 if (moreLoadedAt <= 0 || System.currentTimeMillis() - moreLoadedAt > CACHE_TTL_MS) loadMoreData();
             } catch (Exception ignored) {
-                // Фоновая предзагрузка не должна ломать открытый экран. Ей и так стыдно.
+                // Фоновая предзагрузка не должна ломать открытый экран.
             } finally {
                 prefetchRunning = false;
+                runOnUiThread(() -> {
+                    if ("dashboard".equals(currentTab) && bootstrapLoadedAt > 0) renderDashboard();
+                });
             }
         }, "rental-prefetch").start();
     }
@@ -399,7 +406,7 @@ public class MainActivity extends Activity {
         content.removeAllViews();
         LinearLayout card = card();
         card.addView(label("Загружаю", 22, text, true));
-        card.addView(label("Один короткий запрос к серверу. Если долго - связь опять решила подумать.", 14, muted, false));
+        card.addView(label("Получаю свежие данные с сервера.", 14, muted, false));
         content.addView(card);
     }
 
@@ -430,7 +437,7 @@ public class MainActivity extends Activity {
             forEach(reports, item -> {
                 LinearLayout card = card();
                 card.addView(label(item.optString("title", "Отчёт"), 18, text, true));
-                card.addView(label(item.optString("issue_count", "0") + " проблем · " + item.optString("severity"), 13, muted, false));
+                card.addView(label(item.optString("issue_count", "0") + " проблем · " + severityLabel(item.optString("severity")), 13, muted, false));
                 Button download = secondaryButton("Скачать");
                 download.setOnClickListener(v -> download("/api/reports/monthly.xlsx?year=" + item.optInt("year") + "&month=" + item.optInt("month") + "&kind=" + item.optString("kind", "full"), "monthly.xlsx"));
                 card.addView(download);
@@ -526,7 +533,9 @@ public class MainActivity extends Activity {
 
         if (sameSelectedMonth(today())) {
             forEach(arr(dashboard, "stale_readings"), item -> score.warning++);
-            forEach(arr(dashboard, "provider_debts"), item -> addTaskByStatus(score, "issued", item.optString("due_date"), false));
+            if (!detailedData) {
+                forEach(arr(dashboard, "provider_debts"), item -> addTaskByStatus(score, "issued", item.optString("due_date"), false));
+            }
         }
 
         if (!detailedData) {
@@ -553,10 +562,10 @@ public class MainActivity extends Activity {
     }
 
     private void addTaskByStatus(MonthScore score, String status, String dueDate, boolean debtCanBeCritical) {
-        if (isFutureDate(dueDate)) {
-            score.upcoming++;
-        } else if (isDoneStatus(status)) {
+        if (isDoneStatus(status)) {
             score.done++;
+        } else if (isFutureDate(dueDate)) {
+            score.upcoming++;
         } else if (debtCanBeCritical && isCriticalStatus(status)) {
             score.critical++;
         } else {
@@ -614,11 +623,18 @@ public class MainActivity extends Activity {
             }
             if (severityRank(effectiveColor) > severityRank(group.color)) group.color = effectiveColor;
             if ("payments".equals(targetTab)) group.targetTab = "payments";
-            String issueKey = key + ":" + item.optInt("id", item.hashCode());
+            String issueKey = attentionIssueKey(key, item);
             if (group.seen.add(issueKey)) {
                 group.lines.add(attentionLine(key, title, item));
             }
         });
+    }
+
+    private String attentionIssueKey(String key, JSONObject item) {
+        int id = item.optInt("id", item.hashCode());
+        if (key.startsWith("utility")) return "utility:" + id;
+        if (key.startsWith("rent")) return "rent:" + id;
+        return key + ":" + id;
     }
 
     private String attentionGroupKey(JSONObject item, String fallback) {
@@ -665,7 +681,7 @@ public class MainActivity extends Activity {
         screenTitle.setText("Жильцы");
         content.removeAllViews();
         if (showSection("tenants_hero")) {
-            addHero("Заселение и квартиры", "Карточки вместо таблиц. Да, таблицы тоже умеем, но пальцем по ним грустно.");
+            addHero("Заселение и квартиры", "Активные договоры, квартиры и основные действия по жильцам.");
         }
         if (showSection("tenants_onboard")) {
             Button add = primaryButton("Заселить жильца");
@@ -788,7 +804,7 @@ public class MainActivity extends Activity {
         screenTitle.setText("Оплаты");
         content.removeAllViews();
         if (showSection("payments_hero")) {
-            addHero("Аренда и платежи", "Долги, отсрочки, ручные оплаты и чеки. Деньги любят порядок, кто бы спорил.");
+            addHero("Аренда и платежи", "Начисления, отсрочки, ручные оплаты и проверка чеков.");
         }
         if (showSection("payments_actions")) {
             LinearLayout actions = row();
@@ -800,11 +816,12 @@ public class MainActivity extends Activity {
         if (showSection("payments_rent")) {
             content.addView(section("Аренда"));
             forEach(rentCharges, charge -> {
-                LinearLayout card = cardWithAccent(statusColor(charge.optString("status")));
+                int color = isFutureDate(charge.optString("due_date")) && !isDoneStatus(charge.optString("status")) ? gray : statusColor(charge.optString("status"));
+                LinearLayout card = cardWithAccent(color);
                 card.addView(label(joinNonEmpty(charge.optString("object"), charge.optString("apartment")), 18, text, true));
                 card.addView(label(charge.optString("tenant") + " · срок " + charge.optString("due_date"), 14, muted, false));
                 card.addView(label("К оплате " + money(charge.optDouble("total_due")) + " · долг " + money(charge.optDouble("debt")), 14, muted, false));
-                card.addView(label(charge.optString("status"), 13, statusColor(charge.optString("status")), true));
+                card.addView(label(statusLabel(charge.optString("status")), 13, color, true));
                 LinearLayout row1 = row();
                 row1.addView(smallButton("ИП", v -> payRent(charge, "ip")), new LinearLayout.LayoutParams(0, dp(42), 1));
                 row1.addView(smallButton("Перевод", v -> payRent(charge, "personal")), new LinearLayout.LayoutParams(0, dp(42), 1));
@@ -895,7 +912,8 @@ public class MainActivity extends Activity {
         if (!showSection("services_utility_bills")) return;
         content.addView(section("Счета"));
         forEach(utilityBills, bill -> {
-            LinearLayout card = cardWithAccent(bill.optBoolean("provider_paid") ? green : orange);
+            int color = bill.optBoolean("provider_paid") ? green : isFutureDate(bill.optString("due_date")) ? gray : orange;
+            LinearLayout card = cardWithAccent(color);
             card.addView(label(bill.optString("object") + " · " + bill.optString("service"), 18, text, true));
             card.addView(label(bill.optString("period_start") + " — " + bill.optString("period_end"), 13, muted, false));
             card.addView(label("Итого " + money(bill.optDouble("total_cost")), 15, text, true));
@@ -964,19 +982,19 @@ public class MainActivity extends Activity {
         screenTitle.setText("Ещё");
         content.removeAllViews();
         if (showSection("more_hero")) {
-            addHero("Отчёты, сообщения, настройки", "Редкие, но важные действия. Прячем не потому что стыдно, а потому что каждый день они не нужны.");
+            addHero("Отчёты, сообщения, настройки", "Административные действия, уведомления, сообщения и параметры сервера.");
         }
 
         LinearLayout ui = card();
         ui.addView(label("Видимость экранов", 19, text, true));
-        ui.addView(label("Выбери, какие блоки показывать на каждой странице. Спрячем лишнее, пусть не шумит.", 14, muted, false));
+        ui.addView(label("Выберите, какие блоки показывать на каждой странице.", 14, muted, false));
         ui.addView(primaryButton("Настроить страницы", v -> showPageSectionsDialog()));
         content.addView(ui);
 
         if (showSection("more_notifications")) {
         LinearLayout notif = card();
         notif.addView(label("Пуш-уведомления", 19, text, true));
-        notif.addView(label("Частота, тихие часы, типы событий и постоянный debt-alert.", 14, muted, false));
+        notif.addView(label("Частота, тихие часы, типы событий и постоянное уведомление о долгах.", 14, muted, false));
         notif.addView(primaryButton("Настроить", v -> startActivity(new Intent(this, NotificationSettingsActivity.class))));
         content.addView(notif);
         }
@@ -1044,6 +1062,7 @@ public class MainActivity extends Activity {
         List<CheckBox> boxes = new ArrayList<>();
         addSectionGroup(form, boxes, "Дом", new String[][]{
             {"dashboard_hero", "Верхняя карточка"},
+            {"dashboard_progress", "Прогресс месяца"},
             {"dashboard_metrics", "Счётчики состояния"},
             {"dashboard_reports", "Месячные отчёты"},
             {"dashboard_attention", "Требует внимания"}
@@ -1111,7 +1130,7 @@ public class MainActivity extends Activity {
         EditText appUrl = input("https://...", false);
         EditText ownerChat = input("telegram id", false);
         EditText cutoff = input("2026-05-01", false);
-        CheckBox enabled = checkbox("Автонапиоминания жильцам включены");
+        CheckBox enabled = checkbox("Автонапоминания жильцам включены");
         appUrl.setText(settings.optString("app_base_url"));
         ownerChat.setText(settings.optString("telegram_owner_chat_id"));
         cutoff.setText(settings.optString("notification_cutoff_date"));
@@ -1445,17 +1464,17 @@ public class MainActivity extends Activity {
 
     private void addMetricRow(LinearLayout parent, String a, int av, String b, int bv) {
         LinearLayout row = row();
-        row.addView(metric(a, av), new LinearLayout.LayoutParams(0, dp(96), 1));
+        row.addView(metric(a, av), new LinearLayout.LayoutParams(0, dp(78), 1));
         row.addView(space(10), new LinearLayout.LayoutParams(dp(10), 1));
-        row.addView(metric(b, bv), new LinearLayout.LayoutParams(0, dp(96), 1));
+        row.addView(metric(b, bv), new LinearLayout.LayoutParams(0, dp(78), 1));
         parent.addView(row);
     }
 
     private LinearLayout metric(String title, int value) {
         LinearLayout card = card();
-        card.setPadding(dp(14), dp(12), dp(14), dp(12));
-        card.addView(label(String.valueOf(value), 27, text, true));
-        card.addView(label(title, 13, muted, false));
+        card.setPadding(dp(12), dp(8), dp(12), dp(8));
+        card.addView(label(String.valueOf(value), 23, text, true));
+        card.addView(label(title, 12, muted, false));
         return card;
     }
 
@@ -1819,6 +1838,126 @@ public class MainActivity extends Activity {
         return value;
     }
 
+    private String firstNonEmpty(String... values) {
+        for (String value : values) {
+            if (value != null && !value.trim().isEmpty() && !"null".equals(value)) return value.trim();
+        }
+        return "";
+    }
+
+    private boolean sameSelectedMonth(String value) {
+        String key = monthKey(value);
+        return !key.isEmpty() && key.equals(selectedMonthKey());
+    }
+
+    private String selectedMonthKey() {
+        return String.format(Locale.US, "%04d-%02d", selectedMonth.get(Calendar.YEAR), selectedMonth.get(Calendar.MONTH) + 1);
+    }
+
+    private String monthKey(String value) {
+        String iso = isoDate(value);
+        return iso.length() >= 7 ? iso.substring(0, 7) : "";
+    }
+
+    private String isoDate(String value) {
+        if (value == null) return "";
+        String trimmed = value.trim();
+        if (trimmed.length() >= 10 && trimmed.charAt(4) == '-' && trimmed.charAt(7) == '-') {
+            return trimmed.substring(0, 10);
+        }
+        if (trimmed.length() >= 10 && trimmed.charAt(2) == '.' && trimmed.charAt(5) == '.') {
+            return trimmed.substring(6, 10) + "-" + trimmed.substring(3, 5) + "-" + trimmed.substring(0, 2);
+        }
+        return "";
+    }
+
+    private boolean isFutureDate(String value) {
+        String iso = isoDate(value);
+        return !iso.isEmpty() && iso.compareTo(today()) > 0;
+    }
+
+    private String periodMonth(JSONObject item) {
+        String date = firstNonEmpty(
+            item.optString("period_start"),
+            item.optString("bill_period_end"),
+            item.optString("period_end"),
+            item.optString("due_date")
+        );
+        String month = formatMonth(date);
+        if (!month.isEmpty()) return month;
+        return item.optString("period_label", "");
+    }
+
+    private String formatMonth(String value) {
+        String key = monthKey(value);
+        if (key.length() != 7) return "";
+        try {
+            int year = Integer.parseInt(key.substring(0, 4));
+            int month = Integer.parseInt(key.substring(5, 7));
+            if (month < 1 || month > 12) return "";
+            return MONTH_NAMES_RU[month - 1] + " " + year;
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    private String monthTitle(Calendar month) {
+        String value = MONTH_NAMES_RU[month.get(Calendar.MONTH)] + " " + month.get(Calendar.YEAR);
+        return value.substring(0, 1).toUpperCase(Locale.forLanguageTag("ru-RU")) + value.substring(1);
+    }
+
+    private boolean isDoneStatus(String status) {
+        return "paid".equals(status)
+            || "paid_ahead".equals(status)
+            || "accepted".equals(status)
+            || "compensated".equals(status)
+            || "not_required".equals(status)
+            || "ok".equals(status)
+            || "closed".equals(status);
+    }
+
+    private boolean isCriticalStatus(String status) {
+        return "overdue".equals(status)
+            || "partial".equals(status)
+            || "suspicious".equals(status)
+            || "rejected".equals(status);
+    }
+
+    private int severityRank(int color) {
+        if (color == red) return 4;
+        if (color == orange) return 3;
+        if (color == blue) return 2;
+        if (color == gray) return 1;
+        return 0;
+    }
+
+    private String statusLabel(String status) {
+        if ("pending".equals(status)) return "ожидается";
+        if ("overdue".equals(status)) return "просрочено";
+        if ("partial".equals(status)) return "частично оплачено";
+        if ("paid".equals(status)) return "оплачено";
+        if ("paid_ahead".equals(status)) return "переплата";
+        if ("deferred".equals(status)) return "отсрочка";
+        if ("draft".equals(status)) return "черновик";
+        if ("issued".equals(status)) return "выставлено";
+        if ("compensated".equals(status)) return "компенсировано";
+        if ("not_required".equals(status)) return "не требуется";
+        if ("suspicious".equals(status)) return "требует проверки";
+        if ("accepted".equals(status)) return "принято";
+        if ("moderated".equals(status)) return "проверено";
+        if ("rejected".equals(status)) return "отклонено";
+        if ("ignored".equals(status)) return "скрыто";
+        if ("open".equals(status)) return "открыто";
+        if ("critical".equals(status)) return "критично";
+        if ("warning".equals(status)) return "важно";
+        if ("ok".equals(status)) return "в порядке";
+        return status == null || status.isEmpty() ? "неизвестно" : status;
+    }
+
+    private String severityLabel(String severity) {
+        return statusLabel(severity);
+    }
+
     private int statusColor(String status) {
         if ("overdue".equals(status) || "suspicious".equals(status)) return red;
         if ("partial".equals(status) || "deferred".equals(status) || "issued".equals(status)) return orange;
@@ -1843,6 +1982,95 @@ public class MainActivity extends Activity {
     private void requestNotificationPermission() {
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQUEST_NOTIFICATIONS);
+        }
+    }
+
+    private static final class MonthScore {
+        int done;
+        int warning;
+        int critical;
+        int upcoming;
+
+        int total() {
+            return done + warning + critical + upcoming;
+        }
+
+        int percent() {
+            int total = total();
+            if (total <= 0) return 100;
+            return Math.round(done * 100f / total);
+        }
+    }
+
+    private static final class IssueGroup {
+        String title = "";
+        String tenant = "";
+        String targetTab = "dashboard";
+        int color = 0;
+        final Set<String> seen = new LinkedHashSet<>();
+        final List<String> lines = new ArrayList<>();
+    }
+
+    private class MonthProgressView extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final RectF rect = new RectF();
+        private MonthScore score = new MonthScore();
+
+        MonthProgressView(Context context) {
+            super(context);
+        }
+
+        void setScore(MonthScore score) {
+            this.score = score == null ? new MonthScore() : score;
+            invalidate();
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            int width = getWidth();
+            int height = getHeight();
+            int size = Math.min(width, height) - dp(20);
+            float left = (width - size) / 2f;
+            float top = (height - size) / 2f;
+            rect.set(left, top, left + size, top + size);
+
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(14));
+            paint.setStrokeCap(Paint.Cap.BUTT);
+            paint.setColor(hairline);
+            canvas.drawArc(rect, -90, 360, false, paint);
+
+            int total = score.total();
+            if (total > 0) {
+                float start = -90f;
+                start = drawSegment(canvas, start, score.done, total, green);
+                start = drawSegment(canvas, start, score.warning, total, orange);
+                start = drawSegment(canvas, start, score.critical, total, red);
+                drawSegment(canvas, start, score.upcoming, total, gray);
+            } else {
+                paint.setColor(green);
+                canvas.drawArc(rect, -90, 360, false, paint);
+            }
+
+            paint.setStyle(Paint.Style.FILL);
+            paint.setStrokeWidth(1);
+            paint.setTextAlign(Paint.Align.CENTER);
+            paint.setTypeface(Typeface.DEFAULT_BOLD);
+            paint.setTextSize(dp(25));
+            paint.setColor(text);
+            Paint.FontMetrics metrics = paint.getFontMetrics();
+            float cx = width / 2f;
+            float cy = height / 2f - (metrics.ascent + metrics.descent) / 2f;
+            canvas.drawText(score.percent() + "%", cx, cy, paint);
+        }
+
+        private float drawSegment(Canvas canvas, float start, int value, int total, int color) {
+            if (value <= 0 || total <= 0) return start;
+            float sweep = 360f * value / total;
+            paint.setColor(color);
+            canvas.drawArc(rect, start, sweep, false, paint);
+            return start + sweep;
         }
     }
 }

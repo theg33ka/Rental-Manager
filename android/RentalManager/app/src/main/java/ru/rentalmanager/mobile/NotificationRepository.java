@@ -96,7 +96,7 @@ final class NotificationRepository {
             if (item != null) objects.add(shortObjectName(item.optString("object", "")));
         }
         digest.alertCount += items.length();
-        digest.lines.add("Не переданы показания: " + join(objects, "/"));
+        digest.lines.add("Не переданы показания счётчиков: " + join(objects, "/"));
     }
 
     private static void collectDebtors(Set<String> result, JSONArray items) {
