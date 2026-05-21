@@ -358,7 +358,7 @@ public class MainActivity extends Activity {
     }
 
     private void loadPayments() throws Exception {
-        rentCharges = api.getArray("/api/rent-charges");
+        rentCharges = api.getArray("/api/rent-charges?start=2026-01-01&end=" + progressDataEnd());
         suspiciousReceipts = api.getArray("/api/payment-receipts/suspicious");
         paymentsLoadedAt = System.currentTimeMillis();
     }
@@ -469,9 +469,17 @@ public class MainActivity extends Activity {
         hint.setGravity(Gravity.CENTER);
         card.addView(hint);
 
+        LinearLayout chartRow = new LinearLayout(this);
+        chartRow.setOrientation(LinearLayout.HORIZONTAL);
+        chartRow.setGravity(Gravity.CENTER);
+        Button prev = monthArrow("<", -1);
+        Button next = monthArrow(">", 1);
         MonthProgressView chart = new MonthProgressView(this);
         chart.setScore(score);
-        card.addView(chart, new LinearLayout.LayoutParams(-1, dp(138)));
+        chartRow.addView(prev, new LinearLayout.LayoutParams(dp(42), dp(132)));
+        chartRow.addView(chart, new LinearLayout.LayoutParams(0, dp(138), 1));
+        chartRow.addView(next, new LinearLayout.LayoutParams(dp(42), dp(132)));
+        card.addView(chartRow);
 
         LinearLayout legend = row();
         legend.addView(legendItem("Выполнено", green), new LinearLayout.LayoutParams(0, -2, 1));
@@ -480,7 +488,7 @@ public class MainActivity extends Activity {
         legend.addView(legendItem("Будущие", gray), new LinearLayout.LayoutParams(0, -2, 1));
         card.addView(legend);
 
-        card.setOnTouchListener((view, event) -> {
+        View.OnTouchListener monthSwipe = (view, event) -> {
             if (event.getAction() == MotionEvent.ACTION_DOWN) {
                 monthTouchStartX = event.getX();
                 return true;
@@ -494,8 +502,31 @@ public class MainActivity extends Activity {
                 return true;
             }
             return true;
-        });
+        };
+        attachMonthSwipe(card, monthSwipe);
         content.addView(card);
+    }
+
+    private Button monthArrow(String title, int delta) {
+        Button button = secondaryButton(title);
+        button.setTextSize(20);
+        button.setOnClickListener(v -> {
+            shiftSelectedMonth(delta);
+            renderDashboard();
+        });
+        return button;
+    }
+
+    private void attachMonthSwipe(View view, View.OnTouchListener listener) {
+        if (!(view instanceof Button)) {
+            view.setOnTouchListener(listener);
+        }
+        if (view instanceof LinearLayout) {
+            LinearLayout layout = (LinearLayout) view;
+            for (int i = 0; i < layout.getChildCount(); i++) {
+                attachMonthSwipe(layout.getChildAt(i), listener);
+            }
+        }
     }
 
     private TextView legendItem(String title, int color) {
@@ -513,7 +544,7 @@ public class MainActivity extends Activity {
         boolean detailedData = rentCharges.length() > 0 || utilityBills.length() > 0;
 
         forEach(rentCharges, charge -> {
-            if (!sameSelectedMonth(firstNonEmpty(charge.optString("period_start"), charge.optString("due_date")))) return;
+            if (!sameSelectedMonth(scoreDateForItem("rent", charge))) return;
             addTaskByStatus(score, charge.optString("status"), charge.optString("due_date"), true);
         });
 
@@ -550,22 +581,46 @@ public class MainActivity extends Activity {
             collectScoreFromDashboard(score, dashboard, "suspicious_receipts", true);
         }
 
+        if (score.total() == 0) {
+            if (isSelectedMonthFuture()) {
+                score.upcoming = 1;
+            } else {
+                score.done = 1;
+            }
+        }
+
         return score;
     }
 
     private void collectScoreFromDashboard(MonthScore score, JSONObject dashboard, String key, boolean critical) {
         forEach(arr(dashboard, key), item -> {
-            String date = firstNonEmpty(item.optString("period_start"), item.optString("bill_period_end"), item.optString("period_end"), item.optString("due_date"));
+            String date = scoreDateForItem(key, item);
             if (!sameSelectedMonth(date)) return;
             addTaskByStatus(score, critical ? "overdue" : item.optString("status", "issued"), item.optString("due_date"), critical);
         });
     }
 
+    private String scoreDateForItem(String key, JSONObject item) {
+        if (key != null && key.startsWith("rent")) {
+            return firstNonEmpty(item.optString("due_date"), item.optString("period_start"), item.optString("period_end"));
+        }
+        if (key != null && key.startsWith("utility")) {
+            return firstNonEmpty(item.optString("bill_period_end"), item.optString("period_end"), item.optString("due_date"));
+        }
+        if ("manual_debts".equals(key)) {
+            return firstNonEmpty(item.optString("period_start"), item.optString("period_end"), item.optString("due_date"));
+        }
+        if ("provider_debts".equals(key)) {
+            return firstNonEmpty(item.optString("period_end"), item.optString("due_date"));
+        }
+        return firstNonEmpty(item.optString("due_date"), item.optString("period_start"), item.optString("period_end"), item.optString("created_at"));
+    }
+
     private void addTaskByStatus(MonthScore score, String status, String dueDate, boolean debtCanBeCritical) {
-        if (isDoneStatus(status)) {
-            score.done++;
-        } else if (isFutureDate(dueDate)) {
+        if (isFutureDate(dueDate)) {
             score.upcoming++;
+        } else if (isDoneStatus(status)) {
+            score.done++;
         } else if (debtCanBeCritical && isCriticalStatus(status)) {
             score.critical++;
         } else {
@@ -1874,6 +1929,18 @@ public class MainActivity extends Activity {
     private boolean isFutureDate(String value) {
         String iso = isoDate(value);
         return !iso.isEmpty() && iso.compareTo(today()) > 0;
+    }
+
+    private boolean isSelectedMonthFuture() {
+        return selectedMonthKey().compareTo(monthKey(today())) > 0;
+    }
+
+    private String progressDataEnd() {
+        Calendar calendar = Calendar.getInstance();
+        calendar.add(Calendar.MONTH, 18);
+        calendar.set(Calendar.DAY_OF_MONTH, calendar.getActualMaximum(Calendar.DAY_OF_MONTH));
+        java.text.SimpleDateFormat format = new java.text.SimpleDateFormat("yyyy-MM-dd", Locale.US);
+        return format.format(calendar.getTime());
     }
 
     private String periodMonth(JSONObject item) {
