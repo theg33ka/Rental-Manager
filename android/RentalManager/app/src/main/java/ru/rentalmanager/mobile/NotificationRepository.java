@@ -71,7 +71,7 @@ final class NotificationRepository {
         addCount(context, digest, dashboard, "rent_deferred", NotificationPrefs.KEY_RENT_OVERDUE, "Отсрочки");
         addCount(context, digest, dashboard, "utility_issued", NotificationPrefs.KEY_UTILITY_ISSUED, "Коммуналка выставлена");
         addCount(context, digest, dashboard, "provider_debts", NotificationPrefs.KEY_PROVIDER_DEBTS, "Поставщик не оплачен");
-        addStaleReadings(context, digest, dashboard);
+        addReadingAlerts(context, digest, dashboard);
         addCount(context, digest, dashboard, "suspicious_receipts", NotificationPrefs.KEY_SUSPICIOUS_RECEIPTS, "Чеки на проверку");
         addCount(context, digest, dashboard, "monthly_reports", NotificationPrefs.KEY_MONTHLY_REPORTS, "Месячные отчёты");
 
@@ -86,9 +86,10 @@ final class NotificationRepository {
         digest.lines.add(label + ": " + count);
     }
 
-    private static void addStaleReadings(Context context, DashboardDigest digest, JSONObject dashboard) {
+    private static void addReadingAlerts(Context context, DashboardDigest digest, JSONObject dashboard) {
         if (!NotificationPrefs.eventEnabled(context, NotificationPrefs.KEY_STALE_READINGS)) return;
-        JSONArray items = dashboard.optJSONArray("stale_readings");
+        JSONArray items = dashboard.optJSONArray("provider_reading_due");
+        if (items == null || items.length() == 0) items = dashboard.optJSONArray("stale_readings");
         if (items == null || items.length() == 0) return;
         Set<String> objects = new LinkedHashSet<>();
         for (int i = 0; i < items.length(); i++) {

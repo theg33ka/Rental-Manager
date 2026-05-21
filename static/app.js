@@ -2253,18 +2253,37 @@ function renderTariffs() {
       return `
         <tr>
           <td>${service.name}</td>
+          <td>
+            <input class="inline-number" id="serviceReadingDue${service.id}" type="number" min="1" max="31" value="${service.provider_reading_due_day || 20}" />
+          </td>
           <td>${current ? formatDate(current.starts_on) : "нет"}</td>
           <td>${current ? tiersText(current.tiers) : "нет тарифа"}</td>
-          <td><button class="mini" onclick="prefillTariff(${service.id})">Задать</button></td>
+          <td>
+            <button class="mini primary" onclick="saveUtilityServiceSettings(${service.id})">Срок</button>
+            <button class="mini" onclick="prefillTariff(${service.id})">Тариф</button>
+          </td>
         </tr>
       `;
     }).join("");
-    return `<article class="card"><h3>${object.name}</h3><div class="table-wrap">${table(["Услуга", "Действует с", "Тариф", "Действие"], rows)}</div></article>`;
+    return `<article class="card"><h3>${object.name}</h3><div class="table-wrap">${table(["Услуга", "Показания до", "Действует с", "Тариф", "Действие"], rows)}</div></article>`;
   }).join("");
 }
 
 function tiersText(tiers = []) {
   return tiers.map((tier) => `${tier.limit ?? "*"}: ${tier.price}`).join("; ");
+}
+
+async function saveUtilityServiceSettings(serviceId) {
+  const input = qs(`#serviceReadingDue${serviceId}`);
+  const providerReadingDueDay = Math.min(31, Math.max(1, Number(input?.value || 20)));
+  const updated = await api(`/api/utility-services/${serviceId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ provider_reading_due_day: providerReadingDueDay }),
+  });
+  const service = state.bootstrap.services.find((item) => item.id === serviceId);
+  if (service) Object.assign(service, updated);
+  renderTariffs();
+  toast("Срок передачи показаний сохранён");
 }
 
 function prefillTariff(serviceId) {

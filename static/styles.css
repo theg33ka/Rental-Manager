@@ -737,6 +737,11 @@ textarea {
   font: inherit;
 }
 
+.inline-number {
+  width: 84px;
+  min-width: 72px;
+}
+
 input[type="checkbox"] {
   width: auto;
   min-height: auto;

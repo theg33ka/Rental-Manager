@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 import hashlib
 import json
 import re
@@ -191,6 +192,7 @@ MONTH_NAMES = [
 def startup() -> None:
     init_db()
     with SessionLocal() as session:
+        ensure_schema_additions(session)
         seeded_release = seed_release_baseline_if_empty(session)
         if not seeded_release:
             seed_if_empty(session)
@@ -223,6 +225,33 @@ def start_reminder_worker() -> None:
     REMINDER_WORKER_STARTED = True
     thread = threading.Thread(target=reminder_worker_loop, name="rental-reminders", daemon=True)
     thread.start()
+
+
+def ensure_schema_additions(session: Session) -> None:
+    bind = session.get_bind()
+    dialect = bind.dialect.name if bind else ""
+
+    if dialect == "sqlite":
+        columns = {row[1] for row in session.execute(text("PRAGMA table_info(utility_services)")).all()}
+        if "provider_reading_due_day" not in columns:
+            session.execute(text("ALTER TABLE utility_services ADD COLUMN provider_reading_due_day INTEGER NOT NULL DEFAULT 20"))
+            session.commit()
+        return
+
+    exists = session.execute(
+        text(
+            """
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_name = 'utility_services'
+              AND column_name = 'provider_reading_due_day'
+            LIMIT 1
+            """
+        )
+    ).first()
+    if not exists:
+        session.execute(text("ALTER TABLE utility_services ADD COLUMN provider_reading_due_day INTEGER NOT NULL DEFAULT 20"))
+        session.commit()
 
 
 @app.get("/")
@@ -1443,6 +1472,7 @@ def serialize_service(service: UtilityService) -> dict[str, Any]:
         "object": service.object.name if service.object else "",
         "kind": service.kind,
         "name": service.name,
+        "provider_reading_due_day": service.provider_reading_due_day,
         "provider_due_day": service.provider_due_day,
         "resident_due_days": service.resident_due_days,
         "active": service.active,
@@ -1694,6 +1724,7 @@ def bootstrap(request: Request, session: Session = Depends(get_session)) -> dict
                 "utility_overdue": len(dashboard_payload["utility_overdue"]),
                 "utility_issued": len(dashboard_payload.get("utility_issued", [])),
                 "provider_debts": len(dashboard_payload["provider_debts"]),
+                "provider_reading_due": len(dashboard_payload.get("provider_reading_due", [])),
                 "stale_readings": len(dashboard_payload["stale_readings"]),
                 "suspicious_receipts": len(dashboard_payload["suspicious_receipts"]),
             },
@@ -1719,6 +1750,50 @@ def api_get_settings(session: Session = Depends(get_session)) -> dict[str, str |
 def api_save_settings(request: Request, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, str | bool]:
     current_token = str(request.cookies.get(PANEL_AUTH_COOKIE) or "")
     return save_settings(session, payload, preserve_panel_token=current_token)
+
+
+@app.get("/api/month-progress")
+def api_month_progress(year: int, month: int, session: Session = Depends(get_session)) -> dict[str, Any]:
+    if month < 1 or month > 12:
+        raise HTTPException(400, "Месяц должен быть от 1 до 12")
+    start, end = month_range(year, month)
+    today = date.today()
+    generate_rent_charges(session)
+    session.commit()
+    rent_charges = session.scalars(
+        select(RentCharge)
+        .join(Lease)
+        .join(Apartment)
+        .where(
+            Lease.active.is_(True),
+            Apartment.active.is_(True),
+            RentCharge.due_date >= start,
+            RentCharge.due_date <= end,
+        )
+        .order_by(RentCharge.due_date, RentCharge.id)
+    ).all()
+    rent_charges = [charge for charge in rent_charges if not lease_ignored(session, charge.lease_id)]
+    for charge in rent_charges:
+        update_rent_charge_status(charge, today)
+
+    utility_bills = session.scalars(
+        select(UtilityBill)
+        .where(
+            UtilityBill.period_start >= start,
+            UtilityBill.period_start <= end,
+        )
+        .order_by(UtilityBill.period_start, UtilityBill.service_id, UtilityBill.id)
+    ).all()
+
+    return {
+        "year": year,
+        "month": month,
+        "period_start": start.isoformat(),
+        "period_end": end.isoformat(),
+        "rent_charges": [serialize_rent_charge(charge, session) for charge in rent_charges],
+        "utility_bills": [serialize_bill(bill, session) for bill in utility_bills],
+        "provider_readings": provider_reading_statuses_for_month(session, year, month, today),
+    }
 
 
 @app.get("/api/admin/database-export")
@@ -1896,6 +1971,63 @@ def object_reading_in_month(session: Session, service: UtilityService, start: da
         .order_by(MeterReading.reading_date.desc())
         .limit(1)
     )
+
+
+def service_due_date(year: int, month: int, day: int) -> date:
+    _, last_day = calendar.monthrange(year, month)
+    return date(year, month, min(max(int(day or 1), 1), last_day))
+
+
+def provider_reading_statuses_for_month(
+    session: Session,
+    year: int,
+    month: int,
+    today: date | None = None,
+) -> list[dict[str, Any]]:
+    today = today or date.today()
+    start, end = month_range(year, month)
+    statuses: list[dict[str, Any]] = []
+    services = session.scalars(
+        select(UtilityService)
+        .where(UtilityService.active.is_(True))
+        .order_by(UtilityService.object_id, UtilityService.kind, UtilityService.id)
+    ).all()
+    for service in services:
+        due = service_due_date(year, month, service.provider_reading_due_day)
+        reading = object_reading_in_month(session, service, start, end)
+        alert_from = due - timedelta(days=3)
+        if reading:
+            status = "paid"
+            alert = False
+        elif today < alert_from:
+            status = "upcoming"
+            alert = False
+        elif today <= due:
+            status = "pending"
+            alert = True
+        else:
+            status = "overdue"
+            alert = True
+        statuses.append(
+            {
+                "id": service.id,
+                "service_id": service.id,
+                "object_id": service.object_id,
+                "object": service.object.name if service.object else "",
+                "service": service.name,
+                "kind": service.kind,
+                "year": year,
+                "month": month,
+                "period_start": start.isoformat(),
+                "period_end": end.isoformat(),
+                "due_date": due.isoformat(),
+                "reading_date": reading.reading_date.isoformat() if reading else None,
+                "status": status,
+                "alert": alert,
+                "days_left": (due - today).days,
+            }
+        )
+    return statuses
 
 
 def monthly_report_status(session: Session, year: int, month: int, today: date | None = None, kind: str = "full") -> dict[str, Any]:
@@ -2138,6 +2270,11 @@ def build_dashboard(session: Session) -> dict[str, Any]:
                     "days": (today - last_date).days if last_date else None,
                 }
             )
+    provider_reading_due = [
+        item
+        for item in provider_reading_statuses_for_month(session, today.year, today.month, today)
+        if item["alert"]
+    ]
 
     provider_debts = [
         serialize_bill(bill)
@@ -2168,6 +2305,7 @@ def build_dashboard(session: Session) -> dict[str, Any]:
             "has_mismatch": expense_fund_balance > 0.009,
         },
         "stale_readings": stale_readings,
+        "provider_reading_due": provider_reading_due,
         "provider_debts": provider_debts,
         "suspicious_receipts": [serialize_payment_receipt(receipt, session) for receipt in suspicious_receipts],
     }
@@ -4877,6 +5015,22 @@ def resolve_deferral_until(payload: dict[str, Any], today: date | None = None) -
 @app.get("/api/meters")
 def list_meters(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
     return [serialize_meter(meter) for meter in session.scalars(select(Meter).order_by(Meter.object_id, Meter.scope, Meter.name)).all()]
+
+
+@app.patch("/api/utility-services/{service_id}")
+def update_utility_service(service_id: int, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
+    service = session.get(UtilityService, service_id)
+    if not service:
+        raise HTTPException(404, "Коммунальная услуга не найдена")
+    if "provider_reading_due_day" in payload:
+        service.provider_reading_due_day = min(31, max(1, int(payload.get("provider_reading_due_day") or 20)))
+    if "provider_due_day" in payload:
+        service.provider_due_day = min(31, max(1, int(payload.get("provider_due_day") or 24)))
+    if "resident_due_days" in payload:
+        service.resident_due_days = min(31, max(1, int(payload.get("resident_due_days") or 7)))
+    session.commit()
+    session.refresh(service)
+    return serialize_service(service)
 
 
 @app.post("/api/meter-readings")

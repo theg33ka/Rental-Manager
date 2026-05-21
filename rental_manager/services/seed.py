@@ -50,6 +50,7 @@ def seed_if_empty(session: Session) -> None:
                 object_id=rental_object.id,
                 kind=kind,
                 name=service_names[kind],
+                provider_reading_due_day=20,
                 provider_due_day=24,
                 resident_due_days=7,
             )

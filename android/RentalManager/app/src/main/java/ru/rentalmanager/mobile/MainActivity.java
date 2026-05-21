@@ -84,6 +84,8 @@ public class MainActivity extends Activity {
     private JSONArray messageTargets = new JSONArray();
     private JSONArray suspiciousReceipts = new JSONArray();
     private JSONArray progressRentCharges = new JSONArray();
+    private JSONArray progressUtilityBills = new JSONArray();
+    private JSONArray progressProviderReadings = new JSONArray();
     private String currentTab = "dashboard";
     private String servicesMode = "utilities";
     private String progressRentMonthKey = "";
@@ -440,7 +442,7 @@ public class MainActivity extends Activity {
             content.addView(grid);
             addMetricRow(grid, "Просрочка аренды", len(dashboard, "rent_overdue"), "Коммуналка", len(dashboard, "utility_overdue"));
             addMetricRow(grid, "Сегодня оплата", len(dashboard, "rent_today"), "Отчёты", len(dashboard, "monthly_reports"));
-            addMetricRow(grid, "Чеки проверить", len(dashboard, "suspicious_receipts"), "Счётчики", len(dashboard, "stale_readings"));
+            addMetricRow(grid, "Чеки проверить", len(dashboard, "suspicious_receipts"), "Счётчики", len(dashboard, "provider_reading_due") + len(dashboard, "stale_readings"));
         }
 
         JSONArray reports = arr(dashboard, "monthly_reports");
@@ -559,19 +561,23 @@ public class MainActivity extends Activity {
     private MonthScore buildMonthScore(JSONObject dashboard) {
         MonthScore score = new MonthScore();
         JSONArray scoreRentCharges = rentChargesForSelectedMonth();
-        boolean detailedData = scoreRentCharges.length() > 0 || utilityBills.length() > 0;
+        JSONArray scoreUtilityBills = utilityBillsForSelectedMonth();
+        JSONArray scoreProviderReadings = providerReadingsForSelectedMonth();
+        boolean detailedData = scoreRentCharges.length() > 0 || scoreUtilityBills.length() > 0 || scoreProviderReadings.length() > 0;
 
         forEach(scoreRentCharges, charge -> {
             if (!sameSelectedMonth(scoreDateForItem("rent", charge))) return;
             addTaskByStatus(score, charge.optString("status"), charge.optString("due_date"), true);
         });
 
-        forEach(utilityBills, bill -> {
-            if (!sameSelectedMonth(firstNonEmpty(bill.optString("period_end"), bill.optString("due_date")))) return;
+        forEach(scoreUtilityBills, bill -> {
+            if (!sameSelectedMonth(scoreDateForItem("utility", bill))) return;
             addTaskByStatus(score, bill.optBoolean("provider_paid") ? "paid" : "issued", bill.optString("due_date"), false);
             JSONArray lines = arr(bill, "lines");
             forEach(lines, line -> addTaskByStatus(score, line.optString("status"), line.optString("due_date"), true));
         });
+        addMissingUtilityBillScore(score, scoreUtilityBills);
+        forEach(scoreProviderReadings, item -> addTaskByStatus(score, item.optString("status"), item.optString("due_date"), false));
 
         forEach(arr(dashboard, "monthly_reports"), report -> {
             if (report.optInt("year") == selectedMonth.get(Calendar.YEAR)
@@ -581,7 +587,10 @@ public class MainActivity extends Activity {
         });
 
         if (sameSelectedMonth(today())) {
-            forEach(arr(dashboard, "stale_readings"), item -> score.warning++);
+            forEach(arr(dashboard, "provider_reading_due"), item -> score.warning++);
+            if (scoreProviderReadings.length() == 0) {
+                forEach(arr(dashboard, "stale_readings"), item -> score.warning++);
+            }
             if (!detailedData) {
                 forEach(arr(dashboard, "provider_debts"), item -> addTaskByStatus(score, "issued", item.optString("due_date"), false));
             }
@@ -596,6 +605,7 @@ public class MainActivity extends Activity {
             collectScoreFromDashboard(score, dashboard, "utility_partial", true);
             collectScoreFromDashboard(score, dashboard, "utility_issued", false);
             collectScoreFromDashboard(score, dashboard, "manual_debts", true);
+            collectScoreFromDashboard(score, dashboard, "provider_reading_due", false);
             collectScoreFromDashboard(score, dashboard, "suspicious_receipts", true);
         }
 
@@ -618,6 +628,16 @@ public class MainActivity extends Activity {
         });
     }
 
+    private void addMissingUtilityBillScore(MonthScore score, JSONArray monthBills) {
+        Set<Integer> billedServices = new LinkedHashSet<>();
+        forEach(monthBills, bill -> billedServices.add(bill.optInt("service_id")));
+        forEach(arr(bootstrap, "services"), service -> {
+            if (!service.optBoolean("active", true)) return;
+            if (billedServices.contains(service.optInt("id"))) return;
+            addTaskByStatus(score, "issued", selectedMonthEnd(), false);
+        });
+    }
+
     private JSONArray rentChargesForSelectedMonth() {
         if (selectedMonthKey().equals(progressRentMonthKey)) {
             return progressRentCharges;
@@ -632,25 +652,59 @@ public class MainActivity extends Activity {
         return result;
     }
 
+    private JSONArray utilityBillsForSelectedMonth() {
+        if (selectedMonthKey().equals(progressRentMonthKey) && progressUtilityBills.length() > 0) {
+            return progressUtilityBills;
+        }
+        JSONArray result = new JSONArray();
+        for (int i = 0; i < utilityBills.length(); i++) {
+            JSONObject item = utilityBills.optJSONObject(i);
+            if (item != null && sameSelectedMonth(scoreDateForItem("utility", item))) {
+                result.put(item);
+            }
+        }
+        return result;
+    }
+
+    private JSONArray providerReadingsForSelectedMonth() {
+        if (selectedMonthKey().equals(progressRentMonthKey)) {
+            return progressProviderReadings;
+        }
+        return new JSONArray();
+    }
+
     private void ensureProgressRentData() {
         String key = selectedMonthKey();
         if (key.equals(progressRentMonthKey) || progressRentLoading || !NotificationPrefs.hasCustomBaseUrl(this)) return;
         progressRentLoading = true;
-        String start = selectedMonthStart();
-        String end = selectedMonthEnd();
+        int year = selectedMonth.get(Calendar.YEAR);
+        int month = selectedMonth.get(Calendar.MONTH) + 1;
         new Thread(() -> {
             try {
-                JSONArray loaded = api.getArray("/api/rent-charges?start=" + start + "&end=" + end);
+                JSONObject loaded = api.getJson("/api/month-progress?year=" + year + "&month=" + month);
                 runOnUiThread(() -> {
-                    progressRentCharges = loaded;
+                    progressRentCharges = arr(loaded, "rent_charges");
+                    progressUtilityBills = arr(loaded, "utility_bills");
+                    progressProviderReadings = arr(loaded, "provider_readings");
                     progressRentMonthKey = key;
                     progressRentLoading = false;
                     if ("dashboard".equals(currentTab) && key.equals(selectedMonthKey())) {
                         renderDashboard();
                     }
                 });
-            } catch (Exception ignored) {
-                runOnUiThread(() -> progressRentLoading = false);
+            } catch (Exception first) {
+                try {
+                    JSONArray loaded = api.getArray("/api/rent-charges?start=" + selectedMonthStart() + "&end=" + selectedMonthEnd());
+                    runOnUiThread(() -> {
+                        progressRentCharges = loaded;
+                        progressUtilityBills = new JSONArray();
+                        progressProviderReadings = new JSONArray();
+                        progressRentMonthKey = key;
+                        progressRentLoading = false;
+                    });
+                } catch (Exception ignored) {
+                    runOnUiThread(() -> progressRentLoading = false);
+                }
             }
         }, "rental-progress-rent").start();
     }
@@ -660,13 +714,16 @@ public class MainActivity extends Activity {
             return firstNonEmpty(item.optString("due_date"), item.optString("period_start"), item.optString("period_end"));
         }
         if (key != null && key.startsWith("utility")) {
-            return firstNonEmpty(item.optString("bill_period_end"), item.optString("period_end"), item.optString("due_date"));
+            return firstNonEmpty(item.optString("bill_period_start"), item.optString("period_start"), item.optString("bill_period_end"), item.optString("period_end"), item.optString("due_date"));
         }
         if ("manual_debts".equals(key)) {
             return firstNonEmpty(item.optString("period_start"), item.optString("period_end"), item.optString("due_date"));
         }
         if ("provider_debts".equals(key)) {
-            return firstNonEmpty(item.optString("period_end"), item.optString("due_date"));
+            return firstNonEmpty(item.optString("period_start"), item.optString("period_end"), item.optString("due_date"));
+        }
+        if ("provider_reading_due".equals(key) || "provider_readings".equals(key)) {
+            return firstNonEmpty(item.optString("period_start"), item.optString("due_date"));
         }
         return firstNonEmpty(item.optString("due_date"), item.optString("period_start"), item.optString("period_end"), item.optString("created_at"));
     }
@@ -705,19 +762,49 @@ public class MainActivity extends Activity {
     private List<MonthTask> buildMonthTasks(JSONObject dashboard) {
         List<MonthTask> tasks = new ArrayList<>();
         forEach(rentChargesForSelectedMonth(), charge -> addRentMonthTasks(tasks, charge));
-        forEach(utilityBills, bill -> addUtilityMonthTasks(tasks, bill));
+        JSONArray monthBills = utilityBillsForSelectedMonth();
+        forEach(monthBills, bill -> addUtilityMonthTasks(tasks, bill));
+        addMissingUtilityBillTasks(tasks, monthBills);
+        forEach(providerReadingsForSelectedMonth(), item -> addProviderReadingTask(tasks, item));
         forEach(arr(dashboard, "monthly_reports"), report -> {
             if (report.optInt("year") == selectedMonth.get(Calendar.YEAR)
                 && report.optInt("month") == selectedMonth.get(Calendar.MONTH) + 1) {
                 tasks.add(new MonthTask(1, "Месячный отчёт", joinNonEmpty(severityLabel(report.optString("severity")), report.optString("issue_count") + " проблем"), orange));
             }
         });
-        if (sameSelectedMonth(today())) {
-            forEach(arr(dashboard, "stale_readings"), item ->
-                tasks.add(new MonthTask(1, shortObjectName(item.optString("object")) + " " + item.optString("service"), "показания не переданы", orange))
+        if (sameSelectedMonth(today()) && providerReadingsForSelectedMonth().length() == 0) {
+            forEach(arr(dashboard, "provider_reading_due"), item ->
+                tasks.add(new MonthTask(1, shortObjectName(item.optString("object")) + " " + item.optString("service"), "показания поставщику до " + compactDate(item.optString("due_date")), orange))
             );
         }
         return tasks;
+    }
+
+    private void addMissingUtilityBillTasks(List<MonthTask> tasks, JSONArray monthBills) {
+        Set<Integer> billedServices = new LinkedHashSet<>();
+        forEach(monthBills, bill -> billedServices.add(bill.optInt("service_id")));
+        forEach(arr(bootstrap, "services"), service -> {
+            if (!service.optBoolean("active", true)) return;
+            if (billedServices.contains(service.optInt("id"))) return;
+            boolean future = isFutureDate(selectedMonthEnd());
+            String object = shortObjectName(service.optString("object"));
+            String title = object + " " + service.optString("name") + " счета арендаторам";
+            tasks.add(new MonthTask(1, title, future ? "предстоит" : "не выставлены за месяц", future ? gray : orange));
+        });
+    }
+
+    private void addProviderReadingTask(List<MonthTask> tasks, JSONObject item) {
+        String title = shortObjectName(item.optString("object")) + " " + item.optString("service") + " показания";
+        String status = item.optString("status");
+        String due = compactDate(item.optString("due_date"));
+        String readingDate = compactDate(item.optString("reading_date"));
+        if (isDoneStatus(status)) {
+            tasks.add(new MonthTask(2, title, "✅ " + fallbackDate(readingDate, due), green));
+        } else if (isFutureDate(item.optString("due_date"))) {
+            tasks.add(new MonthTask(1, title + " до " + due, "предстоит", gray));
+        } else {
+            tasks.add(new MonthTask(1, title + " до " + due, "не переданы поставщику", orange));
+        }
     }
 
     private void addRentMonthTasks(List<MonthTask> tasks, JSONObject charge) {
@@ -819,6 +906,7 @@ public class MainActivity extends Activity {
         collectAttention(groups, dashboard, "utility_partial", "Частичная коммуналка", orange, "services");
         collectAttention(groups, dashboard, "utility_issued", "Коммуналка к оплате", orange, "services");
         collectAttention(groups, dashboard, "manual_debts", "Ручной долг", orange, "payments");
+        collectAttention(groups, dashboard, "provider_reading_due", "Показания поставщику", orange, "services");
         collectAttention(groups, dashboard, "stale_readings", "Нет показаний", orange, "services");
         collectAttention(groups, dashboard, "provider_debts", "Поставщик не оплачен", orange, "services");
         collectAttention(groups, dashboard, "suspicious_receipts", "Чек на проверку", red, "payments");
@@ -906,6 +994,9 @@ public class MainActivity extends Activity {
             String last = item.optString("last_date", "");
             String days = item.has("days") && !item.isNull("days") ? item.optInt("days") + " дн." : "";
             return joinNonEmpty(title + " · " + item.optString("service"), last.isEmpty() ? "нет последнего показания" : "последнее " + last, days);
+        }
+        if ("provider_reading_due".equals(key)) {
+            return joinNonEmpty(title + " · " + item.optString("service"), "срок " + compactDate(item.optString("due_date")), statusLabel(item.optString("status")));
         }
         if ("provider_debts".equals(key)) {
             return joinNonEmpty(title + " · " + item.optString("service") + (period.isEmpty() ? "" : " за " + period), item.has("total_cost") ? money(item.optDouble("total_cost")) : "", due.isEmpty() ? "" : "срок " + due);
@@ -2119,9 +2210,8 @@ public class MainActivity extends Activity {
     private String compactApartment(JSONObject item) {
         String object = shortObjectName(item.optString("object"));
         String apartment = item.optString("apartment", "").trim();
-        if (object.isEmpty()) return apartment;
-        if (apartment.isEmpty()) return object;
-        return object + apartment;
+        if (!apartment.isEmpty()) return apartment.replace(" ", "");
+        return object;
     }
 
     private String shortObjectName(String value) {
@@ -2262,6 +2352,7 @@ public class MainActivity extends Activity {
 
     private String statusLabel(String status) {
         if ("pending".equals(status)) return "ожидается";
+        if ("upcoming".equals(status)) return "предстоит";
         if ("overdue".equals(status)) return "просрочено";
         if ("partial".equals(status)) return "частично оплачено";
         if ("paid".equals(status)) return "оплачено";

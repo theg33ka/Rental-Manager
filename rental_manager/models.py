@@ -148,6 +148,7 @@ class UtilityService(Base):
     object_id: Mapped[int] = mapped_column(ForeignKey("rental_objects.id"))
     kind: Mapped[str] = mapped_column(String(40))
     name: Mapped[str] = mapped_column(String(120))
+    provider_reading_due_day: Mapped[int] = mapped_column(Integer, default=20)
     provider_due_day: Mapped[int] = mapped_column(Integer, default=24)
     resident_due_days: Mapped[int] = mapped_column(Integer, default=7)
     active: Mapped[bool] = mapped_column(Boolean, default=True)

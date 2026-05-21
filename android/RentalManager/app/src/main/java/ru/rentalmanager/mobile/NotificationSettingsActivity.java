@@ -104,7 +104,7 @@ public class NotificationSettingsActivity extends Activity {
         addEvent(eventsCard, NotificationPrefs.KEY_UTILITY_ISSUED, "Выставленная коммуналка");
         addEvent(eventsCard, NotificationPrefs.KEY_MANUAL_DEBTS, "Ручные долги");
         addEvent(eventsCard, NotificationPrefs.KEY_PROVIDER_DEBTS, "Долги поставщикам");
-        addEvent(eventsCard, NotificationPrefs.KEY_STALE_READINGS, "Давно нет показаний счётчиков");
+        addEvent(eventsCard, NotificationPrefs.KEY_STALE_READINGS, "Не переданы общедомовые показания");
         addEvent(eventsCard, NotificationPrefs.KEY_SUSPICIOUS_RECEIPTS, "Подозрительные чеки");
         addEvent(eventsCard, NotificationPrefs.KEY_MONTHLY_REPORTS, "Открытые месячные отчёты");
         content.addView(eventsCard);

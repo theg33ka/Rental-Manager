@@ -4,7 +4,7 @@ import asyncio
 import json
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
@@ -15,7 +15,7 @@ from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import sessionmaker
 
 from rental_manager.database import Base
-from rental_manager.main import apartment_month_state, build_all_debts_breakdown, build_dashboard, create_move_out_utility_lines, expense_period_summary, owner_charge_status_label, owner_expected_ip_for_charge, panel_role_for_pin, process_move_out_notifications, render_message_text, rent_report
+from rental_manager.main import apartment_month_state, build_all_debts_breakdown, build_dashboard, create_move_out_utility_lines, expense_period_summary, owner_charge_status_label, owner_expected_ip_for_charge, panel_role_for_pin, process_move_out_notifications, provider_reading_statuses_for_month, render_message_text, rent_report, utility_bill_for_month
 from rental_manager.main import apply_database_import_payload, current_database_snapshot, inspect_database_import_payload, parse_database_import_bytes
 from rental_manager.models import AppSetting, Apartment, Expense, Lease, MessageLog, Meter, MeterReading, RentalObject, RentCharge, Tenant, UtilityBill, UtilityBillLine, UtilityService, Tariff
 from rental_manager.services.billing import (
@@ -912,6 +912,54 @@ class DashboardCutoffTests(DatabaseTestCase):
 
 
 class DashboardIssuedUtilityTests(DatabaseTestCase):
+    def test_provider_reading_due_alert_starts_three_days_before_deadline(self) -> None:
+        with self.seed() as session:
+            service = session.scalar(select(UtilityService).where(UtilityService.kind == "electricity"))
+            service.provider_reading_due_day = 20
+            session.commit()
+
+            statuses = provider_reading_statuses_for_month(session, 2026, 5, today=date(2026, 5, 17))
+            target = next(item for item in statuses if item["service_id"] == service.id)
+            self.assertEqual(target["status"], "pending")
+            self.assertTrue(target["alert"])
+            self.assertEqual(target["due_date"], "2026-05-20")
+
+            meter = session.scalar(select(Meter).where(Meter.service_id == service.id, Meter.scope == "object"))
+            session.add(MeterReading(meter_id=meter.id, reading_date=date(2026, 5, 18), value=1234))
+            session.commit()
+
+            statuses = provider_reading_statuses_for_month(session, 2026, 5, today=date(2026, 5, 19))
+            target = next(item for item in statuses if item["service_id"] == service.id)
+            self.assertEqual(target["status"], "paid")
+            self.assertFalse(target["alert"])
+            self.assertEqual(target["reading_date"], "2026-05-18")
+
+    def test_utility_bill_month_is_based_on_period_start(self) -> None:
+        with self.seed() as session:
+            service = session.scalar(select(UtilityService).where(UtilityService.kind == "electricity"))
+            bill = UtilityBill(
+                service_id=service.id,
+                period_start=date(2026, 4, 1),
+                period_end=date(2026, 5, 1),
+                status="issued",
+                total_consumption=0,
+                apartment_consumption=0,
+                odn_consumption=0,
+                total_cost=1000,
+                average_unit_price=0,
+                due_date=date(2026, 5, 8),
+                provider_paid=True,
+                provider_paid_at=datetime(2026, 5, 8, 12, 0),
+            )
+            session.add(bill)
+            session.commit()
+
+            april_start, april_end = date(2026, 4, 1), date(2026, 4, 30)
+            may_start, may_end = date(2026, 5, 1), date(2026, 5, 31)
+
+            self.assertEqual(utility_bill_for_month(session, service, april_start, april_end).id, bill.id)
+            self.assertIsNone(utility_bill_for_month(session, service, may_start, may_end))
+
     def test_dashboard_includes_issued_utility_lines(self) -> None:
         with self.seed() as session:
             service = session.scalar(select(UtilityService).where(UtilityService.kind == "electricity"))
