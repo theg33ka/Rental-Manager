@@ -1,12 +1,16 @@
+---
 meta:
   environment: docker
-  toolchain: docker
-
+  toolchain:
+    name: docker
+    version: latest
 build:
   dockerfile: Dockerfile
   skip: false
-
 run:
+  persistenceMount: /data
+  image: null
   command: uvicorn
   args: rental_manager.main:app --host 0.0.0.0 --port 10000
   containerPort: 10000
+  servicePort: 80
