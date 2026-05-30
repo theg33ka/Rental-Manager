@@ -71,6 +71,7 @@ def parse_receipt_text(text: str) -> dict[str, Any]:
 
 def _cleanup_text(text: str) -> str:
     cleaned = (text or "").replace("\u00a0", " ").replace("\u200b", "").replace("\ufeff", "")
+    cleaned = cleaned.replace("\u2011", "-").replace("\u2010", "-").replace("\u2013", "-").replace("\u2014", "-")
     return cleaned.strip()
 
 
@@ -90,6 +91,7 @@ def _group(text: str, pattern: str, *, multiline: bool = False) -> str | None:
 
 def _parse_amount(flat: str, source_bank: str) -> float:
     patterns = [
+        r"Сумма операции\s+([\d\s]+(?:[.,]\d{2})?)\s*[₽i]",
         r"Сумма платежа\s+([\d\s]+(?:[.,]\d{2})?)\s*[₽i]",
         r"Сумма перевода\s+([\d\s]+(?:[.,]\d{2})?)\s*[₽i]",
     ]
@@ -115,6 +117,7 @@ def _parse_money(value: str) -> float:
 
 def _parse_receipt_datetime(text: str, flat: str) -> datetime | None:
     direct_patterns = [
+        r"Дата операции\s+(\d{2}\.\d{2}\.\d{4}),?\s+(\d{2}:\d{2})",
         r"Перевод\s+(\d{2}\.\d{2}\.\d{4})\s+(\d{2}:\d{2})",
         r"^(\d{2}\.\d{2}\.\d{4})\s+(\d{2}:\d{2})(?::\d{2})?",
     ]
@@ -146,6 +149,8 @@ def _parse_transfer_type(flat: str, source_bank: str) -> str:
     value = _group(flat, r"Перевод\s+(По номеру телефона|Юридическому лицу)")
     if value:
         return value
+    if source_bank == "vtb" and "Исходящий перевод СБП" in flat:
+        return "По номеру телефона"
     if source_bank == "ozon_bank" and "Телефон получателя" in flat:
         return "По номеру телефона"
     if "ОПЛАТА ПО РЕКВИЗИТАМ" in flat.upper():
@@ -156,7 +161,7 @@ def _parse_transfer_type(flat: str, source_bank: str) -> str:
 
 
 def _parse_status(flat: str, source_bank: str) -> str:
-    explicit = _group(flat, r"Статус\s+(.+?)\s+(?:Сч[её]т списания|Сумма|Комиссия|Банк получателя|Квитанция)")
+    explicit = _group(flat, r"Статус\s+(.+?)\s+(?:Дата операции|Сч[её]т списания|Сумма|Комиссия|Банк получателя|Квитанция)")
     if explicit:
         return explicit
     if source_bank == "sberbank" and "Чек по операции" in flat:
@@ -179,6 +184,7 @@ def _parse_payer_name(flat: str) -> str:
         if inline_value:
             return inline_value
     patterns = [
+        r"Имя плательщика\s+(.+?)\s+(?:Сообщение|Получатель|ID операции)",
         r"Отправитель\s+(.+?)\s+(?:ID операции|Сообщение|Cooбщение|По вопросам)",
         r"Плательщик\s+(.+?)\s+(?:Банк-|Способ оплаты|ОПЛАТА ПО РЕКВИЗИТАМ)",
         r"ФИО отправителя\s+(.+?)\s+Сч[её]т отправителя",
@@ -233,7 +239,7 @@ def _parse_recipient_phone(flat: str) -> str:
 def _parse_recipient_bank(flat: str) -> str:
     patterns = [
         r"Банк-\s*получатель\s+(.+?)\s+БИК\s+\d{9}",
-        r"Банк получателя\s+(.+?)\s+(?:Отправитель|Сч[её]т получателя|Счет получателя|Идентификатор операции|Служба поддержки|Сч[её]т списания)",
+        r"Банк получателя\s+(.+?)\s+(?:Отправитель|Сч[её]т получателя|Счет получателя|Идентификатор операции|ID операции|Служба поддержки|Сч[её]т списания)",
     ]
     for pattern in patterns:
         value = _group(flat, pattern)
@@ -251,6 +257,7 @@ def _parse_recipient_account(flat: str) -> str:
 
 def _parse_purpose(flat: str) -> str:
     patterns = [
+        r"(?:Сообщение|Cooбщение)\s+(.+?)\s+Получатель",
         r"(?:Сообщение|Cooбщение)\s+(.+?)\s+По вопросам",
         r"Назначение платежа\s+(.+?)\s+(?:По вопросам зачисления|Идентификатор платежа)",
         r"Назначение платежа\s+(.+)$",
@@ -265,6 +272,9 @@ def _parse_purpose(flat: str) -> str:
 
 
 def _parse_receipt_number(flat: str) -> str:
+    sbp_id = _group(flat, r"ID операции в СБП\s+([A-ZА-Я0-9\s-]+?)\s+Сумма операции")
+    if sbp_id:
+        return re.sub(r"\s+", "", sbp_id)
     return (
         _group(flat, r"Квитанция\s+№\s*([0-9-]+)")
         or _group(flat, r"Номер документа\s+([0-9-]+)")
@@ -275,6 +285,8 @@ def _parse_receipt_number(flat: str) -> str:
 
 def _detect_source_bank(text: str) -> str:
     lowered = text.lower()
+    if "банк втб" in lowered or "втб (пао)" in lowered:
+        return "vtb"
     if "ozon банка" in lowered or "озон банк" in lowered:
         return "ozon_bank"
     if "fb@tbank.ru" in lowered or "т-банк" in lowered or "тинькофф" in lowered:
