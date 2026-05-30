@@ -448,8 +448,20 @@ function renderTelegramStatus() {
   `;
 }
 
+function applyAppState(payload) {
+  state.bootstrap = payload.bootstrap || payload;
+  state.rentCharges = payload.rent_charges || [];
+  state.utilityBills = payload.utility_bills || [];
+  state.utilityTimeline = payload.utility_timeline || [];
+  state.expenses = payload.expenses || [];
+  state.tariffs = payload.tariffs || [];
+  state.messageTargets = payload.message_targets || [];
+  state.suspiciousReceipts = payload.suspicious_receipts || [];
+}
+
 async function loadAll() {
-  state.bootstrap = await api("/api/bootstrap");
+  const payload = await api("/api/app-state");
+  applyAppState(payload);
   state.auth = { authenticated: true, role: state.bootstrap.auth?.role || authRole() || "owner" };
   applySettings(state.bootstrap.settings);
   applyAccessUi();
@@ -458,7 +470,6 @@ async function loadAll() {
     renderGuestView();
     return;
   }
-  await Promise.all([loadRent(), loadUtilityBills(), loadUtilityTimeline(), loadExpenses(), loadTariffs(), loadMessageTargets(), loadSuspiciousReceipts()]);
   hydrateForms();
   renderAll();
 }
