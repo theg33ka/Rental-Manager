@@ -243,8 +243,12 @@ public class MainActivity extends Activity {
         lastConnectionCheckAt = now;
         new Thread(() -> {
             try {
-                api.getJson("/healthz");
-                runOnUiThread(() -> setConnectionStatus(true, "связь есть"));
+                JSONObject status = api.getJson("/api/auth/status");
+                if (status.optBoolean("authenticated")) {
+                    runOnUiThread(() -> setConnectionStatus(true, "данные доступны"));
+                } else {
+                    runOnUiThread(() -> setConnectionStatus(false, "нужен PIN"));
+                }
             } catch (Exception ex) {
                 runOnUiThread(() -> setConnectionStatus(false, "связи нет"));
             }
@@ -307,19 +311,11 @@ public class MainActivity extends Activity {
     }
 
     private boolean currentTabReady() {
-        if ("dashboard".equals(currentTab) || "tenants".equals(currentTab)) return bootstrapLoadedAt > 0;
-        if ("payments".equals(currentTab)) return bootstrapLoadedAt > 0 && paymentsLoadedAt > 0;
-        if ("services".equals(currentTab)) return bootstrapLoadedAt > 0 && servicesLoadedAt > 0;
-        return bootstrapLoadedAt > 0 && moreLoadedAt > 0;
+        return bootstrapLoadedAt > 0;
     }
 
     private boolean currentTabStale() {
-        long now = System.currentTimeMillis();
-        if (bootstrapLoadedAt <= 0 || now - bootstrapLoadedAt > CACHE_TTL_MS) return true;
-        if ("payments".equals(currentTab)) return paymentsLoadedAt <= 0 || now - paymentsLoadedAt > CACHE_TTL_MS;
-        if ("services".equals(currentTab)) return servicesLoadedAt <= 0 || now - servicesLoadedAt > CACHE_TTL_MS;
-        if ("more".equals(currentTab)) return moreLoadedAt <= 0 || now - moreLoadedAt > CACHE_TTL_MS;
-        return false;
+        return bootstrapLoadedAt <= 0 || System.currentTimeMillis() - bootstrapLoadedAt > CACHE_TTL_MS;
     }
 
     private void renderCurrentTab() {
@@ -332,38 +328,35 @@ public class MainActivity extends Activity {
 
     private void refreshCurrentTab(boolean visible) {
         if (visible && !currentTabReady()) showLoadingCard();
-        if ("dashboard".equals(currentTab)) {
-            runApi("Обновляю дашборд", visible, () -> {
-                loadBootstrap();
-                return bootstrap;
-            }, value -> {
-                renderDashboard();
-                prefetchSecondaryData();
-            });
-        } else if ("tenants".equals(currentTab)) {
-            runApi("Обновляю жильцов", visible, () -> {
-                loadBootstrap();
-                return bootstrap;
-            }, value -> renderTenants());
-        } else if ("payments".equals(currentTab)) {
-            runApi("Обновляю оплаты", visible, () -> {
-                loadBootstrap();
-                loadPayments();
-                return null;
-            }, value -> renderPayments());
-        } else if ("services".equals(currentTab)) {
-            runApi("Обновляю учёт", visible, () -> {
-                loadBootstrap();
-                loadServices();
-                return null;
-            }, value -> renderServices());
-        } else {
-            runApi("Обновляю настройки", visible, () -> {
-                loadBootstrap();
-                loadMoreData();
-                return null;
-            }, value -> renderMore());
-        }
+        runApi("Обновляю данные", visible, () -> {
+            loadAppState();
+            return null;
+        }, value -> renderCurrentTab());
+    }
+
+    private void loadAppState() throws Exception {
+        JSONObject payload = api.getJson("/api/app-state");
+        bootstrap = payload.optJSONObject("bootstrap");
+        if (bootstrap == null) bootstrap = new JSONObject();
+        rentCharges = payload.optJSONArray("rent_charges");
+        if (rentCharges == null) rentCharges = new JSONArray();
+        utilityBills = payload.optJSONArray("utility_bills");
+        if (utilityBills == null) utilityBills = new JSONArray();
+        utilityTimeline = payload.optJSONArray("utility_timeline");
+        if (utilityTimeline == null) utilityTimeline = new JSONArray();
+        expenses = payload.optJSONArray("expenses");
+        if (expenses == null) expenses = new JSONArray();
+        tariffs = payload.optJSONArray("tariffs");
+        if (tariffs == null) tariffs = new JSONArray();
+        messageTargets = payload.optJSONArray("message_targets");
+        if (messageTargets == null) messageTargets = new JSONArray();
+        suspiciousReceipts = payload.optJSONArray("suspicious_receipts");
+        if (suspiciousReceipts == null) suspiciousReceipts = new JSONArray();
+        long now = System.currentTimeMillis();
+        bootstrapLoadedAt = now;
+        paymentsLoadedAt = now;
+        servicesLoadedAt = now;
+        moreLoadedAt = now;
     }
 
     private void loadBootstrap() throws Exception {
@@ -395,9 +388,7 @@ public class MainActivity extends Activity {
         prefetchRunning = true;
         new Thread(() -> {
             try {
-                if (paymentsLoadedAt <= 0 || System.currentTimeMillis() - paymentsLoadedAt > CACHE_TTL_MS) loadPayments();
-                if (servicesLoadedAt <= 0 || System.currentTimeMillis() - servicesLoadedAt > CACHE_TTL_MS) loadServices();
-                if (moreLoadedAt <= 0 || System.currentTimeMillis() - moreLoadedAt > CACHE_TTL_MS) loadMoreData();
+                if (currentTabStale()) loadAppState();
             } catch (Exception ignored) {
                 // Фоновая предзагрузка не должна ломать открытый экран.
             } finally {
@@ -1764,13 +1755,17 @@ public class MainActivity extends Activity {
             try {
                 Object result = job.run();
                 runOnUiThread(() -> {
-                    setConnectionStatus(true, "связь есть");
+                    setConnectionStatus(true, "данные загружены");
                     done.run(result);
                 });
             } catch (ApiClient.ApiException ex) {
                 runOnUiThread(() -> {
-                    if (ex.statusCode == 401 || ex.statusCode == 403) showLogin();
-                    else setConnectionStatus(false, "ошибка " + ex.statusCode);
+                    if (ex.statusCode == 401 || ex.statusCode == 403) {
+                        setConnectionStatus(false, "нужен PIN");
+                        showLogin();
+                    } else {
+                        setConnectionStatus(false, "ошибка " + ex.statusCode);
+                    }
                     toast(ex.getMessage());
                 });
             } catch (Exception ex) {

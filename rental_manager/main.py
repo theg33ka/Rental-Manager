@@ -14,13 +14,14 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from sqlalchemy import delete, func, select, text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from rental_manager.database import Base, DATABASE_URL, ROOT_DIR, SessionLocal, get_session, init_db
 from rental_manager.models import (
@@ -94,6 +95,7 @@ from rental_manager.services.telegram_bot import (
 
 
 app = FastAPI(title="Rental Manager", version="0.1.0")
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.mount("/static", StaticFiles(directory=ROOT_DIR / "static"), name="static")
 
 
@@ -171,7 +173,7 @@ DEFAULT_FALLBACK_KEYS = {
 REPORT_START_MONTH = date(2026, 1, 1)
 PANEL_AUTH_COOKIE = "rental_manager_panel_session"
 PANEL_AUTH_MAX_AGE_SECONDS = 60 * 60 * 24 * 180
-PANEL_ALLOWED_GUEST_TAB_PATHS = {"/api/bootstrap"}
+PANEL_ALLOWED_GUEST_TAB_PATHS = {"/api/bootstrap", "/api/app-state"}
 MOBILE_APK_PATH = ROOT_DIR / "android" / "RentalManager" / "build" / "rental-manager-mobile.apk"
 MONTH_NAMES = [
     "январь",
@@ -194,6 +196,7 @@ def startup() -> None:
     init_db()
     with SessionLocal() as session:
         ensure_schema_additions(session)
+        ensure_performance_indexes(session)
         seeded_release = seed_release_baseline_if_empty(session)
         if not seeded_release:
             seed_if_empty(session)
@@ -253,6 +256,34 @@ def ensure_schema_additions(session: Session) -> None:
     if not exists:
         session.execute(text("ALTER TABLE utility_services ADD COLUMN provider_reading_due_day INTEGER NOT NULL DEFAULT 20"))
         session.commit()
+
+
+PERFORMANCE_INDEXES = [
+    ("ix_rm_leases_active_apartment", "leases (active, apartment_id)"),
+    ("ix_rm_rent_charges_lease_due", "rent_charges (lease_id, due_date)"),
+    ("ix_rm_rent_charges_due_status", "rent_charges (due_date, status)"),
+    ("ix_rm_payment_receipts_status_paid", "payment_receipts (status, paid_at)"),
+    ("ix_rm_payment_receipts_lease_paid", "payment_receipts (lease_id, paid_at)"),
+    ("ix_rm_payment_receipts_rent_status", "payment_receipts (rent_charge_id, status)"),
+    ("ix_rm_payment_receipts_utility_status", "payment_receipts (utility_line_id, status)"),
+    ("ix_rm_message_logs_rent_created", "message_logs (rent_charge_id, created_at)"),
+    ("ix_rm_message_logs_utility_created", "message_logs (utility_line_id, created_at)"),
+    ("ix_rm_meter_readings_meter_date", "meter_readings (meter_id, reading_date)"),
+    ("ix_rm_meters_service_scope_active", "meters (service_id, scope, active)"),
+    ("ix_rm_utility_bills_service_period", "utility_bills (service_id, period_start, period_end)"),
+    ("ix_rm_utility_bills_status_provider", "utility_bills (status, provider_paid)"),
+    ("ix_rm_utility_bill_lines_bill", "utility_bill_lines (bill_id)"),
+    ("ix_rm_utility_bill_lines_lease_due", "utility_bill_lines (lease_id, due_date)"),
+    ("ix_rm_utility_bill_lines_status_due", "utility_bill_lines (status, due_date)"),
+    ("ix_rm_manual_debts_active_lease_due", "manual_debts (active, lease_id, due_date)"),
+    ("ix_rm_expenses_source_compensation", "expenses (source_funds, compensation_status)"),
+]
+
+
+def ensure_performance_indexes(session: Session) -> None:
+    for name, target in PERFORMANCE_INDEXES:
+        session.execute(text(f"CREATE INDEX IF NOT EXISTS {name} ON {target}"))
+    session.commit()
 
 
 @app.get("/")
@@ -1188,12 +1219,54 @@ def latest_message_log(
 ) -> MessageLog | None:
     if not session:
         return None
+    cached = session.info.get("latest_message_logs")
+    if rent_charge_id is not None and isinstance(cached, dict) and rent_charge_id in cached.get("rent", {}):
+        return cached["rent"][rent_charge_id]
+    if utility_line_id is not None and isinstance(cached, dict) and utility_line_id in cached.get("utility", {}):
+        return cached["utility"][utility_line_id]
     query = select(MessageLog)
     if rent_charge_id is not None:
         query = query.where(MessageLog.rent_charge_id == rent_charge_id)
     if utility_line_id is not None:
         query = query.where(MessageLog.utility_line_id == utility_line_id)
     return session.scalar(query.order_by(MessageLog.created_at.desc()).limit(1))
+
+
+def prefetch_latest_message_logs(
+    session: Session,
+    *,
+    rent_charge_ids: list[int] | tuple[int, ...] | set[int] = (),
+    utility_line_ids: list[int] | tuple[int, ...] | set[int] = (),
+) -> None:
+    cache = session.info.setdefault("latest_message_logs", {"rent": {}, "utility": {}})
+    rent_cache: dict[int, MessageLog | None] = cache.setdefault("rent", {})
+    utility_cache: dict[int, MessageLog | None] = cache.setdefault("utility", {})
+
+    missing_rent_ids = sorted({int(value) for value in rent_charge_ids if value and int(value) not in rent_cache})
+    if missing_rent_ids:
+        for value in missing_rent_ids:
+            rent_cache[value] = None
+        logs = session.scalars(
+            select(MessageLog)
+            .where(MessageLog.rent_charge_id.in_(missing_rent_ids))
+            .order_by(MessageLog.rent_charge_id, MessageLog.created_at.desc(), MessageLog.id.desc())
+        ).all()
+        for log in logs:
+            if log.rent_charge_id is not None and rent_cache.get(log.rent_charge_id) is None:
+                rent_cache[log.rent_charge_id] = log
+
+    missing_utility_ids = sorted({int(value) for value in utility_line_ids if value and int(value) not in utility_cache})
+    if missing_utility_ids:
+        for value in missing_utility_ids:
+            utility_cache[value] = None
+        logs = session.scalars(
+            select(MessageLog)
+            .where(MessageLog.utility_line_id.in_(missing_utility_ids))
+            .order_by(MessageLog.utility_line_id, MessageLog.created_at.desc(), MessageLog.id.desc())
+        ).all()
+        for log in logs:
+            if log.utility_line_id is not None and utility_cache.get(log.utility_line_id) is None:
+                utility_cache[log.utility_line_id] = log
 
 
 def reminder_meta(
@@ -1440,7 +1513,13 @@ def serialize_payment_brief(receipt: PaymentReceipt) -> dict[str, Any]:
     }
 
 
-def serialize_rent_charge(charge: RentCharge, session: Session | None = None) -> dict[str, Any]:
+def serialize_rent_charge(
+    charge: RentCharge,
+    session: Session | None = None,
+    *,
+    include_payments: bool = True,
+    include_reminder: bool = True,
+) -> dict[str, Any]:
     update_rent_charge_status(charge)
     reminder_template_key = "message_rent_due" if charge.status == "pending" and charge.due_date == date.today() else "message_rent_overdue"
     deferral_days_left = None
@@ -1472,7 +1551,7 @@ def serialize_rent_charge(charge: RentCharge, session: Session | None = None) ->
             serialize_payment_brief(receipt)
             for receipt in sorted(charge.receipts, key=lambda item: (item.paid_at, item.id))
             if receipt.status == "accepted"
-        ],
+        ] if include_payments else [],
         "deferral_until": charge.deferral_until.isoformat() if charge.deferral_until else None,
         "deferral_days_left": deferral_days_left,
         "deferral_note": charge.deferral_note,
@@ -1482,7 +1561,7 @@ def serialize_rent_charge(charge: RentCharge, session: Session | None = None) ->
             charge.due_date,
             template_key=reminder_template_key,
             rent_charge_id=charge.id,
-        ),
+        ) if include_reminder else None,
     }
 
 
@@ -1518,10 +1597,16 @@ def serialize_meter(meter: Meter) -> dict[str, Any]:
     }
 
 
-def serialize_bill_line(line: UtilityBillLine, session: Session | None = None) -> dict[str, Any]:
+def serialize_bill_line(
+    line: UtilityBillLine,
+    session: Session | None = None,
+    *,
+    include_payments: bool = True,
+    include_reminder: bool = True,
+) -> dict[str, Any]:
     update_utility_line_status(line)
     payments = []
-    if session:
+    if session and include_payments:
         payments = [
             serialize_payment_brief(receipt)
             for receipt in session.scalars(
@@ -1559,11 +1644,17 @@ def serialize_bill_line(line: UtilityBillLine, session: Session | None = None) -
             line.due_date,
             template_key="message_utility_bill",
             utility_line_id=line.id,
-        ) if line.lease else None,
+        ) if include_reminder and line.lease else None,
     }
 
 
-def serialize_bill(bill: UtilityBill, session: Session | None = None) -> dict[str, Any]:
+def serialize_bill(
+    bill: UtilityBill,
+    session: Session | None = None,
+    *,
+    include_line_payments: bool = True,
+    include_line_reminders: bool = True,
+) -> dict[str, Any]:
     resident_total_amount = money(sum(line.total_amount for line in bill.lines))
     resident_paid_amount = money(sum(line.paid_amount for line in bill.lines))
     return {
@@ -1588,7 +1679,15 @@ def serialize_bill(bill: UtilityBill, session: Session | None = None) -> dict[st
         "provider_paid": bill.provider_paid,
         "provider_paid_at": bill.provider_paid_at.isoformat() if bill.provider_paid_at else None,
         "notes": bill.notes,
-        "lines": [serialize_bill_line(line, session) for line in bill.lines],
+        "lines": [
+            serialize_bill_line(
+                line,
+                session,
+                include_payments=include_line_payments,
+                include_reminder=include_line_reminders,
+            )
+            for line in bill.lines
+        ],
     }
 
 
@@ -1736,8 +1835,7 @@ def logout_panel(request: Request, response: Response, session: Session = Depend
     return {"ok": True}
 
 
-@app.get("/api/bootstrap")
-def bootstrap(request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
+def build_bootstrap_payload(request: Request, session: Session) -> dict[str, Any]:
     generate_rent_charges(session)
     session.commit()
     role = getattr(request.state, "panel_role", None) or panel_role_from_request(request, session)
@@ -1761,12 +1859,81 @@ def bootstrap(request: Request, session: Session = Depends(get_session)) -> dict
     return {
         "today": date.today().isoformat(),
         "auth": {"role": role},
-        "objects": [serialize_object(obj) for obj in session.scalars(select(RentalObject).order_by(RentalObject.name)).all()] if role == "owner" else [],
-        "leases": [serialize_lease(lease, session) for lease in session.scalars(select(Lease).order_by(Lease.active.desc(), Lease.start_date.desc())).all()] if role == "owner" else [],
-        "meters": [serialize_meter(meter) for meter in session.scalars(select(Meter).order_by(Meter.object_id, Meter.scope, Meter.name)).all()] if role == "owner" else [],
-        "services": [serialize_service(service) for service in session.scalars(select(UtilityService).order_by(UtilityService.object_id, UtilityService.kind)).all()] if role == "owner" else [],
+        "objects": [
+            serialize_object(obj)
+            for obj in session.scalars(
+                select(RentalObject)
+                .options(
+                    selectinload(RentalObject.apartments).selectinload(Apartment.leases).joinedload(Lease.tenant),
+                    selectinload(RentalObject.services),
+                )
+                .order_by(RentalObject.name)
+            ).all()
+        ] if role == "owner" else [],
+        "leases": [
+            serialize_lease(lease, session)
+            for lease in session.scalars(
+                select(Lease)
+                .options(
+                    joinedload(Lease.apartment).joinedload(Apartment.object),
+                    joinedload(Lease.tenant),
+                )
+                .order_by(Lease.active.desc(), Lease.start_date.desc())
+            ).all()
+        ] if role == "owner" else [],
+        "meters": [
+            serialize_meter(meter)
+            for meter in session.scalars(
+                select(Meter)
+                .options(
+                    joinedload(Meter.service).joinedload(UtilityService.object),
+                    joinedload(Meter.apartment),
+                    selectinload(Meter.readings),
+                )
+                .order_by(Meter.object_id, Meter.scope, Meter.name)
+            ).all()
+        ] if role == "owner" else [],
+        "services": [
+            serialize_service(service)
+            for service in session.scalars(
+                select(UtilityService)
+                .options(joinedload(UtilityService.object))
+                .order_by(UtilityService.object_id, UtilityService.kind)
+            ).all()
+        ] if role == "owner" else [],
         "settings": settings_payload,
         "dashboard": dashboard_payload,
+    }
+
+
+@app.get("/api/bootstrap")
+def bootstrap(request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
+    return build_bootstrap_payload(request, session)
+
+
+@app.get("/api/app-state")
+def app_state(request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
+    bootstrap_payload = build_bootstrap_payload(request, session)
+    if bootstrap_payload.get("auth", {}).get("role") != "owner":
+        return {
+            "bootstrap": bootstrap_payload,
+            "rent_charges": [],
+            "utility_bills": [],
+            "utility_timeline": [],
+            "expenses": [],
+            "tariffs": [],
+            "message_targets": [],
+            "suspicious_receipts": [],
+        }
+    return {
+        "bootstrap": bootstrap_payload,
+        "rent_charges": rent_charges_payload(session=session, include_payments=False, include_reminder=False, generate_missing=False),
+        "utility_bills": utility_bills_payload(session, include_line_payments=False, include_line_reminders=False),
+        "utility_timeline": utility_timeline_payload(session),
+        "expenses": expenses_payload(session),
+        "tariffs": tariffs_payload(session),
+        "message_targets": message_targets_payload(session),
+        "suspicious_receipts": suspicious_receipts_payload(session),
     }
 
 
@@ -2204,6 +2371,10 @@ def build_dashboard(session: Session) -> dict[str, Any]:
     cutoff = configured_notification_cutoff_date(session)
     charges = session.scalars(
         select(RentCharge)
+        .options(
+            joinedload(RentCharge.lease).joinedload(Lease.apartment).joinedload(Apartment.object),
+            joinedload(RentCharge.lease).joinedload(Lease.tenant),
+        )
         .join(Lease)
         .join(Apartment)
         .where(Lease.active.is_(True), Apartment.active.is_(True))
@@ -2212,10 +2383,24 @@ def build_dashboard(session: Session) -> dict[str, Any]:
     charges = [charge for charge in charges if not lease_ignored(session, charge.lease_id)]
     for charge in charges:
         update_rent_charge_status(charge, today)
-    utility_lines = session.scalars(select(UtilityBillLine).join(Apartment).where(Apartment.active.is_(True))).all()
+    utility_lines = session.scalars(
+        select(UtilityBillLine)
+        .options(
+            joinedload(UtilityBillLine.apartment),
+            joinedload(UtilityBillLine.lease).joinedload(Lease.tenant),
+            joinedload(UtilityBillLine.bill).joinedload(UtilityBill.service).joinedload(UtilityService.object),
+        )
+        .join(Apartment)
+        .where(Apartment.active.is_(True))
+    ).all()
     utility_lines = [line for line in utility_lines if line.lease_id and not lease_ignored(session, line.lease_id)]
     for line in utility_lines:
         update_utility_line_status(line, today)
+    prefetch_latest_message_logs(
+        session,
+        rent_charge_ids=[charge.id for charge in charges],
+        utility_line_ids=[line.id for line in utility_lines],
+    )
 
     def rent_debt(charge: RentCharge) -> float:
         return money(max(0, float(charge.ip_due or 0) - float(charge.ip_paid or 0)) + max(0, float(charge.personal_due or 0) - float(charge.personal_paid or 0)))
@@ -2224,22 +2409,22 @@ def build_dashboard(session: Session) -> dict[str, Any]:
         return money(max(0, float(line.total_amount or 0) - float(line.paid_amount or 0)))
 
     overdue_rent = [
-        serialize_rent_charge(charge, session)
+        serialize_rent_charge(charge, session, include_payments=False)
         for charge in charges
         if charge.status == "overdue" and rent_debt(charge) > 0 and debt_visible_by_cutoff(charge.due_date, cutoff)
     ]
     partial_rent = [
-        serialize_rent_charge(charge, session)
+        serialize_rent_charge(charge, session, include_payments=False)
         for charge in charges
         if charge.status == "partial" and rent_debt(charge) > 0 and debt_visible_by_cutoff(charge.due_date, cutoff)
     ]
     today_rent = [
-        serialize_rent_charge(charge, session)
+        serialize_rent_charge(charge, session, include_payments=False)
         for charge in charges
         if charge.due_date == today and charge.status not in {"paid", "paid_ahead"} and rent_debt(charge) > 0 and debt_visible_by_cutoff(charge.due_date, cutoff)
     ]
     deferred = [
-        serialize_rent_charge(charge, session)
+        serialize_rent_charge(charge, session, include_payments=False)
         for charge in charges
         if charge.status == "deferred"
         and charge.deferral_until
@@ -2249,17 +2434,17 @@ def build_dashboard(session: Session) -> dict[str, Any]:
     ]
 
     overdue_utilities = [
-        serialize_bill_line(line, session)
+        serialize_bill_line(line, session, include_payments=False)
         for line in utility_lines
         if line.status == "overdue" and utility_debt(line) > 0 and debt_visible_by_cutoff(line.due_date, cutoff)
     ]
     partial_utilities = [
-        serialize_bill_line(line, session)
+        serialize_bill_line(line, session, include_payments=False)
         for line in utility_lines
         if line.status == "partial" and utility_debt(line) > 0 and debt_visible_by_cutoff(line.due_date, cutoff)
     ]
     issued_utilities = [
-        serialize_bill_line(line, session)
+        serialize_bill_line(line, session, include_payments=False)
         for line in utility_lines
         if line.status in {"issued", "overdue", "partial"} and utility_debt(line) > 0 and debt_visible_by_cutoff(line.due_date, cutoff)
     ]
@@ -2307,7 +2492,11 @@ def build_dashboard(session: Session) -> dict[str, Any]:
 
     provider_debts = [
         serialize_bill(bill)
-        for bill in session.scalars(select(UtilityBill).where(UtilityBill.provider_paid.is_(False))).all()
+        for bill in session.scalars(
+            select(UtilityBill)
+            .options(joinedload(UtilityBill.service).joinedload(UtilityService.object), selectinload(UtilityBill.lines))
+            .where(UtilityBill.provider_paid.is_(False))
+        ).all()
         if bill.status in {"issued", "draft"}
         and debt_visible_by_cutoff(bill.due_date or bill.period_end, cutoff)
         and any(line.status != "paid" for line in bill.lines)
@@ -2906,6 +3095,137 @@ def send_tenant_message(
         "lease_id": lease.id,
         "template_key": template_key,
         "text": text,
+    }
+
+
+def int_selection(values: Any) -> set[int]:
+    if values is None or values == "":
+        return set()
+    if isinstance(values, str):
+        values = [part.strip() for part in values.split(",")]
+    if not isinstance(values, list | tuple | set):
+        values = [values]
+    result: set[int] = set()
+    for value in values:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            result.add(parsed)
+    return result
+
+
+def broadcast_candidate_leases(session: Session, payload: dict[str, Any]) -> list[Lease]:
+    all_selected = setting_bool_value(payload.get("all")) or str(payload.get("scope") or "").strip() == "all"
+    lease_ids = int_selection(payload.get("lease_ids"))
+    apartment_ids = int_selection(payload.get("apartment_ids"))
+    object_ids = int_selection(payload.get("object_ids"))
+    if not all_selected and not lease_ids and not apartment_ids and not object_ids:
+        raise HTTPException(400, "Выберите хотя бы одного получателя")
+
+    leases = session.scalars(
+        select(Lease)
+        .options(
+            joinedload(Lease.apartment).joinedload(Apartment.object),
+            joinedload(Lease.tenant),
+        )
+        .join(Apartment)
+        .where(Lease.active.is_(True), Apartment.active.is_(True))
+        .order_by(Apartment.object_id, Apartment.sort_order, Apartment.name, Lease.start_date.desc())
+    ).all()
+    selected = []
+    for lease in leases:
+        if lease_ignored(session, lease.id):
+            continue
+        if all_selected or lease.id in lease_ids or lease.apartment_id in apartment_ids or lease.apartment.object_id in object_ids:
+            selected.append(lease)
+    return selected
+
+
+def serialize_broadcast_target(lease: Lease, status: str, detail: str = "") -> dict[str, Any]:
+    return {
+        "lease_id": lease.id,
+        "tenant": lease.tenant.full_name,
+        "object": lease.apartment.object.name,
+        "apartment": lease.apartment.name,
+        "status": status,
+        "detail": detail,
+    }
+
+
+def resolve_broadcast_recipients(session: Session, payload: dict[str, Any]) -> dict[str, Any]:
+    recipients: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    seen_chats: set[str] = set()
+    for lease in broadcast_candidate_leases(session, payload):
+        chat_id = lease_chat_id(session, lease)
+        if not chat_id:
+            skipped.append(serialize_broadcast_target(lease, "unlinked", "ждём /start от жильца"))
+            continue
+        if chat_id in seen_chats:
+            skipped.append(serialize_broadcast_target(lease, "duplicate_chat", "этот Telegram-чат уже выбран"))
+            continue
+        seen_chats.add(chat_id)
+        recipients.append({"lease": lease, "chat_id": chat_id})
+    return {"recipients": recipients, "skipped": skipped}
+
+
+@app.post("/api/messages/broadcast")
+def broadcast_message_to_tenants(payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
+    text = str(payload.get("message") or "").strip()
+    if not text:
+        raise HTTPException(400, "Введите текст рассылки")
+    if len(text) > 4000:
+        raise HTTPException(400, "Telegram не любит простыни длиннее 4000 символов. Разбей сообщение на части.")
+    if not telegram_token(session):
+        raise HTTPException(400, "Сначала сохрани Telegram bot token")
+
+    resolved = resolve_broadcast_recipients(session, payload)
+    sent: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    for item in resolved["recipients"]:
+        lease = item["lease"]
+        chat_id = item["chat_id"]
+        try:
+            send_telegram_text(session, chat_id, text)
+            session.add(
+                MessageLog(
+                    lease_id=lease.id,
+                    channel="telegram",
+                    template_key="broadcast",
+                    status="sent",
+                    recipient_chat_id=str(chat_id),
+                    text=text,
+                    note="mass-broadcast",
+                )
+            )
+            sent.append(serialize_broadcast_target(lease, "sent"))
+        except HTTPException as exc:
+            detail = str(exc.detail)
+            session.add(
+                MessageLog(
+                    lease_id=lease.id,
+                    channel="telegram",
+                    template_key="broadcast",
+                    status="failed",
+                    recipient_chat_id=str(chat_id),
+                    text=text,
+                    note=f"mass-broadcast: {detail}",
+                )
+            )
+            failed.append(serialize_broadcast_target(lease, "failed", detail))
+    session.commit()
+    skipped = resolved["skipped"]
+    return {
+        "ok": True,
+        "sent": len(sent),
+        "failed": len(failed),
+        "skipped_unlinked": len([item for item in skipped if item["status"] == "unlinked"]),
+        "skipped_duplicate": len([item for item in skipped if item["status"] == "duplicate_chat"]),
+        "recipients": sent,
+        "failed_recipients": failed,
+        "skipped_recipients": skipped,
     }
 
 
@@ -4185,12 +4505,16 @@ def telegram_send_test(session: Session = Depends(get_session)) -> dict[str, Any
     return {"ok": True}
 
 
-@app.get("/api/messages/targets")
-def message_targets(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+def message_targets_payload(session: Session) -> list[dict[str, Any]]:
     leases = session.scalars(
         select(Lease).join(Apartment).where(Lease.active.is_(True), Apartment.active.is_(True)).order_by(Lease.start_date.desc())
     ).all()
     return [serialize_message_target(session, lease) for lease in leases if not lease_ignored(session, lease.id)]
+
+
+@app.get("/api/messages/targets")
+def message_targets(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    return message_targets_payload(session)
 
 
 @app.post("/api/messages/preview")
@@ -4483,29 +4807,64 @@ def move_out(lease_id: int, payload: dict[str, Any], session: Session = Depends(
     }
 
 
+def rent_charges_payload(
+    start: str | None = None,
+    end: str | None = None,
+    session: Session | None = None,
+    *,
+    include_payments: bool = True,
+    include_reminder: bool = True,
+    generate_missing: bool = True,
+) -> list[dict[str, Any]]:
+    if session is None:
+        return []
+    if generate_missing:
+        generate_rent_charges(session)
+    start_date, end_date = current_month_range()
+    if start:
+        start_date = parse_date(start)
+    if end:
+        end_date = parse_date(end)
+    query = (
+        select(RentCharge)
+        .options(
+            joinedload(RentCharge.lease).joinedload(Lease.apartment).joinedload(Apartment.object),
+            joinedload(RentCharge.lease).joinedload(Lease.tenant),
+        )
+        .join(Lease)
+        .join(Apartment)
+        .where(Lease.active.is_(True), Apartment.active.is_(True))
+        .where(RentCharge.due_date >= start_date, RentCharge.due_date <= end_date)
+        .order_by(RentCharge.due_date, RentCharge.id)
+    )
+    if include_payments:
+        query = query.options(selectinload(RentCharge.receipts))
+    charges = session.scalars(query).all()
+    charges = [charge for charge in charges if not lease_ignored(session, charge.lease_id)]
+    if include_reminder:
+        prefetch_latest_message_logs(session, rent_charge_ids=[charge.id for charge in charges])
+    return [
+        serialize_rent_charge(charge, session, include_payments=include_payments, include_reminder=include_reminder)
+        for charge in charges
+    ]
+
+
 @app.get("/api/rent-charges")
 def list_rent_charges(
     start: str | None = None,
     end: str | None = None,
     session: Session = Depends(get_session),
 ) -> list[dict[str, Any]]:
-    generate_rent_charges(session)
-    start_date, end_date = current_month_range()
-    if start:
-        start_date = parse_date(start)
-    if end:
-        end_date = parse_date(end)
-    charges = session.scalars(
-        select(RentCharge)
-        .join(Lease)
-        .join(Apartment)
-        .where(Lease.active.is_(True), Apartment.active.is_(True))
-        .where(RentCharge.due_date >= start_date, RentCharge.due_date <= end_date)
-        .order_by(RentCharge.due_date, RentCharge.id)
-    ).all()
-    charges = [charge for charge in charges if not lease_ignored(session, charge.lease_id)]
+    result = rent_charges_payload(
+        start=start,
+        end=end,
+        session=session,
+        include_payments=False,
+        include_reminder=False,
+        generate_missing=True,
+    )
     session.commit()
-    return [serialize_rent_charge(charge, session) for charge in charges]
+    return result
 
 
 @app.post("/api/rent-charges/generate")
@@ -4930,14 +5289,25 @@ def delete_payment_receipt(receipt_id: int, session: Session = Depends(get_sessi
     return {"ok": True}
 
 
-@app.get("/api/payment-receipts/suspicious")
-def suspicious_receipts(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+def suspicious_receipts_payload(session: Session) -> list[dict[str, Any]]:
     receipts = session.scalars(
         select(PaymentReceipt)
+        .options(
+            joinedload(PaymentReceipt.rent_charge)
+            .joinedload(RentCharge.lease)
+            .joinedload(Lease.apartment)
+            .joinedload(Apartment.object),
+            joinedload(PaymentReceipt.rent_charge).joinedload(RentCharge.lease).joinedload(Lease.tenant),
+        )
         .where(PaymentReceipt.status == "suspicious")
         .order_by(PaymentReceipt.paid_at.desc(), PaymentReceipt.id.desc())
     ).all()
     return [serialize_payment_receipt(receipt, session) for receipt in receipts]
+
+
+@app.get("/api/payment-receipts/suspicious")
+def suspicious_receipts(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    return suspicious_receipts_payload(session)
 
 
 @app.post("/api/payment-receipts/{receipt_id}/ignore")
@@ -5129,9 +5499,12 @@ def save_meter_readings_batch(payload: dict[str, Any], session: Session = Depend
     }
 
 
-@app.get("/api/tariffs")
-def list_tariffs(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
-    tariffs = session.scalars(select(Tariff).order_by(Tariff.service_id, Tariff.starts_on.desc())).all()
+def tariffs_payload(session: Session) -> list[dict[str, Any]]:
+    tariffs = session.scalars(
+        select(Tariff)
+        .options(joinedload(Tariff.service).joinedload(UtilityService.object))
+        .order_by(Tariff.service_id, Tariff.starts_on.desc())
+    ).all()
     return [
         {
             "id": tariff.id,
@@ -5145,6 +5518,11 @@ def list_tariffs(session: Session = Depends(get_session)) -> list[dict[str, Any]
         }
         for tariff in tariffs
     ]
+
+
+@app.get("/api/tariffs")
+def list_tariffs(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    return tariffs_payload(session)
 
 
 def parse_tiers(value: Any) -> list[dict[str, Any]]:
@@ -5197,17 +5575,48 @@ def create_tariff(payload: dict[str, Any], session: Session = Depends(get_sessio
     }
 
 
+def utility_bills_payload(
+    session: Session,
+    *,
+    include_line_payments: bool = True,
+    include_line_reminders: bool = True,
+) -> list[dict[str, Any]]:
+    bills = session.scalars(
+        select(UtilityBill)
+        .options(
+            joinedload(UtilityBill.service).joinedload(UtilityService.object),
+            selectinload(UtilityBill.lines).joinedload(UtilityBillLine.apartment),
+            selectinload(UtilityBill.lines).joinedload(UtilityBillLine.lease).joinedload(Lease.tenant),
+        )
+        .order_by(UtilityBill.created_at.desc(), UtilityBill.id.desc())
+    ).all()
+    if include_line_reminders:
+        line_ids = [line.id for bill in bills for line in bill.lines]
+        prefetch_latest_message_logs(session, utility_line_ids=line_ids)
+    return [
+        serialize_bill(
+            bill,
+            session,
+            include_line_payments=include_line_payments,
+            include_line_reminders=include_line_reminders,
+        )
+        for bill in bills
+    ]
+
+
 @app.get("/api/utility-bills")
 def list_utility_bills(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
-    bills = session.scalars(select(UtilityBill).order_by(UtilityBill.created_at.desc(), UtilityBill.id.desc())).all()
-    return [serialize_bill(bill, session) for bill in bills]
+    return utility_bills_payload(session, include_line_payments=False, include_line_reminders=False)
 
 
-@app.get("/api/utilities/timeline")
-def utility_timeline(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+def utility_timeline_payload(session: Session) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     object_readings = session.scalars(
-        select(MeterReading).join(Meter).where(Meter.scope == "object", Meter.active.is_(True)).order_by(MeterReading.reading_date.desc(), MeterReading.id.desc())
+        select(MeterReading)
+        .options(joinedload(MeterReading.meter).joinedload(Meter.service).joinedload(UtilityService.object))
+        .join(Meter)
+        .where(Meter.scope == "object", Meter.active.is_(True))
+        .order_by(MeterReading.reading_date.desc(), MeterReading.id.desc())
     ).all()
     for reading in object_readings:
         meter = reading.meter
@@ -5225,7 +5634,11 @@ def utility_timeline(session: Session = Depends(get_session)) -> list[dict[str, 
             }
         )
 
-    bills = session.scalars(select(UtilityBill).order_by(UtilityBill.period_end.desc(), UtilityBill.id.desc())).all()
+    bills = session.scalars(
+        select(UtilityBill)
+        .options(joinedload(UtilityBill.service).joinedload(UtilityService.object), selectinload(UtilityBill.lines))
+        .order_by(UtilityBill.period_end.desc(), UtilityBill.id.desc())
+    ).all()
     for bill in bills:
         events.append(
             {
@@ -5262,8 +5675,21 @@ def utility_timeline(session: Session = Depends(get_session)) -> list[dict[str, 
     utility_receipts = session.scalars(
         select(PaymentReceipt).where(PaymentReceipt.utility_line_id.is_not(None)).order_by(PaymentReceipt.paid_at.desc(), PaymentReceipt.id.desc())
     ).all()
+    utility_line_ids = [receipt.utility_line_id for receipt in utility_receipts if receipt.utility_line_id]
+    utility_lines_by_id = {
+        line.id: line
+        for line in session.scalars(
+            select(UtilityBillLine)
+            .options(
+                joinedload(UtilityBillLine.apartment),
+                joinedload(UtilityBillLine.lease).joinedload(Lease.tenant),
+                joinedload(UtilityBillLine.bill).joinedload(UtilityBill.service).joinedload(UtilityService.object),
+            )
+            .where(UtilityBillLine.id.in_(utility_line_ids))
+        ).all()
+    } if utility_line_ids else {}
     for receipt in utility_receipts:
-        line = session.get(UtilityBillLine, receipt.utility_line_id) if receipt.utility_line_id else None
+        line = utility_lines_by_id.get(receipt.utility_line_id) if receipt.utility_line_id else None
         if not line:
             continue
         bill = line.bill
@@ -5285,6 +5711,11 @@ def utility_timeline(session: Session = Depends(get_session)) -> list[dict[str, 
 
     events.sort(key=lambda item: item["sort_at"], reverse=True)
     return events
+
+
+@app.get("/api/utilities/timeline")
+def utility_timeline(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    return utility_timeline_payload(session)
 
 
 @app.post("/api/utility-bills/calculate")
@@ -5442,10 +5873,18 @@ def add_utility_payment(line_id: int, payload: dict[str, Any], session: Session 
     return serialize_bill_line(line, session)
 
 
+def expenses_payload(session: Session) -> list[dict[str, Any]]:
+    expenses = session.scalars(
+        select(Expense)
+        .options(joinedload(Expense.object), joinedload(Expense.apartment))
+        .order_by(Expense.expense_date.desc(), Expense.id.desc())
+    ).all()
+    return [serialize_expense(expense) for expense in expenses]
+
+
 @app.get("/api/expenses")
 def list_expenses(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
-    expenses = session.scalars(select(Expense).order_by(Expense.expense_date.desc(), Expense.id.desc())).all()
-    return [serialize_expense(expense) for expense in expenses]
+    return expenses_payload(session)
 
 
 @app.post("/api/expenses")

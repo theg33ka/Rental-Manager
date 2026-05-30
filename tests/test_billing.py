@@ -15,7 +15,7 @@ from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import sessionmaker
 
 from rental_manager.database import Base
-from rental_manager.main import apartment_month_state, build_all_debts_breakdown, build_dashboard, create_move_out_utility_lines, delete_utility_bill, expense_period_summary, owner_charge_status_label, owner_expected_ip_for_charge, panel_role_for_pin, process_move_out_notifications, provider_reading_statuses_for_month, render_message_text, rent_report, utility_bill_for_month
+from rental_manager.main import apartment_month_state, build_all_debts_breakdown, build_dashboard, create_move_out_utility_lines, delete_utility_bill, expense_period_summary, owner_charge_status_label, owner_expected_ip_for_charge, panel_role_for_pin, process_move_out_notifications, provider_reading_statuses_for_month, render_message_text, rent_report, resolve_broadcast_recipients, utility_bill_for_month
 from rental_manager.main import apply_database_import_payload, current_database_snapshot, inspect_database_import_payload, parse_database_import_bytes
 from rental_manager.models import AppSetting, Apartment, Expense, Lease, MessageLog, Meter, MeterReading, PaymentReceipt, RentalObject, RentCharge, Tenant, UtilityBill, UtilityBillLine, UtilityService, Tariff
 from rental_manager.services.billing import (
@@ -98,6 +98,50 @@ class DatabaseImportExportTests(DatabaseTestCase):
             self.assertEqual(panel_role_for_pin(session, "1298"), "owner")
             self.assertEqual(panel_role_for_pin(session, "1212"), "guest")
             self.assertIsNone(panel_role_for_pin(session, "0000"))
+
+
+class BroadcastMessageTests(DatabaseTestCase):
+    def test_broadcast_recipients_skip_unlinked_and_duplicate_chats(self) -> None:
+        with self.seed() as session:
+            apartments = session.scalars(select(Apartment).order_by(Apartment.object_id, Apartment.sort_order).limit(3)).all()
+            tenants = [Tenant(full_name=f"Жилец {index}") for index in range(1, 4)]
+            session.add_all(tenants)
+            session.flush()
+            leases = [
+                Lease(apartment_id=apartments[index].id, tenant_id=tenants[index].id, start_date=date(2026, 5, 1), payment_day=1, ip_amount=10000, personal_amount=0)
+                for index in range(3)
+            ]
+            session.add_all(leases)
+            session.flush()
+            session.add(
+                AppSetting(
+                    key="telegram_tenant_links",
+                    value=json.dumps({str(tenants[0].id): "100", str(tenants[1].id): "100"}),
+                )
+            )
+            session.flush()
+
+            resolved = resolve_broadcast_recipients(session, {"all": True})
+
+        self.assertEqual([item["lease"].id for item in resolved["recipients"]], [leases[0].id])
+        self.assertEqual([item["status"] for item in resolved["skipped"]], ["duplicate_chat", "unlinked"])
+
+    def test_broadcast_recipients_accept_explicit_lease_selection(self) -> None:
+        with self.seed() as session:
+            apartment = session.scalar(select(Apartment).order_by(Apartment.object_id, Apartment.sort_order).limit(1))
+            tenant = Tenant(full_name="Адресный жилец")
+            session.add(tenant)
+            session.flush()
+            lease = Lease(apartment_id=apartment.id, tenant_id=tenant.id, start_date=date(2026, 5, 1), payment_day=1, ip_amount=10000, personal_amount=0)
+            session.add(lease)
+            session.flush()
+            session.add(AppSetting(key="telegram_tenant_links", value=json.dumps({str(tenant.id): "200"})))
+            session.flush()
+
+            resolved = resolve_broadcast_recipients(session, {"lease_ids": [lease.id]})
+
+        self.assertEqual(len(resolved["recipients"]), 1)
+        self.assertEqual(resolved["recipients"][0]["chat_id"], "200")
 
 
 async def read_streaming_response_bytes(response) -> bytes:
