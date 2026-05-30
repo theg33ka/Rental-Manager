@@ -652,6 +652,48 @@ section {
   font: inherit;
 }
 
+.broadcast-box {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px;
+  background: var(--bg);
+}
+
+.broadcast-box__head {
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.recipient-tree {
+  display: grid;
+  gap: 8px;
+}
+
+.recipient-tree label {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-height: 30px;
+}
+
+.recipient-tree__group {
+  border-top: 1px dashed var(--line);
+  padding-top: 8px;
+}
+
+.recipient-tree__children {
+  display: grid;
+  gap: 4px;
+  margin-left: 26px;
+}
+
+.recipient-tree .disabled {
+  color: var(--muted);
+}
+
 .attention-actions {
   display: flex;
   flex-wrap: wrap;

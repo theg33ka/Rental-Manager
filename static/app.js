@@ -448,8 +448,20 @@ function renderTelegramStatus() {
   `;
 }
 
+function applyAppState(payload) {
+  state.bootstrap = payload.bootstrap || payload;
+  state.rentCharges = payload.rent_charges || [];
+  state.utilityBills = payload.utility_bills || [];
+  state.utilityTimeline = payload.utility_timeline || [];
+  state.expenses = payload.expenses || [];
+  state.tariffs = payload.tariffs || [];
+  state.messageTargets = payload.message_targets || [];
+  state.suspiciousReceipts = payload.suspicious_receipts || [];
+}
+
 async function loadAll() {
-  state.bootstrap = await api("/api/bootstrap");
+  const payload = await api("/api/app-state");
+  applyAppState(payload);
   state.auth = { authenticated: true, role: state.bootstrap.auth?.role || authRole() || "owner" };
   applySettings(state.bootstrap.settings);
   applyAccessUi();
@@ -458,7 +470,6 @@ async function loadAll() {
     renderGuestView();
     return;
   }
-  await Promise.all([loadRent(), loadUtilityBills(), loadUtilityTimeline(), loadExpenses(), loadTariffs(), loadMessageTargets(), loadSuspiciousReceipts()]);
   hydrateForms();
   renderAll();
 }
@@ -2321,9 +2332,150 @@ function renderExpenses() {
   qs("#expenseList").innerHTML = `${summary}${table(["Дата", "Объект", "Квартира", "Категория", "Сумма", "Источник", "Компенсация", "Описание", "Действия"], rows)}`;
 }
 
+function groupedBroadcastTargets() {
+  const groups = new Map();
+  [...state.messageTargets].sort(compareApartmentRefs).forEach((target) => {
+    const objectName = target.object || "Без объекта";
+    if (!groups.has(objectName)) groups.set(objectName, []);
+    groups.get(objectName).push(target);
+  });
+  return [...groups.entries()];
+}
+
+function renderBroadcastRecipients() {
+  const root = qs("#broadcastRecipients");
+  if (!root) return;
+  const targets = [...state.messageTargets].sort(compareApartmentRefs);
+  const linkedCount = targets.filter((target) => target.linked).length;
+  const summary = qs("#broadcastRecipientSummary");
+  if (summary) summary.textContent = linkedCount ? `доступно ${linkedCount}` : "нет привязанных чатов";
+  if (!targets.length) {
+    root.innerHTML = `<p class="muted">Активных жильцов пока нет.</p>`;
+    return;
+  }
+  root.innerHTML = `
+    <label>
+      <input type="checkbox" data-broadcast-all ${linkedCount ? "" : "disabled"} />
+      <strong>Все</strong>
+      <span class="muted">${linkedCount} получ.</span>
+    </label>
+    ${groupedBroadcastTargets().map(([objectName, items], groupIndex) => {
+      const linkedItems = items.filter((item) => item.linked);
+      return `
+        <div class="recipient-tree__group">
+          <label>
+            <input type="checkbox" data-broadcast-parent="${groupIndex}" ${linkedItems.length ? "" : "disabled"} />
+            <strong>${escapeHtml(objectName)}</strong>
+            <span class="muted">${linkedItems.length}/${items.length}</span>
+          </label>
+          <div class="recipient-tree__children">
+            ${items.map((target) => `
+              <label class="${target.linked ? "" : "disabled"}">
+                <input type="checkbox" data-broadcast-child="${groupIndex}" data-broadcast-lease-id="${target.lease_id}" ${target.linked ? "" : "disabled"} />
+                <span>${escapeHtml(target.apartment)} · ${escapeHtml(target.tenant)}</span>
+                <span class="muted">${target.linked ? "бот привязан" : "ждём /start"}</span>
+              </label>
+            `).join("")}
+          </div>
+        </div>
+      `;
+    }).join("")}
+  `;
+  updateBroadcastRecipientState();
+}
+
+function updateBroadcastRecipientState() {
+  const root = qs("#broadcastRecipients");
+  if (!root) return;
+  const leafs = qsa("[data-broadcast-lease-id]", root).filter((input) => !input.disabled);
+  qsa("[data-broadcast-parent]", root).forEach((parent) => {
+    const children = qsa(`[data-broadcast-child="${parent.dataset.broadcastParent}"]`, root).filter((input) => !input.disabled);
+    const checked = children.filter((input) => input.checked).length;
+    parent.checked = children.length > 0 && checked === children.length;
+    parent.indeterminate = checked > 0 && checked < children.length;
+  });
+  const all = qs("[data-broadcast-all]", root);
+  if (all) {
+    const checked = leafs.filter((input) => input.checked).length;
+    all.checked = leafs.length > 0 && checked === leafs.length;
+    all.indeterminate = checked > 0 && checked < leafs.length;
+  }
+  const summary = qs("#broadcastRecipientSummary");
+  if (summary) {
+    const selected = leafs.filter((input) => input.checked).length;
+    summary.textContent = selected ? `выбрано ${selected}` : `доступно ${leafs.length}`;
+  }
+}
+
+function handleBroadcastRecipientChange(event) {
+  const root = qs("#broadcastRecipients");
+  const input = event.target;
+  if (!root || input?.type !== "checkbox") return;
+  if (input.dataset.broadcastAll !== undefined) {
+    qsa("[data-broadcast-lease-id]", root).forEach((child) => {
+      if (!child.disabled) child.checked = input.checked;
+    });
+  } else if (input.dataset.broadcastParent !== undefined) {
+    qsa(`[data-broadcast-child="${input.dataset.broadcastParent}"]`, root).forEach((child) => {
+      if (!child.disabled) child.checked = input.checked;
+    });
+  }
+  updateBroadcastRecipientState();
+}
+
+function selectedBroadcastLeaseIds() {
+  return qsa("#broadcastRecipients [data-broadcast-lease-id]:checked")
+    .map((input) => Number(input.dataset.broadcastLeaseId))
+    .filter(Boolean);
+}
+
+function renderBroadcastStatus(result) {
+  const root = qs("#broadcastStatus");
+  if (!root) return;
+  if (!result) {
+    root.innerHTML = "";
+    return;
+  }
+  root.innerHTML = `
+    <strong>Итог рассылки</strong>
+    <div class="pill-row">
+      <span class="pill ok">отправлено ${result.sent || 0}</span>
+      <span class="pill ${result.failed ? "danger" : ""}">ошибок ${result.failed || 0}</span>
+      <span class="pill warn">без /start ${result.skipped_unlinked || 0}</span>
+      <span class="pill">дубли чатов ${result.skipped_duplicate || 0}</span>
+    </div>
+  `;
+}
+
+async function submitBroadcastMessage(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const message = qs("#broadcastMessageInput")?.value.trim() || "";
+  const leaseIds = selectedBroadcastLeaseIds();
+  if (!message) {
+    toast("Введите текст рассылки");
+    return;
+  }
+  if (!leaseIds.length) {
+    toast("Выберите хотя бы одного получателя");
+    return;
+  }
+  if (!confirm(`Отправить сообщение выбранным получателям: ${leaseIds.length}?`)) return;
+  const result = await api("/api/messages/broadcast", {
+    method: "POST",
+    body: JSON.stringify({ message, lease_ids: leaseIds }),
+  });
+  toast(`Рассылка завершена: отправлено ${result.sent || 0}, ошибок ${result.failed || 0}`);
+  renderBroadcastStatus(result);
+  form.reset();
+  renderBroadcastRecipients();
+  await loadAll();
+}
+
 function renderMessages() {
   const root = qs("#messageTargets");
   if (!root) return;
+  renderBroadcastRecipients();
   const rows = state.messageTargets.map((target) => `
     <tr>
       <td>${target.object}</td>
@@ -2948,6 +3100,8 @@ function bindEvents() {
     applySettings(settings);
     toast("Шаблоны сохранены");
   });
+  on("#broadcastRecipients", "change", handleBroadcastRecipientChange);
+  on("#broadcastForm", "submit", submitBroadcastMessage);
 
   on("#automationSettingsForm", "submit", submitAutomationSettings);
 

@@ -219,6 +219,26 @@
           <h2>Сообщения</h2>
           <span>Выборочная ручная рассылка через бота после подтверждения.</span>
         </div>
+        <section class="card stack">
+          <div class="section-title">
+            <h3>Массовая рассылка</h3>
+            <span>Для техработ, общих объявлений и прочих «всем срочно прочитать», а зачем руками по одному?</span>
+          </div>
+          <form id="broadcastForm" class="form-grid">
+            <label class="wide">Текст сообщения
+              <textarea id="broadcastMessageInput" name="message" rows="5" placeholder="Например: сегодня с 22:00 до 23:00 будут технические работы..." required></textarea>
+            </label>
+            <div class="wide broadcast-box">
+              <div class="broadcast-box__head">
+                <strong>Получатели</strong>
+                <span id="broadcastRecipientSummary" class="muted"></span>
+              </div>
+              <div id="broadcastRecipients" class="recipient-tree"></div>
+            </div>
+            <button class="primary wide" type="submit">Отправить выбранным</button>
+          </form>
+          <div id="broadcastStatus" class="muted-box"></div>
+        </section>
         <div class="card muted-box">
           <strong>Плейсхолдеры</strong>
           <p class="muted">{tenant_name}, {apartment}, {object}, {ip_due}, {personal_due}, {total_due}, {debt}, {rent_due_date}, {rent_period}, {utility_total}, {utility_due_date}, {period}, {utility_service}, {rent_debt_months}, {rent_debt_months_details}, {utility_debt_details}, {all_debts_breakdown}, {all_debt_total}, {custom_text}, {amount}, {channel}, {receipt_status}, {receipt_summary}</p>
