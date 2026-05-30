@@ -2740,7 +2740,10 @@ function setReportLinks() {
 }
 
 async function connectTelegramWebhook() {
-  const result = await api("/api/integrations/telegram/set-webhook", { method: "POST", body: "{}" });
+  const result = await api("/api/integrations/telegram/set-webhook", {
+    method: "POST",
+    body: JSON.stringify({ app_base_url: window.location.origin }),
+  });
   toast(result.description || "Webhook подключён");
   await loadAll();
 }

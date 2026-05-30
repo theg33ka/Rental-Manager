@@ -7,6 +7,10 @@ import urllib.request
 from typing import Any
 
 
+class TelegramApiError(RuntimeError):
+    pass
+
+
 def parse_command(text: str) -> tuple[str, list[str]]:
     raw = (text or "").strip()
     if not raw:
@@ -99,7 +103,14 @@ def telegram_api_request(token: str, method: str, payload: dict[str, Any]) -> di
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Telegram API {method} failed: {body}") from exc
+        try:
+            error_payload = json.loads(body)
+            description = error_payload.get("description") or body
+        except json.JSONDecodeError:
+            description = body
+        raise TelegramApiError(f"Telegram API {method} failed: {description}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise TelegramApiError(f"Telegram API {method} request failed: {exc}") from exc
 
 
 def send_message(token: str, chat_id: int | str, text: str, reply_markup: dict[str, Any] | None = None) -> dict[str, Any]:
