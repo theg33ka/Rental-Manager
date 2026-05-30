@@ -78,6 +78,7 @@ from rental_manager.services.receipt_matching import (
 from rental_manager.services.receipt_parser import parse_receipt_file
 from rental_manager.services.seed import seed_if_empty, seed_release_baseline_if_empty
 from rental_manager.services.telegram_bot import (
+    TelegramApiError,
     app_keyboard,
     build_reports_message,
     build_status_message,
@@ -772,6 +773,26 @@ def telegram_owner_chat_id(session: Session) -> str:
 
 def app_base_url(session: Session) -> str:
     return get_setting_value(session, "app_base_url").strip().rstrip("/")
+
+
+def normalize_app_base_url(value: Any) -> str:
+    return str(value or "").strip().rstrip("/")
+
+
+def save_app_base_url_if_changed(session: Session, value: Any) -> str:
+    base_url = normalize_app_base_url(value)
+    if not base_url.startswith("https://"):
+        return app_base_url(session)
+    current = app_base_url(session)
+    if base_url == current:
+        return current
+    setting = session.get(AppSetting, "app_base_url")
+    if not setting:
+        setting = AppSetting(key="app_base_url")
+        session.add(setting)
+    setting.value = base_url
+    session.flush()
+    return base_url
 
 
 def owner_chat_allowed(session: Session, chat_id: int | str) -> bool:
@@ -3871,8 +3892,8 @@ def send_telegram_text(session: Session, chat_id: int | str, text: str, keyboard
         raise HTTPException(400, "Не задан токен Telegram-бота")
     try:
         return send_message(token, chat_id, text, reply_markup=keyboard)
-    except RuntimeError as exc:
-        raise HTTPException(502, str(exc)) from exc
+    except TelegramApiError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 def tenant_requisites_text(session: Session) -> str:
@@ -4110,9 +4131,9 @@ async def telegram_webhook(request: Request, payload: dict[str, Any], session: S
 
 
 @app.post("/api/integrations/telegram/set-webhook")
-def telegram_set_webhook(session: Session = Depends(get_session)) -> dict[str, Any]:
+def telegram_set_webhook(payload: dict[str, Any] | None = None, session: Session = Depends(get_session)) -> dict[str, Any]:
     token = telegram_token(session)
-    base_url = app_base_url(session)
+    base_url = save_app_base_url_if_changed(session, (payload or {}).get("app_base_url"))
     if not token:
         raise HTTPException(400, "Сначала сохрани Telegram bot token")
     if not base_url.startswith("https://"):
@@ -4127,13 +4148,15 @@ def telegram_set_webhook(session: Session = Depends(get_session)) -> dict[str, A
     try:
         webhook_result = telegram_api_request(token, "setWebhook", payload)
         commands_result = telegram_api_request(token, "setMyCommands", {"commands": owner_commands()})
+        session.commit()
         return {
             "ok": bool(webhook_result.get("ok")) and bool(commands_result.get("ok")),
             "description": webhook_result.get("description", ""),
             "commands_configured": bool(commands_result.get("ok")),
+            "url": payload["url"],
         }
-    except RuntimeError as exc:
-        raise HTTPException(502, str(exc)) from exc
+    except TelegramApiError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.get("/api/integrations/telegram/webhook-info")
@@ -4143,8 +4166,8 @@ def telegram_webhook_info(session: Session = Depends(get_session)) -> dict[str, 
         raise HTTPException(400, "Сначала сохрани Telegram bot token")
     try:
         return telegram_api_request(token, "getWebhookInfo", {})
-    except RuntimeError as exc:
-        raise HTTPException(502, str(exc)) from exc
+    except TelegramApiError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.post("/api/integrations/telegram/send-test")
