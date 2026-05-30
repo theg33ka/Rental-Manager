@@ -1509,6 +1509,7 @@ def serialize_bill_line(line: UtilityBillLine, session: Session | None = None) -
                 .order_by(PaymentReceipt.paid_at, PaymentReceipt.id)
             ).all()
         ]
+    period_label = utility_line_period_label(line)
     return {
         "id": line.id,
         "bill_id": line.bill_id,
@@ -1526,7 +1527,7 @@ def serialize_bill_line(line: UtilityBillLine, session: Session | None = None) -
         "status": line.status,
         "due_date": line.due_date.isoformat() if line.due_date else None,
         "note": line.note,
-        "period_label": line.note,
+        "period_label": period_label,
         "payments": payments,
         "bill_period_start": line.bill.period_start.isoformat(),
         "bill_period_end": line.bill.period_end.isoformat(),
@@ -1568,6 +1569,13 @@ def serialize_bill(bill: UtilityBill, session: Session | None = None) -> dict[st
         "notes": bill.notes,
         "lines": [serialize_bill_line(line, session) for line in bill.lines],
     }
+
+
+def utility_line_period_label(line: UtilityBillLine) -> str:
+    label = (line.note or "").strip()
+    if label:
+        return label
+    return f"{line.bill.period_start:%d.%m.%Y} -> {line.bill.period_end:%d.%m.%Y} ({(line.bill.period_end - line.bill.period_start).days} дн.)"
 
 
 def serialize_expense(expense: Expense) -> dict[str, Any]:
@@ -2548,7 +2556,7 @@ def utility_debt_bullet(lines: list[UtilityBillLine]) -> str:
 def utility_message_line(line: UtilityBillLine) -> str:
     debt = money(max(0.0, line.total_amount - line.paid_amount))
     service_name = (line.bill.service.name or "коммуналка").strip().lower()
-    period = f"{line.bill.period_start:%d.%m.%Y} -> {line.bill.period_end:%d.%m.%Y}"
+    period = utility_line_period_label(line)
     return f"{line.bill.service.object.name}, {service_name} за период {period}: {money_text(debt)}"
 
 
@@ -2796,10 +2804,10 @@ def serialize_message_target(session: Session, lease: Lease) -> dict[str, Any]:
                 "id": item.id,
                 "status": item.status,
                 "due_date": item.due_date.isoformat() if item.due_date else "",
-                "label": f"ком. услуги {item.bill.period_start:%d.%m.%Y} -> {item.bill.period_end:%d.%m.%Y}",
+                "label": f"ком. услуги {utility_line_period_label(item)}",
                 "debt": money(max(0.0, item.total_amount - item.paid_amount)),
                 "service": item.bill.service.name,
-                "period_label": f"{item.bill.period_start:%d.%m.%Y} -> {item.bill.period_end:%d.%m.%Y}",
+                "period_label": utility_line_period_label(item),
             }
             for item in utility_issues
         ],
@@ -5290,13 +5298,34 @@ def create_utility_bill(payload: dict[str, Any], session: Session = Depends(get_
 def delete_utility_bill(bill_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
     bill = session.get(UtilityBill, bill_id)
     if not bill:
-        raise HTTPException(404, "Коммунальный счёт не найден")
-    if bill.status != "draft":
-        raise HTTPException(400, "Удалять можно только черновики")
+        raise HTTPException(404, "???????????? ???? ?? ??????")
+    line_ids = [line.id for line in bill.lines]
+    if any(money(line.paid_amount) > EPS for line in bill.lines):
+        raise HTTPException(400, "?????? ??????? ????, ? ??????? ??? ???????? ??????. ??????? ???????? ??? ??????? ??? ???????.")
+    linked_receipts = (
+        session.scalars(select(PaymentReceipt).where(PaymentReceipt.utility_line_id.in_(line_ids))).all()
+        if line_ids
+        else []
+    )
+    if any(receipt.status == "accepted" and money(receipt.amount) > EPS for receipt in linked_receipts):
+        raise HTTPException(400, "?????? ??????? ????, ?? ???????? ??? ??????? ??????. ??????? ????????? ??????????? ????.")
+    linked_logs = (
+        session.scalars(select(MessageLog).where(MessageLog.utility_line_id.in_(line_ids))).all()
+        if line_ids
+        else []
+    )
+    affected_lease_ids = {line.lease_id for line in bill.lines if line.lease_id}
+    for receipt in linked_receipts:
+        receipt.utility_line_id = None
+    for log in linked_logs:
+        log.utility_line_id = None
+    deleted_status = bill.status
     session.delete(bill)
+    session.flush()
+    for lease_id in sorted(affected_lease_ids):
+        recalculate_lease_balances(session, int(lease_id))
     session.commit()
-    return {"ok": True, "bill_id": bill_id}
-
+    return {"ok": True, "bill_id": bill_id, "deleted_status": deleted_status}
 
 @app.post("/api/utility-bills/{bill_id}/issue")
 def issue_utility_bill(bill_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:

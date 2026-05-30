@@ -15,9 +15,9 @@ from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import sessionmaker
 
 from rental_manager.database import Base
-from rental_manager.main import apartment_month_state, build_all_debts_breakdown, build_dashboard, create_move_out_utility_lines, expense_period_summary, owner_charge_status_label, owner_expected_ip_for_charge, panel_role_for_pin, process_move_out_notifications, provider_reading_statuses_for_month, render_message_text, rent_report, utility_bill_for_month
+from rental_manager.main import apartment_month_state, build_all_debts_breakdown, build_dashboard, create_move_out_utility_lines, delete_utility_bill, expense_period_summary, owner_charge_status_label, owner_expected_ip_for_charge, panel_role_for_pin, process_move_out_notifications, provider_reading_statuses_for_month, render_message_text, rent_report, utility_bill_for_month
 from rental_manager.main import apply_database_import_payload, current_database_snapshot, inspect_database_import_payload, parse_database_import_bytes
-from rental_manager.models import AppSetting, Apartment, Expense, Lease, MessageLog, Meter, MeterReading, RentalObject, RentCharge, Tenant, UtilityBill, UtilityBillLine, UtilityService, Tariff
+from rental_manager.models import AppSetting, Apartment, Expense, Lease, MessageLog, Meter, MeterReading, PaymentReceipt, RentalObject, RentCharge, Tenant, UtilityBill, UtilityBillLine, UtilityService, Tariff
 from rental_manager.services.billing import (
     IGNORE_LEASE_MARK,
     LEGACY_IMPORT_MARK,
@@ -364,6 +364,22 @@ class UtilityBillingTests(DatabaseTestCase):
         self.assertAlmostEqual(sum(line.personal_consumption for line in bill.lines), 30.0)
         self.assertAlmostEqual(sum(line.odn_consumption for line in bill.lines), 280.0)
 
+    def test_utility_bill_starts_tenant_segment_from_move_in_date(self) -> None:
+        with self.seed() as session:
+            obj = session.get(RentalObject, 1)
+            apartment = session.get(Apartment, 1)
+            service = session.scalar(select(UtilityService).where(UtilityService.object_id == obj.id, UtilityService.kind == "electricity"))
+            self._lease(session, apartment, start_date=date(2026, 4, 10), full_name="Late move-in")
+            self._read_all_meters(session, service, object_start=1000, object_end=1300, apartment_end_values={apartment.id: 40})
+
+            bill, warnings = calculate_utility_bill(session, service.id, date(2026, 4, 1), date(2026, 5, 1), allow_estimate=True)
+
+        self.assertTrue(any("10.04.2026" in warning for warning in warnings))
+        self.assertEqual(len(bill.lines), 1)
+        self.assertEqual(bill.lines[0].note, "10.04.2026 -> 01.05.2026 (21 дн.)")
+        self.assertAlmostEqual(bill.lines[0].personal_consumption, 21.0)
+        self.assertAlmostEqual(bill.lines[0].odn_consumption, 189.0)
+
     def test_utility_bill_skips_interval_that_was_already_issued(self) -> None:
         with self.seed() as session:
             obj = session.get(RentalObject, 1)
@@ -403,6 +419,100 @@ class UtilityBillingTests(DatabaseTestCase):
         self.assertEqual(warnings[-1], "Пропущено уже выставленных сегментов: 1.")
         self.assertEqual(len(bill.lines), 1)
         self.assertEqual(bill.lines[0].note, "10.04.2026 -> 01.05.2026 (21 дн.)")
+
+    def test_delete_issued_utility_bill_without_payments_detaches_logs(self) -> None:
+        with self.seed() as session:
+            obj = session.get(RentalObject, 1)
+            apartment = session.get(Apartment, 1)
+            service = session.scalar(select(UtilityService).where(UtilityService.object_id == obj.id, UtilityService.kind == "electricity"))
+            lease = self._lease(session, apartment)
+            issued_bill = UtilityBill(
+                service_id=service.id,
+                period_start=date(2026, 4, 1),
+                period_end=date(2026, 5, 1),
+                status="issued",
+                total_consumption=100,
+                apartment_consumption=20,
+                odn_consumption=80,
+                total_cost=418,
+                average_unit_price=4.18,
+            )
+            issued_bill.lines.append(
+                UtilityBillLine(
+                    apartment_id=apartment.id,
+                    lease_id=lease.id,
+                    personal_consumption=20,
+                    odn_consumption=80,
+                    total_amount=418,
+                    paid_amount=0,
+                    status="issued",
+                    note="01.04.2026 -> 01.05.2026 (30 дн.)",
+                )
+            )
+            session.add(issued_bill)
+            session.flush()
+            log = MessageLog(lease_id=lease.id, utility_line_id=issued_bill.lines[0].id, template_key="message_utility_bill", text="sent")
+            session.add(log)
+            session.commit()
+
+            result = delete_utility_bill(issued_bill.id, session)
+            preserved_log = session.get(MessageLog, log.id)
+            deleted_bill = session.get(UtilityBill, issued_bill.id)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["deleted_status"], "issued")
+        self.assertIsNone(deleted_bill)
+        self.assertIsNotNone(preserved_log)
+        self.assertIsNone(preserved_log.utility_line_id)
+
+    def test_delete_utility_bill_blocks_when_payment_is_linked(self) -> None:
+        with self.seed() as session:
+            obj = session.get(RentalObject, 1)
+            apartment = session.get(Apartment, 1)
+            service = session.scalar(select(UtilityService).where(UtilityService.object_id == obj.id, UtilityService.kind == "electricity"))
+            lease = self._lease(session, apartment)
+            issued_bill = UtilityBill(
+                service_id=service.id,
+                period_start=date(2026, 4, 1),
+                period_end=date(2026, 5, 1),
+                status="issued",
+                total_consumption=100,
+                apartment_consumption=20,
+                odn_consumption=80,
+                total_cost=418,
+                average_unit_price=4.18,
+            )
+            issued_line = UtilityBillLine(
+                apartment_id=apartment.id,
+                lease_id=lease.id,
+                personal_consumption=20,
+                odn_consumption=80,
+                total_amount=418,
+                paid_amount=100,
+                status="partial",
+                note="01.04.2026 -> 01.05.2026 (30 дн.)",
+            )
+            issued_bill.lines.append(issued_line)
+            session.add(issued_bill)
+            session.flush()
+            session.add(
+                PaymentReceipt(
+                    lease_id=lease.id,
+                    utility_line_id=issued_line.id,
+                    apartment_id=apartment.id,
+                    amount=100,
+                    channel="utilities",
+                    paid_at=datetime(2026, 4, 20, 12, 0),
+                    source="manual",
+                    status="accepted",
+                )
+            )
+            session.commit()
+
+            with self.assertRaises(HTTPException) as ctx:
+                delete_utility_bill(issued_bill.id, session)
+
+        self.assertEqual(ctx.exception.status_code, 400)
 
     def test_move_out_utility_lines_are_created_as_forecasted_issued_bill(self) -> None:
         with self.Session() as session:
@@ -759,6 +869,41 @@ class UtilityBillingTests(DatabaseTestCase):
         self.assertIn("вода за период 01.03.2026 -> 31.03.2026", text)
         self.assertIn("Всего:", text)
         self.assertIn("Сбербанк", text)
+
+    def test_utility_message_uses_tenant_segment_period(self) -> None:
+        with self.seed() as session:
+            service = session.scalar(select(UtilityService).where(UtilityService.kind == "electricity"))
+            apartment = service.object.apartments[0]
+            lease = self._lease(session, apartment, start_date=date(2026, 5, 5))
+            bill = UtilityBill(
+                service_id=service.id,
+                period_start=date(2026, 4, 20),
+                period_end=date(2026, 5, 30),
+                status="issued",
+                total_consumption=0,
+                apartment_consumption=0,
+                odn_consumption=0,
+                total_cost=900,
+                average_unit_price=0,
+                due_date=date(2026, 6, 5),
+            )
+            line = UtilityBillLine(
+                apartment_id=apartment.id,
+                lease_id=lease.id,
+                total_amount=900,
+                paid_amount=0,
+                status="issued",
+                due_date=date(2026, 6, 5),
+                note="05.05.2026 -> 30.05.2026 (25 дн.)",
+            )
+            bill.lines.append(line)
+            session.add(bill)
+            session.flush()
+
+            text = render_message_text(session, "message_utility_bill", lease, line=line, utility_lines_override=[line], utility_due_date_override=date(2026, 6, 5))
+
+        self.assertIn("05.05.2026 -> 30.05.2026", text)
+        self.assertNotIn("20.04.2026 -> 30.05.2026", text)
 
     @staticmethod
     def _lease(session, apartment: Apartment, start_date: date = date(2026, 4, 1), end_date: date | None = None, full_name: str | None = None) -> Lease:

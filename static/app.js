@@ -628,7 +628,7 @@ function rentIssueLine(item, issueKind) {
 
 function utilityIssueLine(item) {
   const prefix = item.paid_amount > 0 ? "Частично оплачен счёт за коммуналку" : "Не оплачен счёт за коммуналку";
-  return `${prefix} (${item.bill_period_label || item.period_label})`;
+  return `${prefix} (${item.period_label || item.bill_period_label})`;
 }
 
 function issueSeverity(issueKind) {
@@ -769,10 +769,10 @@ function rentIssueLine(item, issueKind) {
 
 function utilityIssueLine(item, issueKind = "") {
   if (issueKind === "utility_issued") {
-    return `Выставлен счёт за коммуналку (${item.bill_period_label || item.period_label})`;
+    return `Выставлен счёт за коммуналку (${item.period_label || item.bill_period_label})`;
   }
   const prefix = item.paid_amount > 0 ? "Частично оплачен счёт за коммуналку" : "Просрочен счёт за коммуналку";
-  return `${prefix} (${item.bill_period_label || item.period_label})`;
+  return `${prefix} (${item.period_label || item.bill_period_label})`;
 }
 
 function manualDebtIssueLine(item) {
@@ -926,7 +926,7 @@ function manualAllocationOptions(group) {
     value: `utility:${item.id}`,
     kind: "utility",
     id: item.id,
-    label: `ком. услуги ${item.bill_period_label || item.period_label}`,
+    label: `ком. услуги ${item.period_label || item.bill_period_label}`,
   }));
   const manualDebtOptions = (group.manualDebtItems || []).map((item) => ({
     value: `manual_debt:${item.id}`,
@@ -2156,7 +2156,7 @@ function renderUtilities() {
       </div>
       <div class="pill-row">
         ${bill.status === "draft" ? `<button class="mini primary" onclick="issueBill(${bill.id})">Выставить жильцам</button>` : ""}
-        ${bill.status === "draft" ? `<button class="mini danger-soft" onclick="deleteUtilityBill(${bill.id})">Удалить черновик</button>` : ""}
+        <button class="mini danger-soft" onclick="deleteUtilityBill(${bill.id}, '${bill.status}')">${bill.status === "draft" ? "Удалить черновик" : "Удалить счёт"}</button>
         ${!bill.provider_paid ? `<button class="mini primary" onclick="providerPaid(${bill.id})">Поставщик оплачен</button>` : ""}
       </div>
       <div class="table-wrap">${table(["Квартира", "Жилец / сегмент", "Личный", "ОДН", "Сумма", "Оплачено", "Статус", "Действия"], lines)}</div>
@@ -2227,7 +2227,7 @@ function renderUtilities() {
       </div>
       <div class="pill-row">
         ${bill.status === "draft" ? `<button class="mini primary" onclick="issueBill(${bill.id})">Выставить жильцам</button>` : ""}
-        ${bill.status === "draft" ? `<button class="mini danger-soft" onclick="deleteUtilityBill(${bill.id})">Удалить черновик</button>` : ""}
+        <button class="mini danger-soft" onclick="deleteUtilityBill(${bill.id}, '${bill.status}')">${bill.status === "draft" ? "Удалить черновик" : "Удалить счёт"}</button>
         ${!bill.provider_paid ? `<button class="mini primary" onclick="providerPaid(${bill.id})">Поставщик оплачен</button>` : ""}
       </div>
       <div class="table-wrap">${table(["Квартира", "Жилец / сегмент", "Личное", "ОДН", "Сумма", "Оплачено", "Статус", "Действия"], lines)}</div>
@@ -2539,10 +2539,14 @@ async function issueBill(id) {
   await loadAll();
 }
 
-async function deleteUtilityBill(id) {
-  if (!confirm("Удалить этот черновик коммуналки? Потом можно пересоздать заново.")) return;
+async function deleteUtilityBill(id, status = "draft") {
+  const issued = status !== "draft";
+  const question = issued
+    ? "Удалить этот уже выставленный счёт? Если по нему нет зачтённых оплат, его можно будет пересоздать заново."
+    : "Удалить этот черновик коммуналки? Потом можно пересоздать заново.";
+  if (!confirm(question)) return;
   await api(`/api/utility-bills/${id}`, { method: "DELETE" });
-  toast("Черновик удалён");
+  toast(issued ? "Счёт удалён" : "Черновик удалён");
   await loadAll();
 }
 
