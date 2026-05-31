@@ -1,0 +1,119 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+from datetime import date
+from pathlib import Path
+from unittest.mock import patch
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from rental_manager.database import Base
+from rental_manager.main import ai_budget_exceeded, ai_estimated_cost_rub, call_hermes_ai, handle_telegram_message, resolve_ai_model
+from rental_manager.models import AiUsageDaily, Apartment, AppSetting, Lease, RentalObject, RentCharge, Tenant
+from rental_manager.services.ai_context import tenant_context_text
+from rental_manager.services.ai_policy import AI_UNAVAILABLE_TEXT, TENANT_SYSTEM_PROMPT
+from rental_manager.services.hermes_client import HermesClient, HermesClientError
+
+
+class AiAgentDatabaseTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        db_path = Path(self.tmp.name) / "test.db"
+        self.engine = create_engine(f"sqlite:///{db_path.as_posix()}", future=True)
+        Base.metadata.create_all(self.engine)
+        self.Session = sessionmaker(bind=self.engine, autoflush=False, autocommit=False, future=True)
+
+    def tearDown(self) -> None:
+        self.engine.dispose()
+        self.tmp.cleanup()
+
+    def create_two_leases(self, session):
+        rental_object = RentalObject(name="House")
+        apartments = [Apartment(object=rental_object, name="A1"), Apartment(object=rental_object, name="A2")]
+        tenants = [Tenant(full_name="Tenant One"), Tenant(full_name="Tenant Two")]
+        session.add_all([rental_object, *apartments, *tenants])
+        session.flush()
+        leases = [
+            Lease(apartment=apartments[0], tenant=tenants[0], start_date=date(2026, 5, 1), payment_day=1, ip_amount=10000, personal_amount=2000),
+            Lease(apartment=apartments[1], tenant=tenants[1], start_date=date(2026, 5, 1), payment_day=1, ip_amount=30000, personal_amount=4000),
+        ]
+        session.add_all(leases)
+        session.flush()
+        session.add(RentCharge(lease=leases[0], period_start=date(2026, 5, 1), period_end=date(2026, 5, 31), due_date=date(2026, 5, 1), ip_due=10000, personal_due=2000))
+        session.add(RentCharge(lease=leases[1], period_start=date(2026, 5, 1), period_end=date(2026, 5, 31), due_date=date(2026, 5, 1), ip_due=30000, personal_due=4000))
+        session.flush()
+        return leases
+
+
+class AiContextTests(AiAgentDatabaseTestCase):
+    def test_tenant_context_does_not_include_other_tenant(self) -> None:
+        with self.Session() as session:
+            leases = self.create_two_leases(session)
+
+            context = tenant_context_text(session, leases[0], {}, today=date(2026, 5, 2))
+
+        self.assertIn("Tenant One", context)
+        self.assertIn("A1", context)
+        self.assertNotIn("Tenant Two", context)
+        self.assertNotIn("A2", context)
+        self.assertNotIn("34 000", context)
+
+
+class AiBudgetTests(AiAgentDatabaseTestCase):
+    def test_budget_cap_blocks_ai_calls(self) -> None:
+        with self.Session() as session:
+            session.add(AppSetting(key="ai_monthly_budget_rub", value="1000"))
+            session.add(AiUsageDaily(usage_date=date.today(), provider="hermes", model="yandexgpt-lite", cost_rub=1000, calls=1))
+            session.flush()
+
+            self.assertTrue(ai_budget_exceeded(session))
+
+
+class AiModelTests(unittest.TestCase):
+    def test_yandex_model_alias_includes_folder_id(self) -> None:
+        with patch.dict("os.environ", {"YANDEX_FOLDER_ID": "folder-123"}, clear=False):
+            self.assertEqual(resolve_ai_model("yandexgpt-lite"), "gpt://folder-123/yandexgpt-lite/latest")
+
+    def test_yandex_cost_uses_rub_pricing(self) -> None:
+        self.assertEqual(ai_estimated_cost_rub("gpt://folder-123/yandexgpt-lite/latest", 1000, 1000), 0.41)
+
+
+class HermesFallbackTests(AiAgentDatabaseTestCase):
+    def test_hermes_error_returns_fallback_text(self) -> None:
+        with self.Session() as session:
+            leases = self.create_two_leases(session)
+            session.add(AppSetting(key="ai_enabled", value="1"))
+            session.add(AppSetting(key="hermes_model_default", value="yandexgpt-lite"))
+            session.flush()
+
+            with patch.object(HermesClient, "chat_completions", side_effect=HermesClientError("down")):
+                answer = call_hermes_ai(
+                    session,
+                    chat_id=100,
+                    actor_role="tenant",
+                    lease=leases[0],
+                    system_prompt=TENANT_SYSTEM_PROMPT,
+                    context="context",
+                    user_text="Когда платить?",
+                    model="yandexgpt-lite",
+                )
+
+        self.assertEqual(answer, AI_UNAVAILABLE_TEXT)
+
+
+class TelegramAiRoutingTests(AiAgentDatabaseTestCase):
+    def test_status_command_does_not_call_ai(self) -> None:
+        with self.Session() as session:
+            session.add(AppSetting(key="telegram_owner_chat_id", value="999"))
+            session.flush()
+            with patch("rental_manager.main.handle_owner_ai_message") as mocked_ai, patch("rental_manager.main.send_telegram_text") as mocked_send:
+                handle_telegram_message(session, {"chat": {"id": 999}, "from": {"id": 999}, "text": "/status"})
+
+        mocked_ai.assert_not_called()
+        mocked_send.assert_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -90,7 +90,7 @@ def seed_if_empty(session: Session) -> None:
             session.add(
                 Tariff(
                     service_id=service.id,
-                    starts_on=date.today().replace(day=1),
+                    starts_on=date(2026, 1, 1),
                     name="Стартовый тариф",
                     tiers_json=json.dumps(tiers, ensure_ascii=False),
                 )

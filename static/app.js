@@ -362,6 +362,12 @@ function applySettings(settings = {}) {
     automation_rent_due_cadence: "twice_daily",
     automation_rent_overdue_cadence: "twice_daily",
     automation_utility_cadence: "daily_evening",
+    ai_enabled: false,
+    ai_tenant_free_text_enabled: true,
+    hermes_api_base_url: "http://127.0.0.1:8642",
+    hermes_model_default: "yandexgpt-lite",
+    hermes_model_audit: "yandexgpt",
+    ai_monthly_budget_rub: "1000",
     ip_recipient_name: "",
     ip_recipient_account: "",
     ip_recipient_bik: "",
@@ -372,6 +378,7 @@ function applySettings(settings = {}) {
     panel_guest_pin_code_configured: false,
     telegram_bot_token_configured: false,
     telegram_webhook_secret_configured: false,
+    hermes_api_key_configured: false,
     ...settings,
   };
   document.body.dataset.palette = state.settings.color_palette || "classic";
@@ -381,6 +388,13 @@ function applySettings(settings = {}) {
   const ownerChat = qs("#telegramOwnerChatIdInput");
   const token = qs("#telegramBotTokenInput");
   const secret = qs("#telegramWebhookSecretInput");
+  const aiEnabled = qs("#aiEnabledInput");
+  const aiTenantFreeText = qs("#aiTenantFreeTextEnabledInput");
+  const hermesBaseUrl = qs("#hermesApiBaseUrlInput");
+  const hermesApiKey = qs("#hermesApiKeyInput");
+  const hermesDefaultModel = qs("#hermesModelDefaultInput");
+  const hermesAuditModel = qs("#hermesModelAuditInput");
+  const aiBudget = qs("#aiMonthlyBudgetRubInput");
   const ownerPin = qs("#panelOwnerPinCodeInput");
   const guestPin = qs("#panelGuestPinCodeInput");
   const notificationsEnabled = qs("#notificationsEnabledInput");
@@ -396,6 +410,12 @@ function applySettings(settings = {}) {
   const personalRecipientBank = qs("#personalRecipientBankInput");
   if (appBase) appBase.value = state.settings.app_base_url || "";
   if (ownerChat) ownerChat.value = state.settings.telegram_owner_chat_id || "";
+  if (aiEnabled) aiEnabled.checked = Boolean(state.settings.ai_enabled);
+  if (aiTenantFreeText) aiTenantFreeText.checked = Boolean(state.settings.ai_tenant_free_text_enabled);
+  if (hermesBaseUrl) hermesBaseUrl.value = state.settings.hermes_api_base_url || "http://127.0.0.1:8642";
+  if (hermesDefaultModel) hermesDefaultModel.value = state.settings.hermes_model_default || "yandexgpt-lite";
+  if (hermesAuditModel) hermesAuditModel.value = state.settings.hermes_model_audit || "yandexgpt";
+  if (aiBudget) aiBudget.value = state.settings.ai_monthly_budget_rub || "1000";
   if (notificationsEnabled) notificationsEnabled.checked = Boolean(state.settings.notifications_enabled);
   if (notificationCutoffDate) notificationCutoffDate.value = state.settings.notification_cutoff_date || appToday();
   if (automationRentDue) automationRentDue.value = state.settings.automation_rent_due_cadence || "twice_daily";
@@ -403,6 +423,7 @@ function applySettings(settings = {}) {
   if (automationUtility) automationUtility.value = state.settings.automation_utility_cadence || "daily_evening";
   if (token) token.placeholder = state.settings.telegram_bot_token_configured ? "Токен сохранён, пусто = не менять" : "Вставь bot token";
   if (secret) secret.placeholder = state.settings.telegram_webhook_secret_configured ? "Secret сохранён, пусто = не менять" : "Вставь webhook secret";
+  if (hermesApiKey) hermesApiKey.placeholder = state.settings.hermes_api_key_configured ? "Hermes key saved, empty = keep" : "Hermes API key";
   if (ownerPin) ownerPin.placeholder = state.settings.panel_owner_pin_code_configured ? "PIN owner сохранён, пусто = не менять" : "По умолчанию 1298";
   if (guestPin) guestPin.placeholder = state.settings.panel_guest_pin_code_configured ? "PIN guest сохранён, пусто = не менять" : "По умолчанию 1212";
   if (ipRecipientName) ipRecipientName.value = state.settings.ip_recipient_name || "";
@@ -438,6 +459,9 @@ function renderTelegramStatus() {
     <div class="pill-row">
       <span class="pill ${state.settings.telegram_bot_token_configured ? "ok" : "warn"}">token ${state.settings.telegram_bot_token_configured ? "сохранён" : "не задан"}</span>
       <span class="pill ${state.settings.telegram_webhook_secret_configured ? "ok" : "warn"}">secret ${state.settings.telegram_webhook_secret_configured ? "сохранён" : "не задан"}</span>
+      <span class="pill ${state.settings.ai_enabled ? "ok" : "warn"}">Hermes ${state.settings.ai_enabled ? "включён" : "выключен"}</span>
+      <span class="pill ${state.settings.hermes_api_key_configured ? "ok" : "warn"}">Hermes key ${state.settings.hermes_api_key_configured ? "сохранён" : "не задан"}</span>
+      <span class="pill">AI budget ${state.settings.ai_monthly_budget_rub || "0"} ₽/мес</span>
       <span class="pill ${state.settings.telegram_owner_chat_id ? "ok" : "warn"}">owner chat ${state.settings.telegram_owner_chat_id || "не задан"}</span>
       <span class="pill ${state.settings.notifications_enabled ? "ok" : "warn"}">автонапоминания ${state.settings.notifications_enabled ? "включены" : "выключены"}</span>
       <span class="pill">граница ${formatDate(state.settings.notification_cutoff_date || appToday())}</span>
@@ -3112,7 +3136,7 @@ function bindEvents() {
     const settings = await api("/api/settings", { method: "POST", body: JSON.stringify(data) });
     applySettings(settings);
     form.querySelectorAll('input[type="password"]').forEach((input) => {
-      if (["panel_owner_pin_code", "panel_guest_pin_code", "telegram_bot_token", "telegram_webhook_secret"].includes(input.name)) {
+      if (["panel_owner_pin_code", "panel_guest_pin_code", "telegram_bot_token", "telegram_webhook_secret", "hermes_api_key"].includes(input.name)) {
         input.value = "";
       }
     });

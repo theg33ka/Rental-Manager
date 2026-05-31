@@ -79,6 +79,8 @@ def tenant_keyboard() -> dict[str, Any]:
 
 def owner_commands() -> list[dict[str, str]]:
     return [
+        {"command": "ask", "description": "Hermes: вопрос по пульту"},
+        {"command": "audit", "description": "Hermes: ревизия пульта"},
         {"command": "start", "description": "Короткая справка по owner-командам"},
         {"command": "id", "description": "Показать текущий chat id"},
         {"command": "status", "description": "Сводка по пульту и долгам"},

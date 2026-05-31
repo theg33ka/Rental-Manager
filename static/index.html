@@ -373,6 +373,23 @@
           <label>Telegram webhook secret
             <input type="password" name="telegram_webhook_secret" id="telegramWebhookSecretInput" placeholder="Оставь пустым, чтобы не менять" />
           </label>
+          <label class="check wide"><input type="checkbox" name="ai_enabled" id="aiEnabledInput" /> Hermes AI enabled</label>
+          <label class="check wide"><input type="checkbox" name="ai_tenant_free_text_enabled" id="aiTenantFreeTextEnabledInput" /> Tenant free-text AI replies enabled</label>
+          <label>Hermes API URL
+            <input name="hermes_api_base_url" id="hermesApiBaseUrlInput" placeholder="http://127.0.0.1:8642" />
+          </label>
+          <label>Hermes API key
+            <input type="password" name="hermes_api_key" id="hermesApiKeyInput" placeholder="Leave empty to keep current" />
+          </label>
+          <label>Default AI model
+            <input name="hermes_model_default" id="hermesModelDefaultInput" placeholder="yandexgpt-lite" />
+          </label>
+          <label>Audit AI model
+            <input name="hermes_model_audit" id="hermesModelAuditInput" placeholder="yandexgpt" />
+          </label>
+          <label>AI budget, RUB/month
+            <input type="number" min="0" step="1" name="ai_monthly_budget_rub" id="aiMonthlyBudgetRubInput" placeholder="1000" />
+          </label>
           <label>PIN owner
             <input type="password" inputmode="numeric" name="panel_owner_pin_code" id="panelOwnerPinCodeInput" placeholder="Оставь пустым, чтобы не менять" />
           </label>
