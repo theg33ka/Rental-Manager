@@ -9,7 +9,7 @@ build:
 run:
   persistenceMount: /data
   image: null
-  command: uvicorn
-  args: rental_manager.main:app --host 0.0.0.0 --port 10000
+  command: sh
+  args: scripts/start-container.sh
   containerPort: 10000
   servicePort: 80

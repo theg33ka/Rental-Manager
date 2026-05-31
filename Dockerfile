@@ -12,4 +12,4 @@ COPY . /app
 
 EXPOSE 10000
 
-CMD ["sh", "-c", "uvicorn rental_manager.main:app --host 0.0.0.0 --port ${PORT:-10000}"]
+CMD ["sh", "scripts/start-container.sh"]

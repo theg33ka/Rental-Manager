@@ -141,6 +141,77 @@ class MessageLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 
+class AiConversation(Base):
+    __tablename__ = "ai_conversations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_id: Mapped[str] = mapped_column(String(80), default="")
+    role: Mapped[str] = mapped_column(String(40), default="tenant")
+    lease_id: Mapped[int | None] = mapped_column(ForeignKey("leases.id"), nullable=True)
+    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True)
+    status: Mapped[str] = mapped_column(String(40), default="active")
+    title: Mapped[str] = mapped_column(String(180), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
+
+    lease: Mapped[Lease | None] = relationship()
+    tenant: Mapped[Tenant | None] = relationship()
+    messages: Mapped[list["AiMessage"]] = relationship(back_populates="conversation", cascade="all, delete-orphan")
+
+
+class AiMessage(Base):
+    __tablename__ = "ai_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    conversation_id: Mapped[int | None] = mapped_column(ForeignKey("ai_conversations.id"), nullable=True)
+    lease_id: Mapped[int | None] = mapped_column(ForeignKey("leases.id"), nullable=True)
+    role: Mapped[str] = mapped_column(String(40), default="user")
+    channel: Mapped[str] = mapped_column(String(40), default="telegram")
+    text: Mapped[str] = mapped_column(Text, default="")
+    model: Mapped[str] = mapped_column(String(120), default="")
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cost_rub: Mapped[float] = mapped_column(Float, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+    conversation: Mapped[AiConversation | None] = relationship(back_populates="messages")
+    lease: Mapped[Lease | None] = relationship()
+
+
+class AiActionLog(Base):
+    __tablename__ = "ai_action_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    conversation_id: Mapped[int | None] = mapped_column(ForeignKey("ai_conversations.id"), nullable=True)
+    lease_id: Mapped[int | None] = mapped_column(ForeignKey("leases.id"), nullable=True)
+    actor_role: Mapped[str] = mapped_column(String(40), default="")
+    action_type: Mapped[str] = mapped_column(String(80), default="")
+    status: Mapped[str] = mapped_column(String(40), default="")
+    payload_json: Mapped[str] = mapped_column(Text, default="")
+    note: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+    conversation: Mapped[AiConversation | None] = relationship()
+    lease: Mapped[Lease | None] = relationship()
+
+
+class AiUsageDaily(Base):
+    __tablename__ = "ai_usage_daily"
+    __table_args__ = (UniqueConstraint("usage_date", "provider", "model", name="uq_ai_usage_daily_provider_model"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    usage_date: Mapped[date] = mapped_column(Date)
+    provider: Mapped[str] = mapped_column(String(40), default="hermes")
+    model: Mapped[str] = mapped_column(String(120), default="")
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cost_rub: Mapped[float] = mapped_column(Float, default=0)
+    calls: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
+
+
 class UtilityService(Base):
     __tablename__ = "utility_services"
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import calendar
 import hashlib
 import json
+import os
 import re
 import secrets
 from datetime import date, datetime, time, timedelta, timezone
@@ -25,6 +26,10 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 
 from rental_manager.database import Base, DATABASE_URL, ROOT_DIR, SessionLocal, get_session, init_db
 from rental_manager.models import (
+    AiActionLog,
+    AiConversation,
+    AiMessage,
+    AiUsageDaily,
     Apartment,
     Expense,
     Lease,
@@ -43,6 +48,19 @@ from rental_manager.models import (
     utc_now,
     AppSetting,
 )
+from rental_manager.services.ai_context import owner_context_text, tenant_context_text
+from rental_manager.services.ai_policy import (
+    AI_BUDGET_EXCEEDED_TEXT,
+    AI_DISABLED_TEXT,
+    AI_UNAVAILABLE_TEXT,
+    AUDIT_USER_PROMPT,
+    OWNER_SYSTEM_PROMPT,
+    TENANT_ESCALATION_TEXT,
+    TENANT_SYSTEM_PROMPT,
+    clean_ai_response,
+    estimate_tokens,
+    tenant_question_needs_owner,
+)
 from rental_manager.services.billing import (
     IGNORE_LEASE_MARK,
     RENT_GENERATION_START,
@@ -60,6 +78,7 @@ from rental_manager.services.billing import (
     update_rent_charge_status,
     update_utility_line_status,
 )
+from rental_manager.services.hermes_client import HermesClient, HermesClientError, HermesResult
 from rental_manager.services.payment_allocation import (
     EPS,
     build_rent_plan,
@@ -108,6 +127,12 @@ DEFAULT_SETTINGS = {
     "automation_rent_due_cadence": "twice_daily",
     "automation_rent_overdue_cadence": "twice_daily",
     "automation_utility_cadence": "daily_evening",
+    "ai_enabled": False,
+    "ai_tenant_free_text_enabled": True,
+    "hermes_api_base_url": "http://127.0.0.1:8642",
+    "hermes_model_default": "yandexgpt-lite",
+    "hermes_model_audit": "yandexgpt",
+    "ai_monthly_budget_rub": "1000",
     "ip_recipient_name": "ИНДИВИДУАЛЬНЫЙ ПРЕДПРИНИМАТЕЛЬ ЧАНТУРИЯ ЭРАСТ МИТРИДАТОВИЧ",
     "ip_recipient_inn": "540506055229",
     "ip_recipient_ogrnip": "324508100223397",
@@ -132,6 +157,7 @@ DEFAULT_SETTINGS = {
 SECRET_SETTINGS = {
     "telegram_bot_token": "",
     "telegram_webhook_secret": "",
+    "hermes_api_key": "",
     "panel_owner_pin_code": "1298",
     "panel_guest_pin_code": "1212",
 }
@@ -146,7 +172,16 @@ INTERNAL_SETTINGS = {
     "processed_move_out_notifications": "[]",
     "panel_auth_sessions": "{}",
 }
-BOOLEAN_SETTINGS = {"notifications_enabled"}
+BOOLEAN_SETTINGS = {"notifications_enabled", "ai_enabled", "ai_tenant_free_text_enabled"}
+ENV_SETTING_KEYS = {
+    "ai_enabled": "AI_ENABLED",
+    "ai_tenant_free_text_enabled": "AI_TENANT_FREE_TEXT_ENABLED",
+    "hermes_api_base_url": "HERMES_API_BASE_URL",
+    "hermes_model_default": "HERMES_MODEL_DEFAULT",
+    "hermes_model_audit": "HERMES_MODEL_AUDIT",
+    "ai_monthly_budget_rub": "AI_MONTHLY_BUDGET_RUB",
+    "hermes_api_key": "HERMES_API_KEY",
+}
 VALID_REMINDER_CADENCES = {"twice_daily", "daily_evening", "every_two_days", "never"}
 REMINDER_CADENCE_KEYS = {
     "message_rent_due": "automation_rent_due_cadence",
@@ -169,6 +204,20 @@ DEFAULT_FALLBACK_KEYS = {
     "ip_recipient_bank_inn",
     "ip_recipient_bank_kpp",
 }
+AI_MODEL_PRICES_RUB_PER_1K = {
+    "yandexgpt-lite": (0.2033, 0.2033),
+    "yandexgpt": (0.61, 0.61),
+}
+AI_MODEL_PRICES_USD_PER_M = {
+    "deepseek-v4-flash": (0.14, 0.28),
+    "deepseek-v4-pro": (0.435, 0.87),
+}
+YANDEX_MODEL_ALIASES = {
+    "yandexgpt-lite": "yandexgpt-lite/latest",
+    "yandexgpt": "yandexgpt/latest",
+    "yandexgpt-pro": "yandexgpt/latest",
+}
+AI_DEFAULT_USD_RUB_RATE = 100.0
 
 REPORT_START_MONTH = date(2026, 1, 1)
 PANEL_AUTH_COOKIE = "rental_manager_panel_session"
@@ -277,6 +326,9 @@ PERFORMANCE_INDEXES = [
     ("ix_rm_utility_bill_lines_status_due", "utility_bill_lines (status, due_date)"),
     ("ix_rm_manual_debts_active_lease_due", "manual_debts (active, lease_id, due_date)"),
     ("ix_rm_expenses_source_compensation", "expenses (source_funds, compensation_status)"),
+    ("ix_rm_ai_conversations_chat_role", "ai_conversations (chat_id, role, status)"),
+    ("ix_rm_ai_messages_conversation_created", "ai_messages (conversation_id, created_at)"),
+    ("ix_rm_ai_usage_daily_date", "ai_usage_daily (usage_date, provider, model)"),
 ]
 
 
@@ -428,6 +480,16 @@ def ensure_runtime_defaults(session: Session) -> None:
     if not session.get(AppSetting, "notification_cutoff_date"):
         session.add(AppSetting(key="notification_cutoff_date", value=date.today().isoformat()))
         changed = True
+    old_model_defaults = {
+        "hermes_model_default": ("deepseek-v4-flash", "yandexgpt-lite"),
+        "hermes_model_audit": ("deepseek-v4-pro", "yandexgpt"),
+    }
+    for key, (old_value, new_value) in old_model_defaults.items():
+        env_name = ENV_SETTING_KEYS.get(key)
+        setting = session.get(AppSetting, key)
+        if setting and setting.value == old_value and not (env_name and env_name in os.environ):
+            setting.value = new_value
+            changed = True
     if changed:
         session.flush()
 
@@ -436,6 +498,9 @@ def get_setting_value(session: Session, key: str) -> str:
     dynamic_key = key.startswith("lease_") and "_cadence_" in key
     if key not in ALL_SETTINGS and key not in INTERNAL_SETTINGS and not dynamic_key:
         return ""
+    env_name = ENV_SETTING_KEYS.get(key)
+    if env_name and env_name in os.environ:
+        return str(os.environ.get(env_name) or "")
     row = session.get(AppSetting, key)
     if row:
         return row.value
@@ -620,6 +685,10 @@ def table_model_map() -> dict[str, Any]:
         "rent_charges": RentCharge,
         "payment_receipts": PaymentReceipt,
         "message_logs": MessageLog,
+        "ai_conversations": AiConversation,
+        "ai_messages": AiMessage,
+        "ai_action_logs": AiActionLog,
+        "ai_usage_daily": AiUsageDaily,
         "utility_services": UtilityService,
         "meters": Meter,
         "meter_readings": MeterReading,
@@ -2087,7 +2156,7 @@ def api_update_lease_ignore(lease_id: int, payload: dict[str, Any], session: Ses
 
 
 def import_release_baseline(session: Session) -> dict[str, int]:
-    for model in [MessageLog, PaymentReceipt, ManualDebt, UtilityBillLine, UtilityBill, RentCharge, Lease, Tenant, Expense, MeterReading, Tariff]:
+    for model in [AiActionLog, AiMessage, AiConversation, AiUsageDaily, MessageLog, PaymentReceipt, ManualDebt, UtilityBillLine, UtilityBill, RentCharge, Lease, Tenant, Expense, MeterReading, Tariff]:
         session.execute(delete(model))
     session.flush()
     seed_if_empty(session)
@@ -4216,6 +4285,290 @@ def send_telegram_text(session: Session, chat_id: int | str, text: str, keyboard
         raise HTTPException(400, str(exc)) from exc
 
 
+def ai_enabled(session: Session) -> bool:
+    return setting_bool_value(get_setting_value(session, "ai_enabled"))
+
+
+def ai_tenant_free_text_enabled(session: Session) -> bool:
+    return setting_bool_value(get_setting_value(session, "ai_tenant_free_text_enabled"))
+
+
+def ai_monthly_budget_rub(session: Session) -> float:
+    try:
+        return max(0.0, float(str(get_setting_value(session, "ai_monthly_budget_rub") or "0").replace(",", ".")))
+    except ValueError:
+        return 0.0
+
+
+def ai_monthly_spent_rub(session: Session, today: date | None = None) -> float:
+    value = today or date.today()
+    month_start = value.replace(day=1)
+    spent = session.scalar(
+        select(func.coalesce(func.sum(AiUsageDaily.cost_rub), 0.0)).where(AiUsageDaily.usage_date >= month_start)
+    )
+    return money(float(spent or 0.0))
+
+
+def ai_budget_exceeded(session: Session, today: date | None = None) -> bool:
+    budget = ai_monthly_budget_rub(session)
+    return bool(budget > 0 and ai_monthly_spent_rub(session, today) >= budget)
+
+
+def yandex_folder_id() -> str:
+    return (
+        os.environ.get("YANDEX_FOLDER_ID")
+        or os.environ.get("YANDEX_CLOUD_FOLDER")
+        or os.environ.get("OPENAI_PROJECT")
+        or ""
+    ).strip()
+
+
+def resolve_ai_model(model: str) -> str:
+    value = (model or "").strip() or str(DEFAULT_SETTINGS["hermes_model_default"])
+    normalized = value.lower()
+    if normalized.startswith("gpt://"):
+        return value
+    if normalized in YANDEX_MODEL_ALIASES:
+        folder_id = yandex_folder_id()
+        if folder_id:
+            return f"gpt://{folder_id}/{YANDEX_MODEL_ALIASES[normalized]}"
+    return value
+
+
+def ai_model_price_key(model: str) -> str:
+    normalized = (model or "").strip().lower()
+    if "yandexgpt-lite" in normalized:
+        return "yandexgpt-lite"
+    if "yandexgpt" in normalized:
+        return "yandexgpt"
+    if "deepseek-v4-pro" in normalized:
+        return "deepseek-v4-pro"
+    if "deepseek-v4-flash" in normalized:
+        return "deepseek-v4-flash"
+    return "yandexgpt-lite"
+
+
+def ai_estimated_cost_rub(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+    price_key = ai_model_price_key(model)
+    if price_key in AI_MODEL_PRICES_RUB_PER_1K:
+        input_rub, output_rub = AI_MODEL_PRICES_RUB_PER_1K[price_key]
+        return money((prompt_tokens / 1_000) * input_rub + (completion_tokens / 1_000) * output_rub)
+
+    input_usd, output_usd = AI_MODEL_PRICES_USD_PER_M.get(
+        price_key,
+        AI_MODEL_PRICES_USD_PER_M["deepseek-v4-flash"],
+    )
+    cost_usd = (prompt_tokens / 1_000_000) * input_usd + (completion_tokens / 1_000_000) * output_usd
+    return money(cost_usd * AI_DEFAULT_USD_RUB_RATE)
+
+
+def ai_conversation(session: Session, chat_id: int | str, role: str, lease: Lease | None = None) -> AiConversation:
+    chat_ref = str(chat_id)
+    query = select(AiConversation).where(
+        AiConversation.chat_id == chat_ref,
+        AiConversation.role == role,
+        AiConversation.status == "active",
+    )
+    if lease:
+        query = query.where(AiConversation.lease_id == lease.id)
+    conversation = session.scalar(query.order_by(AiConversation.updated_at.desc(), AiConversation.id.desc()).limit(1))
+    if conversation:
+        return conversation
+    conversation = AiConversation(
+        chat_id=chat_ref,
+        role=role,
+        lease_id=lease.id if lease else None,
+        tenant_id=lease.tenant_id if lease else None,
+        title=f"{role}:{chat_ref}",
+    )
+    session.add(conversation)
+    session.flush()
+    return conversation
+
+
+def log_ai_message(
+    session: Session,
+    conversation: AiConversation,
+    role: str,
+    text: str,
+    *,
+    model: str = "",
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    cost_rub: float = 0.0,
+) -> AiMessage:
+    message = AiMessage(
+        conversation_id=conversation.id,
+        lease_id=conversation.lease_id,
+        role=role,
+        channel="telegram",
+        text=text,
+        model=model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        cost_rub=cost_rub,
+    )
+    conversation.updated_at = utc_now()
+    session.add(message)
+    session.flush()
+    return message
+
+
+def add_ai_usage(session: Session, result: HermesResult, cost_rub: float, today: date | None = None) -> None:
+    usage_date = today or date.today()
+    usage = session.scalar(
+        select(AiUsageDaily).where(
+            AiUsageDaily.usage_date == usage_date,
+            AiUsageDaily.provider == "hermes",
+            AiUsageDaily.model == result.model,
+        )
+    )
+    if not usage:
+        usage = AiUsageDaily(usage_date=usage_date, provider="hermes", model=result.model)
+        session.add(usage)
+    usage.prompt_tokens += int(result.prompt_tokens or 0)
+    usage.completion_tokens += int(result.completion_tokens or 0)
+    usage.total_tokens += int(result.prompt_tokens or 0) + int(result.completion_tokens or 0)
+    usage.cost_rub = money(float(usage.cost_rub or 0) + cost_rub)
+    usage.calls += 1
+
+
+def hermes_client_for_settings(session: Session) -> HermesClient:
+    return HermesClient(get_setting_value(session, "hermes_api_base_url"), get_setting_value(session, "hermes_api_key"))
+
+
+def call_hermes_ai(
+    session: Session,
+    *,
+    chat_id: int | str,
+    actor_role: str,
+    lease: Lease | None,
+    system_prompt: str,
+    context: str,
+    user_text: str,
+    model: str,
+    max_tokens: int = 700,
+) -> str:
+    if not ai_enabled(session):
+        return AI_DISABLED_TEXT
+    if ai_budget_exceeded(session):
+        return AI_BUDGET_EXCEEDED_TEXT
+
+    conversation = ai_conversation(session, chat_id, actor_role, lease)
+    log_ai_message(session, conversation, "user", user_text)
+    messages = [
+        {"role": "system", "content": system_prompt.strip()},
+        {"role": "system", "content": context.strip()},
+        {"role": "user", "content": user_text.strip()},
+    ]
+    try:
+        result = hermes_client_for_settings(session).chat_completions(
+            model=model,
+            messages=messages,
+            temperature=0.2,
+            max_tokens=max_tokens,
+        )
+    except HermesClientError as exc:
+        session.add(
+            AiActionLog(
+                conversation_id=conversation.id,
+                lease_id=lease.id if lease else None,
+                actor_role=actor_role,
+                action_type="hermes_call",
+                status="failed",
+                note=str(exc),
+            )
+        )
+        return AI_UNAVAILABLE_TEXT
+
+    prompt_tokens = result.prompt_tokens or estimate_tokens("\n".join(item["content"] for item in messages))
+    completion_tokens = result.completion_tokens or estimate_tokens(result.content)
+    normalized = HermesResult(
+        content=result.content,
+        model=result.model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        raw=result.raw,
+    )
+    cost = ai_estimated_cost_rub(normalized.model, normalized.prompt_tokens, normalized.completion_tokens)
+    add_ai_usage(session, normalized, cost)
+    answer = clean_ai_response(normalized.content) or AI_UNAVAILABLE_TEXT
+    log_ai_message(
+        session,
+        conversation,
+        "assistant",
+        answer,
+        model=normalized.model,
+        prompt_tokens=normalized.prompt_tokens,
+        completion_tokens=normalized.completion_tokens,
+        cost_rub=cost,
+    )
+    return answer
+
+
+def handle_tenant_ai_message(session: Session, chat_id: int | str, lease: Lease, text: str) -> bool:
+    if not text or text.startswith("/") or not ai_tenant_free_text_enabled(session):
+        return False
+    if tenant_question_needs_owner(text):
+        conversation = ai_conversation(session, chat_id, "tenant", lease)
+        log_ai_message(session, conversation, "user", text)
+        session.add(
+            AiActionLog(
+                conversation_id=conversation.id,
+                lease_id=lease.id,
+                actor_role="tenant",
+                action_type="owner_escalation",
+                status="pending",
+                payload_json=json.dumps({"text": text}, ensure_ascii=False),
+                note="tenant free-text requires owner decision",
+            )
+        )
+        owner_id = telegram_owner_chat_id(session)
+        if owner_id and telegram_token(session):
+            send_telegram_text(
+                session,
+                owner_id,
+                f"Вопрос жильца требует решения владельца:\n{lease.apartment.object.name}, {lease.apartment.name}, {lease.tenant.full_name}\n\n{text}",
+                app_keyboard(app_base_url(session)),
+            )
+        send_telegram_text(session, chat_id, TENANT_ESCALATION_TEXT, tenant_keyboard())
+        return True
+
+    answer = call_hermes_ai(
+        session,
+        chat_id=chat_id,
+        actor_role="tenant",
+        lease=lease,
+        system_prompt=TENANT_SYSTEM_PROMPT,
+        context=tenant_context_text(session, lease, get_settings(session)),
+        user_text=text,
+        model=resolve_ai_model(get_setting_value(session, "hermes_model_default")),
+    )
+    send_telegram_text(session, chat_id, answer, tenant_keyboard())
+    return True
+
+
+def handle_owner_ai_message(session: Session, chat_id: int | str, text: str, *, audit_deep: bool = False) -> bool:
+    user_text = text.strip()
+    if not user_text:
+        return False
+    dashboard = build_dashboard(session)
+    model_key = "hermes_model_audit" if audit_deep else "hermes_model_default"
+    answer = call_hermes_ai(
+        session,
+        chat_id=chat_id,
+        actor_role="owner",
+        lease=None,
+        system_prompt=OWNER_SYSTEM_PROMPT,
+        context=owner_context_text(session, dashboard),
+        user_text=user_text,
+        model=resolve_ai_model(get_setting_value(session, model_key)),
+        max_tokens=1200 if audit_deep else 800,
+    )
+    send_telegram_text(session, chat_id, answer, app_keyboard(app_base_url(session), dashboard.get("monthly_reports")))
+    return True
+
+
 def tenant_requisites_text(session: Session) -> str:
     settings = get_settings(session)
     lines = [
@@ -4383,6 +4736,9 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
         )
         return
 
+    if not is_owner and linked_lease and text and handle_tenant_ai_message(session, chat_id, linked_lease, text):
+        return
+
     if not is_owner:
         send_telegram_text(
             session,
@@ -4397,6 +4753,17 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
         return
     if command == "/reports":
         send_telegram_text(session, chat_id, build_reports_message(reports), app_keyboard(base_url, reports))
+        return
+    if command == "/ask":
+        question = " ".join(_args).strip() or text[len("/ask") :].strip()
+        if not question:
+            send_telegram_text(session, chat_id, "Напиши вопрос после /ask.", app_keyboard(base_url))
+            return
+        handle_owner_ai_message(session, chat_id, question)
+        return
+    if command == "/audit":
+        deep = "deep" in text.lower().split()[1:]
+        handle_owner_ai_message(session, chat_id, AUDIT_USER_PROMPT, audit_deep=deep)
         return
     if command == "/run_reminders":
         summary = run_due_reminders(session)
