@@ -2937,9 +2937,12 @@ async function telegramWebhookInfo() {
   const result = await api("/api/integrations/telegram/webhook-info");
   const summary = [
     result.url ? `URL: ${result.url}` : "Webhook пока не установлен",
+    result.expected_url ? `Ожидаемый URL: ${result.expected_url}` : "",
+    result.url ? `Совпадает с текущим приложением: ${result.matches_expected ? "да" : "нет"}` : "",
     result.pending_update_count ? `Pending: ${result.pending_update_count}` : "Pending: 0",
+    result.allowed_updates?.length ? `Allowed updates: ${result.allowed_updates.join(", ")}` : "",
     result.last_error_message ? `Ошибка: ${result.last_error_message}` : "Ошибок от Telegram нет",
-  ].join("\n");
+  ].filter(Boolean).join("\n");
   alert(summary);
 }
 

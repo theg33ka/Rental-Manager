@@ -5166,9 +5166,26 @@ def telegram_webhook_info(session: Session = Depends(get_session)) -> dict[str, 
     if not token:
         raise HTTPException(400, "Сначала сохрани Telegram bot token")
     try:
-        return telegram_api_request(token, "getWebhookInfo", {})
+        response = telegram_api_request(token, "getWebhookInfo", {})
     except TelegramApiError as exc:
         raise HTTPException(400, str(exc)) from exc
+    info = response.get("result") or {}
+    expected_url = ""
+    base_url = app_base_url(session)
+    if base_url:
+        expected_url = f"{base_url}/api/integrations/telegram/webhook"
+    actual_url = str(info.get("url") or "")
+    return {
+        "ok": bool(response.get("ok")),
+        "url": actual_url,
+        "expected_url": expected_url,
+        "matches_expected": bool(expected_url and actual_url == expected_url),
+        "pending_update_count": info.get("pending_update_count") or 0,
+        "last_error_date": info.get("last_error_date"),
+        "last_error_message": info.get("last_error_message") or "",
+        "max_connections": info.get("max_connections"),
+        "allowed_updates": info.get("allowed_updates") or [],
+    }
 
 
 @app.post("/api/integrations/telegram/send-test")
