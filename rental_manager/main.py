@@ -5166,16 +5166,29 @@ def telegram_set_webhook(payload: dict[str, Any] | None = None, session: Session
     secret = telegram_secret(session)
     if secret:
         payload["secret_token"] = secret
+    delete_warning = ""
+    commands_warning = ""
+    commands_result: dict[str, Any] = {"ok": False}
     try:
-        telegram_api_request(token, "deleteWebhook", {"drop_pending_updates": True})
+        try:
+            telegram_api_request(token, "deleteWebhook", {"drop_pending_updates": True})
+        except TelegramApiError as exc:
+            delete_warning = str(exc)
+            runtime_log("TELEGRAM", f"delete webhook skipped error={exc}")
         webhook_result = telegram_api_request(token, "setWebhook", payload)
-        commands_result = telegram_api_request(token, "setMyCommands", {"commands": owner_commands()})
+        try:
+            commands_result = telegram_api_request(token, "setMyCommands", {"commands": owner_commands()})
+        except TelegramApiError as exc:
+            commands_warning = str(exc)
+            runtime_log("TELEGRAM", f"set commands skipped error={exc}")
         session.commit()
         return {
-            "ok": bool(webhook_result.get("ok")) and bool(commands_result.get("ok")),
+            "ok": bool(webhook_result.get("ok")),
             "description": webhook_result.get("description", ""),
             "commands_configured": bool(commands_result.get("ok")),
             "url": payload["url"],
+            "delete_warning": delete_warning,
+            "commands_warning": commands_warning,
         }
     except TelegramApiError as exc:
         runtime_log("TELEGRAM", f"set webhook failed error={exc}")

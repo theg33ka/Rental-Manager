@@ -2929,7 +2929,8 @@ async function connectTelegramWebhook() {
     method: "POST",
     body: JSON.stringify({ app_base_url: window.location.origin }),
   });
-  toast(result.description || "Webhook подключён");
+  const warnings = [result.delete_warning, result.commands_warning].filter(Boolean);
+  toast(warnings.length ? `${result.description || "Webhook подключён"}; предупреждение: ${warnings[0]}` : result.description || "Webhook подключён");
   await loadAll();
 }
 
