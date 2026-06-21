@@ -14,7 +14,7 @@ import time as time_module
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -5112,8 +5112,27 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
     send_telegram_text(session, chat_id, telegram_help_text(), app_keyboard(base_url))
 
 
+def process_telegram_update_background(payload: dict[str, Any]) -> None:
+    update_id = payload.get("update_id")
+    try:
+        message = payload.get("message") or payload.get("edited_message") or payload.get("business_message")
+        if not message:
+            runtime_log("TELEGRAM", f"webhook ignored update_id={update_id} reason=no_message")
+            return
+        with SessionLocal() as session:
+            handle_telegram_message(session, message)
+            session.commit()
+    except Exception as exc:
+        runtime_log("TELEGRAM", f"background failed update_id={update_id} error={exc!r}")
+
+
 @app.post("/api/integrations/telegram/webhook")
-async def telegram_webhook(request: Request, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, bool]:
+async def telegram_webhook(
+    request: Request,
+    payload: dict[str, Any],
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+) -> dict[str, bool]:
     update_types = ",".join(sorted(key for key in payload if key != "update_id")) or "-"
     runtime_log("TELEGRAM", f"webhook update_id={payload.get('update_id')} types={update_types}")
     secret = telegram_secret(session)
@@ -5122,12 +5141,7 @@ async def telegram_webhook(request: Request, payload: dict[str, Any], session: S
         if provided != secret:
             runtime_log("TELEGRAM", f"webhook rejected update_id={payload.get('update_id')} reason=bad_secret")
             raise HTTPException(403, "Неверный Telegram secret token")
-    message = payload.get("message") or payload.get("edited_message") or payload.get("business_message")
-    if message:
-        handle_telegram_message(session, message)
-    else:
-        runtime_log("TELEGRAM", f"webhook ignored update_id={payload.get('update_id')} reason=no_message")
-    session.commit()
+    background_tasks.add_task(process_telegram_update_background, payload)
     return {"ok": True}
 
 
@@ -5142,6 +5156,7 @@ def telegram_set_webhook(payload: dict[str, Any] | None = None, session: Session
     payload: dict[str, Any] = {
         "url": f"{base_url}/api/integrations/telegram/webhook",
         "allowed_updates": ["message", "edited_message", "business_message"],
+        "drop_pending_updates": True,
     }
     secret = telegram_secret(session)
     if secret:
