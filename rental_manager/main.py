@@ -190,6 +190,8 @@ REMINDER_CADENCE_KEYS = {
 }
 LEASE_AUTOMATION_TEMPLATES = ("message_rent_due", "message_rent_overdue", "message_utility_bill")
 EXPENSE_FUND_RECEIPT_MARK = "PAYMENT_RECEIPT:"
+UTILITY_ADVANCE_CHANNEL = "utility_advance"
+UTILITY_ADVANCE_SOURCE = "utility_advance"
 REMINDER_WORKER_STARTED = False
 REMINDER_WORKER_INTERVAL_SECONDS = 900
 LOCAL_TZ = ZoneInfo("Asia/Novosibirsk")
@@ -1495,7 +1497,11 @@ def receipt_meta(parsed: dict[str, Any]) -> dict[str, Any]:
 
 
 def payment_source_label(receipt: PaymentReceipt) -> str:
-    if receipt.source == "manual":
+    if receipt.source == UTILITY_ADVANCE_SOURCE:
+        base = "зачёт аванса"
+    elif receipt.channel == UTILITY_ADVANCE_CHANNEL:
+        base = "аванс коммуналки"
+    elif receipt.source == "manual":
         base = "ручной"
     elif receipt.channel == "ip":
         base = "ИП"
@@ -1519,7 +1525,7 @@ def serialize_payment_receipt(receipt: PaymentReceipt, session: Session) -> dict
     parsed = parse_receipt_details(receipt)
     charge = receipt.rent_charge
     utility_line = session.get(UtilityBillLine, receipt.utility_line_id) if receipt.utility_line_id else None
-    lease = charge.lease if charge else utility_line.lease if utility_line else None
+    lease = charge.lease if charge else utility_line.lease if utility_line else session.get(Lease, receipt.lease_id) if receipt.lease_id else None
     apartment = lease.apartment.name if lease else ""
     tenant = lease.tenant.full_name if lease else ""
     target_label = ""
@@ -1530,8 +1536,11 @@ def serialize_payment_receipt(receipt: PaymentReceipt, session: Session) -> dict
     elif utility_line:
         target_label = f"коммуналка {format_date(utility_line.bill.period_end)}"
         target_month = utility_line.bill.period_end.isoformat()
-    target_year = charge.due_date.year if charge else utility_line.bill.period_end.year if utility_line else date.today().year
-    target_month_number = charge.due_date.month if charge else utility_line.bill.period_end.month if utility_line else 0
+    elif receipt.channel == UTILITY_ADVANCE_CHANNEL:
+        target_label = "аванс коммуналки"
+        target_month = receipt.paid_at.date().isoformat()
+    target_year = charge.due_date.year if charge else utility_line.bill.period_end.year if utility_line else receipt.paid_at.year if receipt.channel == UTILITY_ADVANCE_CHANNEL else date.today().year
+    target_month_number = charge.due_date.month if charge else utility_line.bill.period_end.month if utility_line else receipt.paid_at.month if receipt.channel == UTILITY_ADVANCE_CHANNEL else 0
     return {
         "id": receipt.id,
         "lease_id": receipt.lease_id,
@@ -2081,6 +2090,7 @@ def api_month_progress(year: int, month: int, session: Session = Depends(get_ses
         "month": month,
         "period_start": start.isoformat(),
         "period_end": end.isoformat(),
+        "summary": month_dashboard_summary(session, year, month, today),
         "rent_charges": [serialize_rent_charge(charge, session) for charge in rent_charges],
         "utility_bills": [serialize_bill(bill, session) for bill in utility_bills],
         "provider_readings": provider_reading_statuses_for_month(session, year, month, today),
@@ -2466,6 +2476,208 @@ def notify_available_monthly_reports(session: Session, today: date | None = None
     return sent
 
 
+def active_leases_for_month(session: Session, start: date, end: date) -> list[Lease]:
+    leases = session.scalars(
+        select(Lease)
+        .options(joinedload(Lease.apartment).joinedload(Apartment.object), joinedload(Lease.tenant))
+        .join(Apartment)
+        .where(Lease.active.is_(True), Apartment.active.is_(True))
+        .order_by(Lease.start_date, Lease.id)
+    ).all()
+    return [
+        lease
+        for lease in leases
+        if not lease_ignored(session, lease.id)
+        and lease.start_date <= end
+        and (lease.end_date is None or lease.end_date >= start)
+    ]
+
+
+def utility_advance_receipt_applies(receipt: PaymentReceipt) -> bool:
+    return receipt.channel == UTILITY_ADVANCE_CHANNEL or receipt.source == UTILITY_ADVANCE_SOURCE
+
+
+def estimated_utility_advance_due(
+    session: Session,
+    leases: list[Lease],
+    start: date,
+    current_lines_by_lease: dict[int, float],
+) -> float:
+    lease_ids = [lease.id for lease in leases]
+    if not lease_ids:
+        return 0.0
+
+    history_by_lease: dict[int, dict[date, float]] = {lease.id: {} for lease in leases}
+    historical_lines = session.scalars(
+        select(UtilityBillLine)
+        .options(joinedload(UtilityBillLine.bill))
+        .join(UtilityBill)
+        .where(
+            UtilityBillLine.lease_id.in_(lease_ids),
+            UtilityBill.period_end < start,
+            UtilityBill.status != "draft",
+        )
+        .order_by(UtilityBill.period_start.desc(), UtilityBillLine.id.desc())
+    ).all()
+    for line in historical_lines:
+        if not line.lease_id or not line.bill:
+            continue
+        month_start = date(line.bill.period_start.year, line.bill.period_start.month, 1)
+        lease_history = history_by_lease.setdefault(int(line.lease_id), {})
+        lease_history[month_start] = money(lease_history.get(month_start, 0.0) + float(line.total_amount or 0))
+
+    total = 0.0
+    for lease in leases:
+        current_total = money(current_lines_by_lease.get(lease.id, 0.0))
+        if current_total > EPS:
+            total += current_total
+            continue
+        recent = [
+            value
+            for _month, value in sorted(history_by_lease.get(lease.id, {}).items(), reverse=True)[:3]
+            if value > EPS
+        ]
+        if recent:
+            total += money(sum(recent) / len(recent))
+    return money(total)
+
+
+def month_dashboard_summary(
+    session: Session,
+    year: int,
+    month: int,
+    today: date | None = None,
+) -> dict[str, Any]:
+    today = today or date.today()
+    start, end = month_range(year, month)
+    active_leases = active_leases_for_month(session, start, end)
+    active_lease_ids = {lease.id for lease in active_leases}
+
+    rent_charges = session.scalars(
+        select(RentCharge)
+        .options(
+            joinedload(RentCharge.lease).joinedload(Lease.apartment).joinedload(Apartment.object),
+            joinedload(RentCharge.lease).joinedload(Lease.tenant),
+        )
+        .join(Lease)
+        .join(Apartment)
+        .where(
+            Lease.active.is_(True),
+            Apartment.active.is_(True),
+            RentCharge.due_date >= start,
+            RentCharge.due_date <= end,
+        )
+        .order_by(RentCharge.due_date, RentCharge.id)
+    ).all()
+    rent_charges = [
+        charge
+        for charge in rent_charges
+        if charge.lease_id in active_lease_ids and not lease_ignored(session, charge.lease_id)
+    ]
+    salary_due = 0.0
+    salary_paid = 0.0
+    paid_count = 0
+    pending_count = 0
+    overdue_count = 0
+    for charge in rent_charges:
+        update_rent_charge_status(charge, today)
+        salary_due = money(salary_due + float(charge.personal_due or 0))
+        salary_paid = money(salary_paid + float(charge.personal_paid or 0))
+        rent_debt = money(max(0.0, float(charge.ip_due or 0) - float(charge.ip_paid or 0)) + max(0.0, float(charge.personal_due or 0) - float(charge.personal_paid or 0)))
+        if charge.status in {"paid", "paid_ahead"} or rent_debt <= EPS:
+            paid_count += 1
+        elif charge.status in {"overdue", "partial"} and charge.due_date <= today:
+            overdue_count += 1
+        else:
+            pending_count += 1
+
+    utility_bills = session.scalars(
+        select(UtilityBill)
+        .options(
+            joinedload(UtilityBill.service).joinedload(UtilityService.object),
+            selectinload(UtilityBill.lines).joinedload(UtilityBillLine.lease),
+        )
+        .where(UtilityBill.period_start >= start, UtilityBill.period_start <= end)
+        .order_by(UtilityBill.period_start, UtilityBill.service_id, UtilityBill.id)
+    ).all()
+    issued_bills = [bill for bill in utility_bills if bill.status != "draft"]
+    current_lines_by_lease: dict[int, float] = {}
+    bill_payment_due = 0.0
+    bill_payment_paid = 0.0
+    for bill in utility_bills:
+        for line in bill.lines:
+            if not line.lease_id or line.lease_id not in active_lease_ids or lease_ignored(session, line.lease_id):
+                continue
+            update_utility_line_status(line, today)
+            current_lines_by_lease[int(line.lease_id)] = money(current_lines_by_lease.get(int(line.lease_id), 0.0) + float(line.total_amount or 0))
+            if bill.status == "draft":
+                continue
+            bill_payment_due = money(bill_payment_due + float(line.total_amount or 0))
+            bill_payment_paid = money(bill_payment_paid + float(line.paid_amount or 0))
+
+    active_services = session.scalars(select(UtilityService).where(UtilityService.active.is_(True))).all()
+    active_service_ids = {service.id for service in active_services}
+    issued_service_ids = {bill.service_id for bill in issued_bills}
+    utility_bills_issued = not active_service_ids or active_service_ids.issubset(issued_service_ids)
+    utility_provider_paid = bool(issued_bills) and all(bill.provider_paid for bill in issued_bills)
+
+    start_dt = datetime.combine(start, time.min)
+    end_dt = datetime.combine(end + timedelta(days=1), time.min)
+    month_receipts = session.scalars(
+        select(PaymentReceipt)
+        .where(
+            PaymentReceipt.status == "accepted",
+            PaymentReceipt.paid_at >= start_dt,
+            PaymentReceipt.paid_at < end_dt,
+        )
+        .order_by(PaymentReceipt.paid_at, PaymentReceipt.id)
+    ).all()
+    advance_paid = money(
+        sum(
+            float(receipt.amount or 0)
+            for receipt in month_receipts
+            if receipt.lease_id in active_lease_ids
+            and utility_advance_receipt_applies(receipt)
+            and not lease_ignored(session, receipt.lease_id)
+        )
+    )
+    advance_balance = money(
+        session.scalar(
+            select(func.coalesce(func.sum(PaymentReceipt.amount), 0)).where(
+                PaymentReceipt.status == "accepted",
+                PaymentReceipt.channel == UTILITY_ADVANCE_CHANNEL,
+                PaymentReceipt.utility_line_id.is_(None),
+                PaymentReceipt.rent_charge_id.is_(None),
+            )
+        )
+        or 0
+    )
+    total_apartments = int(session.scalar(select(func.count(Apartment.id)).where(Apartment.active.is_(True))) or 0)
+    occupied_apartments = len({lease.apartment_id for lease in active_leases})
+    advance_due = estimated_utility_advance_due(session, active_leases, start, current_lines_by_lease)
+
+    return {
+        "year": year,
+        "month": month,
+        "period_start": start.isoformat(),
+        "period_end": end.isoformat(),
+        "salary_paid": salary_paid,
+        "salary_due": salary_due,
+        "utility_bills_issued": utility_bills_issued,
+        "utility_provider_paid": utility_provider_paid,
+        "bill_payment_paid": bill_payment_paid,
+        "bill_payment_due": bill_payment_due,
+        "advance_paid": advance_paid,
+        "advance_due": advance_due,
+        "advance_balance": advance_balance,
+        "occupied": occupied_apartments,
+        "total_apartments": total_apartments,
+        "paid_count": paid_count,
+        "pending_count": pending_count,
+        "overdue_count": overdue_count,
+    }
+
+
 def build_dashboard(session: Session) -> dict[str, Any]:
     today = date.today()
     cutoff = configured_notification_cutoff_date(session)
@@ -2606,6 +2818,7 @@ def build_dashboard(session: Session) -> dict[str, Any]:
 
     return {
         "object_summary": build_object_summary(session),
+        "month_summary": month_dashboard_summary(session, today.year, today.month, today),
         "monthly_reports": build_monthly_reports(session, today),
         "rent_overdue": overdue_rent,
         "rent_partial": partial_rent,
@@ -3825,6 +4038,7 @@ def receipt_channel_label(value: str) -> str:
         "personal": "По номеру",
         "expense_fund": "Мне на расходы",
         "utilities": "коммуналка",
+        "utility_advance": "аванс коммуналки",
         "unknown": "неизвестно",
     }.get(value, value or "неизвестно")
 
@@ -5549,8 +5763,22 @@ def create_manual_payment(payload: dict[str, Any], session: Session = Depends(ge
                 notes=notes or "ручной платёж",
                 exact_only=False,
             )
+    elif kind == UTILITY_ADVANCE_CHANNEL:
+        receipt = PaymentReceipt(
+            lease_id=lease.id,
+            apartment_id=lease.apartment_id,
+            amount=amount,
+            channel=UTILITY_ADVANCE_CHANNEL,
+            paid_at=paid_at,
+            source=source,
+            status="accepted",
+            notes=notes or "аванс коммуналки",
+        )
+        session.add(receipt)
+        session.flush()
+        receipts = [receipt]
     else:
-        raise HTTPException(400, "тип ручного платежа должен быть rent или utility")
+        raise HTTPException(400, "тип ручного платежа должен быть rent, utility или utility_advance")
 
     generate_rent_charges(session)
     session.commit()
@@ -6209,6 +6437,80 @@ def delete_utility_bill(bill_id: int, session: Session = Depends(get_session)) -
     session.commit()
     return {"ok": True, "bill_id": bill_id, "deleted_status": deleted_status}
 
+
+def available_utility_advances(session: Session, lease_id: int) -> list[PaymentReceipt]:
+    return [
+        receipt
+        for receipt in session.scalars(
+            select(PaymentReceipt)
+            .where(
+                PaymentReceipt.lease_id == lease_id,
+                PaymentReceipt.status == "accepted",
+                PaymentReceipt.channel == UTILITY_ADVANCE_CHANNEL,
+                PaymentReceipt.utility_line_id.is_(None),
+                PaymentReceipt.rent_charge_id.is_(None),
+            )
+            .order_by(PaymentReceipt.paid_at, PaymentReceipt.id)
+        ).all()
+        if money(float(receipt.amount or 0)) > EPS
+    ]
+
+
+def append_receipt_note(receipt: PaymentReceipt, note: str) -> None:
+    receipt.notes = "; ".join(part for part in [receipt.notes, note] if part)
+
+
+def apply_utility_advances_to_bill(session: Session, bill: UtilityBill) -> float:
+    applied_total = 0.0
+    affected_lease_ids: set[int] = set()
+    lines = sorted(
+        [line for line in bill.lines if line.lease_id],
+        key=lambda item: (item.lease_id or 0, item.due_date or bill.due_date or bill.period_end, item.id or 0),
+    )
+    for line in lines:
+        line_debt = money(max(0.0, float(line.total_amount or 0) - float(line.paid_amount or 0)))
+        if line_debt <= EPS:
+            continue
+        for advance in available_utility_advances(session, int(line.lease_id)):
+            if line_debt <= EPS:
+                break
+            advance_amount = money(float(advance.amount or 0))
+            if advance_amount <= EPS:
+                continue
+            portion = money(min(advance_amount, line_debt))
+            note = f"зачтено из аванса в счёт {bill.service.name} за {bill.period_end:%m.%Y}"
+            if advance_amount <= portion + EPS:
+                advance.utility_line_id = line.id
+                advance.channel = "utilities"
+                advance.source = UTILITY_ADVANCE_SOURCE
+                append_receipt_note(advance, note)
+            else:
+                advance.amount = money(advance_amount - portion)
+                session.add(
+                    PaymentReceipt(
+                        lease_id=advance.lease_id,
+                        utility_line_id=line.id,
+                        apartment_id=advance.apartment_id,
+                        amount=portion,
+                        channel="utilities",
+                        paid_at=advance.paid_at,
+                        source=UTILITY_ADVANCE_SOURCE,
+                        status="accepted",
+                        recipient_name=advance.recipient_name,
+                        recipient_details=advance.recipient_details,
+                        file_path=advance.file_path,
+                        notes=note,
+                    )
+                )
+            applied_total = money(applied_total + portion)
+            line_debt = money(line_debt - portion)
+            affected_lease_ids.add(int(line.lease_id))
+            session.flush()
+    for lease_id in sorted(affected_lease_ids):
+        recalculate_lease_balances(session, lease_id)
+    return money(applied_total)
+
+
 @app.post("/api/utility-bills/{bill_id}/issue")
 def issue_utility_bill(bill_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
     bill = session.get(UtilityBill, bill_id)
@@ -6222,6 +6524,8 @@ def issue_utility_bill(bill_id: int, session: Session = Depends(get_session)) ->
         line.status = "issued"
         line.issued_at = utc_now()
         line.due_date = due
+    session.flush()
+    applied_advances = apply_utility_advances_to_bill(session, bill)
     sent = 0
     skipped_unlinked = 0
     for preview in previews:
@@ -6246,6 +6550,7 @@ def issue_utility_bill(bill_id: int, session: Session = Depends(get_session)) ->
     payload = serialize_bill(bill)
     payload["sent"] = sent
     payload["skipped_unlinked"] = skipped_unlinked
+    payload["applied_advances"] = applied_advances
     return payload
 
 
