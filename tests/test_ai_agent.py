@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -16,6 +16,7 @@ from rental_manager.main import (
     app_base_url,
     call_hermes_ai,
     handle_telegram_message,
+    process_telegram_update_background,
     resolve_ai_model,
     telegram_owner_chat_id,
     telegram_secret,
@@ -115,6 +116,25 @@ class HermesFallbackTests(AiAgentDatabaseTestCase):
 
 
 class TelegramAiRoutingTests(AiAgentDatabaseTestCase):
+    def test_background_update_uses_own_session(self) -> None:
+        session = MagicMock()
+
+        class SessionContext:
+            def __enter__(self):
+                return session
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        message = {"chat": {"id": 999}, "from": {"id": 999}, "text": "/status"}
+        with patch("rental_manager.main.SessionLocal", return_value=SessionContext()), patch(
+            "rental_manager.main.handle_telegram_message"
+        ) as mocked_handle:
+            process_telegram_update_background({"update_id": 123, "message": message})
+
+        mocked_handle.assert_called_once_with(session, message)
+        session.commit.assert_called_once()
+
     def test_telegram_settings_can_come_from_env(self) -> None:
         with self.Session() as session:
             session.add(AppSetting(key="telegram_bot_token", value="db-token"))
