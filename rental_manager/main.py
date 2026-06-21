@@ -169,6 +169,7 @@ ALL_SETTINGS = {**DEFAULT_SETTINGS, **SECRET_SETTINGS}
 INTERNAL_SETTINGS = {
     "telegram_tenant_links": "{}",
     "telegram_consent_chat_ids": "[]",
+    "processed_telegram_update_ids": "[]",
     "ignored_lease_ids": "[]",
     "accepted_monthly_reports": "[]",
     "notified_monthly_reports": "[]",
@@ -202,6 +203,8 @@ UTILITY_ADVANCE_CHANNEL = "utility_advance"
 UTILITY_ADVANCE_SOURCE = "utility_advance"
 REMINDER_WORKER_STARTED = False
 REMINDER_WORKER_INTERVAL_SECONDS = 900
+TELEGRAM_PROCESSED_UPDATE_LIMIT = 500
+TELEGRAM_UPDATE_LOCK = threading.Lock()
 LOCAL_TZ = ZoneInfo("Asia/Novosibirsk")
 DEFAULT_FALLBACK_KEYS = {
     "ip_recipient_name",
@@ -556,8 +559,8 @@ def get_setting_value(session: Session, key: str) -> str:
 def get_internal_json(session: Session, key: str, fallback: Any) -> Any:
     raw = get_setting_value(session, key)
     try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
+        return json.loads(str(raw))
+    except (TypeError, json.JSONDecodeError):
         return fallback
 
 
@@ -569,6 +572,19 @@ def set_internal_json(session: Session, key: str, value: Any) -> None:
         setting = AppSetting(key=key)
         session.add(setting)
     setting.value = json.dumps(value, ensure_ascii=False)
+
+
+def mark_telegram_update_seen(session: Session, update_id: Any) -> bool:
+    if update_id in {None, ""}:
+        return True
+    key = str(update_id)
+    raw_items = get_internal_json(session, "processed_telegram_update_ids", [])
+    items = [str(item) for item in raw_items if str(item).strip()] if isinstance(raw_items, list) else []
+    if key in items:
+        return False
+    items.append(key)
+    set_internal_json(session, "processed_telegram_update_ids", items[-TELEGRAM_PROCESSED_UPDATE_LIMIT:])
+    return True
 
 
 def get_settings(session: Session) -> dict[str, str | bool]:
@@ -5120,6 +5136,12 @@ def process_telegram_update_background(payload: dict[str, Any]) -> None:
             runtime_log("TELEGRAM", f"webhook ignored update_id={update_id} reason=no_message")
             return
         with SessionLocal() as session:
+            with TELEGRAM_UPDATE_LOCK:
+                if not mark_telegram_update_seen(session, update_id):
+                    session.commit()
+                    runtime_log("TELEGRAM", f"webhook duplicate skipped update_id={update_id}")
+                    return
+                session.commit()
             handle_telegram_message(session, message)
             session.commit()
     except Exception as exc:

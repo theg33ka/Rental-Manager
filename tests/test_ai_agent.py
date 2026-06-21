@@ -155,10 +155,32 @@ class TelegramAiRoutingTests(AiAgentDatabaseTestCase):
         with patch("rental_manager.main.SessionLocal", return_value=SessionContext()), patch(
             "rental_manager.main.handle_telegram_message"
         ) as mocked_handle:
-            process_telegram_update_background({"update_id": 123, "message": message})
+            process_telegram_update_background({"message": message})
 
         mocked_handle.assert_called_once_with(session, message)
-        session.commit.assert_called_once()
+        self.assertEqual(session.commit.call_count, 2)
+
+    def test_background_update_skips_duplicate_update_id(self) -> None:
+        message = {"chat": {"id": 999}, "from": {"id": 999}, "text": "/status"}
+
+        class SessionContext:
+            def __init__(self, session):
+                self.session = session
+
+            def __enter__(self):
+                return self.session
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        with self.Session() as session:
+            with patch("rental_manager.main.SessionLocal", return_value=SessionContext(session)), patch(
+                "rental_manager.main.handle_telegram_message"
+            ) as mocked_handle:
+                process_telegram_update_background({"update_id": 123, "message": message})
+                process_telegram_update_background({"update_id": 123, "message": message})
+
+        mocked_handle.assert_called_once()
 
     def test_telegram_settings_can_come_from_env(self) -> None:
         with self.Session() as session:
