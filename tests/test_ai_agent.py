@@ -20,6 +20,7 @@ from rental_manager.main import (
     resolve_ai_model,
     telegram_owner_chat_id,
     telegram_secret,
+    telegram_set_webhook,
     telegram_token,
     telegram_webhook_info,
 )
@@ -179,6 +180,19 @@ class TelegramAiRoutingTests(AiAgentDatabaseTestCase):
         self.assertEqual(result["url"], "https://rent.example.com/api/integrations/telegram/webhook")
         self.assertTrue(result["matches_expected"])
         self.assertEqual(result["pending_update_count"], 2)
+
+    def test_set_webhook_drops_pending_updates_before_setting(self) -> None:
+        with self.Session() as session:
+            session.add(AppSetting(key="telegram_bot_token", value="token"))
+            session.flush()
+
+            with patch("rental_manager.main.telegram_api_request", return_value={"ok": True, "description": "ok"}) as mocked_api:
+                result = telegram_set_webhook({"app_base_url": "https://rent.example.com"}, session)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(mocked_api.call_args_list[0].args, ("token", "deleteWebhook", {"drop_pending_updates": True}))
+        self.assertEqual(mocked_api.call_args_list[1].args[0:2], ("token", "setWebhook"))
+        self.assertTrue(mocked_api.call_args_list[1].args[2]["drop_pending_updates"])
 
     def test_status_command_does_not_call_ai(self) -> None:
         with self.Session() as session:

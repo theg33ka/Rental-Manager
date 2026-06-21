@@ -14,7 +14,7 @@ import time as time_module
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -5126,22 +5126,27 @@ def process_telegram_update_background(payload: dict[str, Any]) -> None:
         runtime_log("TELEGRAM", f"background failed update_id={update_id} error={exc!r}")
 
 
+def queue_telegram_update(payload: dict[str, Any]) -> None:
+    thread = threading.Thread(
+        target=process_telegram_update_background,
+        args=(dict(payload),),
+        name=f"telegram-update-{payload.get('update_id') or 'unknown'}",
+        daemon=True,
+    )
+    thread.start()
+
+
 @app.post("/api/integrations/telegram/webhook")
-async def telegram_webhook(
-    request: Request,
-    payload: dict[str, Any],
-    background_tasks: BackgroundTasks,
-    session: Session = Depends(get_session),
-) -> dict[str, bool]:
+async def telegram_webhook(request: Request, payload: dict[str, Any]) -> dict[str, bool]:
     update_types = ",".join(sorted(key for key in payload if key != "update_id")) or "-"
     runtime_log("TELEGRAM", f"webhook update_id={payload.get('update_id')} types={update_types}")
-    secret = telegram_secret(session)
+    secret = str(os.environ.get("TELEGRAM_WEBHOOK_SECRET") or "").strip()
     if secret:
         provided = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
         if provided != secret:
             runtime_log("TELEGRAM", f"webhook rejected update_id={payload.get('update_id')} reason=bad_secret")
             raise HTTPException(403, "Неверный Telegram secret token")
-    background_tasks.add_task(process_telegram_update_background, payload)
+    queue_telegram_update(payload)
     return {"ok": True}
 
 
@@ -5162,6 +5167,7 @@ def telegram_set_webhook(payload: dict[str, Any] | None = None, session: Session
     if secret:
         payload["secret_token"] = secret
     try:
+        telegram_api_request(token, "deleteWebhook", {"drop_pending_updates": True})
         webhook_result = telegram_api_request(token, "setWebhook", payload)
         commands_result = telegram_api_request(token, "setMyCommands", {"commands": owner_commands()})
         session.commit()
@@ -5172,6 +5178,7 @@ def telegram_set_webhook(payload: dict[str, Any] | None = None, session: Session
             "url": payload["url"],
         }
     except TelegramApiError as exc:
+        runtime_log("TELEGRAM", f"set webhook failed error={exc}")
         raise HTTPException(400, str(exc)) from exc
 
 
@@ -5183,7 +5190,18 @@ def telegram_webhook_info(session: Session = Depends(get_session)) -> dict[str, 
     try:
         response = telegram_api_request(token, "getWebhookInfo", {})
     except TelegramApiError as exc:
-        raise HTTPException(400, str(exc)) from exc
+        runtime_log("TELEGRAM", f"webhook info failed error={exc}")
+        return {
+            "ok": False,
+            "url": "",
+            "expected_url": f"{app_base_url(session)}/api/integrations/telegram/webhook" if app_base_url(session) else "",
+            "matches_expected": False,
+            "pending_update_count": 0,
+            "last_error_date": None,
+            "last_error_message": str(exc),
+            "max_connections": None,
+            "allowed_updates": [],
+        }
     info = response.get("result") or {}
     expected_url = ""
     base_url = app_base_url(session)
