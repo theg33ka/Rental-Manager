@@ -9,6 +9,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from rental_manager.database import Base
+from rental_manager.main import create_personal_priority_receipts
 from rental_manager.models import Apartment, Lease, Tenant, UtilityBill, UtilityBillLine, UtilityService
 from rental_manager.services.billing import generate_rent_charges
 from rental_manager.services.payment_allocation import create_rent_receipts, create_utility_receipts
@@ -248,6 +249,53 @@ class PaymentAllocationTests(unittest.TestCase):
 
             self.assertEqual(jan_line.paid_amount, 3000.0)
             self.assertEqual(feb_line.paid_amount, 0.0)
+
+    def test_personal_transfer_sends_amount_above_rent_part_to_utilities(self) -> None:
+        with self.Session() as session:
+            seed_if_empty(session)
+            apartment = session.get(Apartment, 1)
+            service = session.scalar(select(UtilityService).where(UtilityService.object_id == apartment.object_id, UtilityService.kind == "electricity"))
+            tenant = Tenant(full_name="Split Personal")
+            session.add(tenant)
+            session.flush()
+            lease = Lease(
+                apartment_id=apartment.id,
+                tenant_id=tenant.id,
+                start_date=date(2026, 4, 1),
+                payment_day=1,
+                ip_amount=10000,
+                personal_amount=3000,
+            )
+            session.add(lease)
+            session.flush()
+            generate_rent_charges(session, until=date(2026, 4, 10))
+            bill = UtilityBill(service_id=service.id, period_start=date(2026, 3, 1), period_end=date(2026, 3, 31), status="issued")
+            session.add(bill)
+            session.flush()
+            line = UtilityBillLine(
+                bill_id=bill.id,
+                apartment_id=apartment.id,
+                lease_id=lease.id,
+                total_amount=800,
+                status="issued",
+                due_date=date(2026, 4, 7),
+            )
+            session.add(line)
+            session.flush()
+
+            create_personal_priority_receipts(
+                session,
+                lease,
+                3800,
+                paid_at=datetime(2026, 4, 5, 12, 0),
+                source="telegram",
+                status="accepted",
+            )
+            session.commit()
+
+            charge = next(item for item in lease.rent_charges if item.due_date == date(2026, 4, 1))
+            self.assertEqual(charge.personal_paid, 3000.0)
+            self.assertEqual(line.paid_amount, 800.0)
 
 
 if __name__ == "__main__":

@@ -22,12 +22,18 @@ def parse_command(text: str) -> tuple[str, list[str]]:
 
 def build_status_message(dashboard: dict[str, Any]) -> str:
     lines = [
-        "Статус пульта:",
-        f"• Открытых месячных отчётов: {len(dashboard.get('monthly_reports', []))}",
-        f"• Просроченная аренда: {len(dashboard.get('rent_overdue', []))}",
-        f"• Частичная аренда: {len(dashboard.get('rent_partial', []))}",
-        f"• Просроченная коммуналка: {len(dashboard.get('utility_overdue', []))}",
-        f"• Выставленная коммуналка: {len(dashboard.get('utility_issued', []))}",
+        "📊 Статус пульта",
+        f"🗂 Открытых месячных отчётов: {len(dashboard.get('monthly_reports', []))}",
+        "",
+        "💸 Аренда",
+        f"• 🔴 Просроченная аренда: {len(dashboard.get('rent_overdue', []))}",
+        f"• 🟡 Частичная аренда: {len(dashboard.get('rent_partial', []))}",
+        "",
+        "🧾 Коммуналка",
+        f"• 🔴 Просроченная коммуналка: {len(dashboard.get('utility_overdue', []))}",
+        f"• 🟡 Выставленная коммуналка: {len(dashboard.get('utility_issued', []))}",
+        "",
+        "⚠️ Контроль",
         f"• Показания давно не передавались: {len(dashboard.get('stale_readings', []))}",
         f"• Личные расходы ждут компенсации: {len(dashboard.get('pending_personal_expenses', []))}",
         f"• Подозрительные чеки: {len(dashboard.get('suspicious_receipts', []))}",
@@ -37,11 +43,11 @@ def build_status_message(dashboard: dict[str, Any]) -> str:
 
 def build_reports_message(reports: list[dict[str, Any]]) -> str:
     if not reports:
-        return "Все месячные отчёты закрыты. Редкий мирный момент."
-    lines = ["Открытые месячные отчёты:"]
+        return "✅ Все месячные отчёты закрыты. Редкий мирный момент."
+    lines = ["🗂 Открытые месячные отчёты:"]
     for report in reports:
         lines.append(
-            f"• {report['month_name']} {report['year']}: {report['label']} ({report['issue_count']} проблем)"
+            f"• ⚠️ {report['month_name']} {report['year']}: {report['label']} ({report['issue_count']} проблем)"
         )
     return "\n".join(lines)
 
@@ -49,13 +55,13 @@ def build_reports_message(reports: list[dict[str, Any]]) -> str:
 def app_keyboard(base_url: str, reports: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
     rows: list[list[dict[str, Any]]] = []
     if base_url:
-        rows.append([{"text": "Открыть пульт", "url": base_url}])
+        rows.append([{"text": "🚪 Открыть пульт", "url": base_url}])
     if reports:
         for report in reports[:3]:
             rows.append(
                 [
                     {
-                        "text": f"{report['month_name']} {report['year']}",
+                        "text": f"📄 {report['month_name']} {report['year']}",
                         "url": f"{base_url.rstrip('/')}/api/reports/monthly.xlsx?year={report['year']}&month={report['month']}",
                     }
                 ]

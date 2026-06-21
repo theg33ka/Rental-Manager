@@ -15,7 +15,7 @@ from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import sessionmaker
 
 from rental_manager.database import Base
-from rental_manager.main import apartment_month_state, build_all_debts_breakdown, build_dashboard, create_move_out_utility_lines, delete_utility_bill, expense_period_summary, owner_charge_status_label, owner_expected_ip_for_charge, panel_role_for_pin, process_move_out_notifications, provider_reading_statuses_for_month, render_message_text, rent_report, resolve_broadcast_recipients, utility_bill_for_month
+from rental_manager.main import apartment_month_state, build_all_debts_breakdown, build_dashboard, create_move_out_utility_lines, delete_utility_bill, expense_period_summary, move_out, owner_charge_status_label, owner_expected_ip_for_charge, panel_role_for_pin, process_move_out_notifications, provider_reading_statuses_for_month, render_message_text, rent_report, resolve_broadcast_recipients, utility_bill_for_month
 from rental_manager.main import apply_database_import_payload, current_database_snapshot, inspect_database_import_payload, parse_database_import_bytes
 from rental_manager.models import AppSetting, Apartment, Expense, Lease, MessageLog, Meter, MeterReading, PaymentReceipt, RentalObject, RentCharge, Tenant, UtilityBill, UtilityBillLine, UtilityService, Tariff
 from rental_manager.services.billing import (
@@ -755,6 +755,28 @@ class UtilityBillingTests(DatabaseTestCase):
             logs = session.scalars(select(MessageLog).where(MessageLog.lease_id == lease.id)).all()
 
         self.assertTrue(any(log.template_key == "message_utility_bill" for log in logs))
+
+    def test_move_out_summary_ignores_rent_debts_before_cutoff(self) -> None:
+        with self.Session() as session:
+            rental_object = RentalObject(name="Дом выезда", short_code="ДВ")
+            apartment = Apartment(name="ДВ1", sort_order=1, odn_share_percent=100, active=True, object=rental_object)
+            tenant = Tenant(full_name="Старый жилец", active=True)
+            lease = Lease(
+                apartment=apartment,
+                tenant=tenant,
+                start_date=date(2026, 1, 1),
+                payment_day=1,
+                ip_amount=10000,
+                personal_amount=2000,
+                active=True,
+            )
+            session.add_all([rental_object, apartment, tenant, lease, AppSetting(key="notification_cutoff_date", value="2026-03-01")])
+            session.flush()
+            generate_rent_charges(session, until=date(2026, 4, 10))
+
+            result = move_out(lease.id, {"end_date": "2026-04-10"}, session)
+
+        self.assertEqual(result["summary"]["rent_debt"], 24000.0)
 
     def test_all_debts_message_groups_rent_and_utility_by_month(self) -> None:
         with self.seed() as session:

@@ -29,6 +29,7 @@ class TelegramBotHelpersTests(unittest.TestCase):
         }
         text = build_status_message(dashboard)
 
+        self.assertIn("📊 Статус пульта", text)
         self.assertIn("Открытых месячных отчётов: 2", text)
         self.assertIn("Частичная аренда: 3", text)
         self.assertIn("Выставленная коммуналка: 2", text)
@@ -47,6 +48,7 @@ class TelegramBotHelpersTests(unittest.TestCase):
     def test_app_keyboard_contains_open_app_button(self) -> None:
         keyboard = app_keyboard("https://example.com", [])
 
+        self.assertEqual(keyboard["inline_keyboard"][0][0]["text"], "🚪 Открыть пульт")
         self.assertEqual(keyboard["inline_keyboard"][0][0]["url"], "https://example.com")
 
     def test_owner_commands_include_status_and_reports(self) -> None:
