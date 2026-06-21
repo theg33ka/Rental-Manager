@@ -78,7 +78,7 @@ from rental_manager.services.billing import (
     update_rent_charge_status,
     update_utility_line_status,
 )
-from rental_manager.services.hermes_client import HermesClient, HermesClientError, HermesResult
+from rental_manager.services.hermes_client import HermesClient, HermesClientError, HermesResult, YandexOpenAIClient
 from rental_manager.services.payment_allocation import (
     EPS,
     build_rent_plan,
@@ -4747,7 +4747,20 @@ def add_ai_usage(session: Session, result: HermesResult, cost_rub: float, today:
     usage.calls += 1
 
 
+def yandex_direct_ai_enabled() -> bool:
+    if not os.environ.get("YANDEX_API_KEY", "").strip():
+        return False
+    value = os.environ.get("AI_DIRECT_YANDEX", "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
 def hermes_client_for_settings(session: Session) -> HermesClient:
+    if yandex_direct_ai_enabled():
+        return YandexOpenAIClient(
+            os.environ.get("OPENAI_BASE_URL", "https://ai.api.cloud.yandex.net/v1"),
+            os.environ.get("YANDEX_API_KEY", ""),
+            yandex_folder_id(),
+        )
     return HermesClient(get_setting_value(session, "hermes_api_base_url"), get_setting_value(session, "hermes_api_key"))
 
 
@@ -4783,6 +4796,7 @@ def call_hermes_ai(
             max_tokens=max_tokens,
         )
     except HermesClientError as exc:
+        print(f"[AI] call failed role={actor_role} model={model} error={exc}", flush=True)
         session.add(
             AiActionLog(
                 conversation_id=conversation.id,

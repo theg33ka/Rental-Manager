@@ -17,6 +17,7 @@ from rental_manager.main import (
     app_base_url,
     call_hermes_ai,
     handle_telegram_message,
+    hermes_client_for_settings,
     process_telegram_update_background,
     resolve_ai_model,
     telegram_owner_chat_id,
@@ -28,7 +29,7 @@ from rental_manager.main import (
 from rental_manager.models import AiUsageDaily, Apartment, AppSetting, Lease, RentalObject, RentCharge, Tenant
 from rental_manager.services.ai_context import tenant_context_text
 from rental_manager.services.ai_policy import AI_UNAVAILABLE_TEXT, TENANT_SYSTEM_PROMPT
-from rental_manager.services.hermes_client import HermesClient, HermesClientError
+from rental_manager.services.hermes_client import HermesClient, HermesClientError, YandexOpenAIClient
 from rental_manager.services.telegram_bot import TelegramApiError, telegram_api_request
 
 
@@ -103,7 +104,9 @@ class HermesFallbackTests(AiAgentDatabaseTestCase):
             session.add(AppSetting(key="hermes_model_default", value="yandexgpt-lite"))
             session.flush()
 
-            with patch.object(HermesClient, "chat_completions", side_effect=HermesClientError("down")):
+            with patch.dict("os.environ", {"YANDEX_API_KEY": "", "AI_DIRECT_YANDEX": "0"}, clear=False), patch.object(
+                HermesClient, "chat_completions", side_effect=HermesClientError("down")
+            ):
                 answer = call_hermes_ai(
                     session,
                     chat_id=100,
@@ -116,6 +119,52 @@ class HermesFallbackTests(AiAgentDatabaseTestCase):
                 )
 
         self.assertEqual(answer, AI_UNAVAILABLE_TEXT)
+
+    def test_yandex_env_uses_direct_client(self) -> None:
+        with self.Session() as session:
+            with patch.dict(
+                "os.environ",
+                {
+                    "YANDEX_API_KEY": "test-yandex-key",
+                    "YANDEX_FOLDER_ID": "folder-123",
+                    "AI_DIRECT_YANDEX": "1",
+                },
+                clear=False,
+            ):
+                client = hermes_client_for_settings(session)
+
+        self.assertIsInstance(client, YandexOpenAIClient)
+
+
+class YandexOpenAIClientTests(unittest.TestCase):
+    def test_chat_completions_sends_yandex_headers(self) -> None:
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"model":"gpt://folder-123/yandexgpt-lite/latest","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":2}}'
+
+        with patch("rental_manager.services.hermes_client.urllib.request.urlopen", return_value=Response()) as mocked_urlopen:
+            result = YandexOpenAIClient(
+                "https://ai.api.cloud.yandex.net/v1",
+                "test-yandex-key",
+                "folder-123",
+            ).chat_completions(
+                model="gpt://folder-123/yandexgpt-lite/latest",
+                messages=[{"role": "user", "content": "test"}],
+            )
+
+        request = mocked_urlopen.call_args.args[0]
+        headers = {key.lower(): value for key, value in request.header_items()}
+        self.assertEqual(headers["authorization"], "Api-Key test-yandex-key")
+        self.assertEqual(headers["openai-project"], "folder-123")
+        self.assertEqual(result.content, "ok")
+        self.assertEqual(result.prompt_tokens, 1)
+        self.assertEqual(result.completion_tokens, 2)
 
 
 class TelegramApiRequestTests(unittest.TestCase):
