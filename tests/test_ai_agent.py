@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import urllib.error
 from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -28,6 +29,7 @@ from rental_manager.models import AiUsageDaily, Apartment, AppSetting, Lease, Re
 from rental_manager.services.ai_context import tenant_context_text
 from rental_manager.services.ai_policy import AI_UNAVAILABLE_TEXT, TENANT_SYSTEM_PROMPT
 from rental_manager.services.hermes_client import HermesClient, HermesClientError
+from rental_manager.services.telegram_bot import TelegramApiError, telegram_api_request
 
 
 class AiAgentDatabaseTestCase(unittest.TestCase):
@@ -116,6 +118,28 @@ class HermesFallbackTests(AiAgentDatabaseTestCase):
         self.assertEqual(answer, AI_UNAVAILABLE_TEXT)
 
 
+class TelegramApiRequestTests(unittest.TestCase):
+    def test_retries_transient_network_errors(self) -> None:
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"ok": true, "result": {"message_id": 1}}'
+
+        with patch("rental_manager.services.telegram_bot.time.sleep"), patch(
+            "rental_manager.services.telegram_bot.urllib.request.urlopen",
+            side_effect=[urllib.error.URLError(OSError(101, "Network is unreachable")), Response()],
+        ) as mocked_urlopen:
+            result = telegram_api_request("token", "sendMessage", {"chat_id": 1, "text": "ok"})
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(mocked_urlopen.call_count, 2)
+
+
 class TelegramAiRoutingTests(AiAgentDatabaseTestCase):
     def test_background_update_uses_own_session(self) -> None:
         session = MagicMock()
@@ -193,6 +217,25 @@ class TelegramAiRoutingTests(AiAgentDatabaseTestCase):
         self.assertEqual(mocked_api.call_args_list[0].args, ("token", "deleteWebhook", {"drop_pending_updates": True}))
         self.assertEqual(mocked_api.call_args_list[1].args[0:2], ("token", "setWebhook"))
         self.assertTrue(mocked_api.call_args_list[1].args[2]["drop_pending_updates"])
+
+    def test_set_webhook_continues_when_delete_webhook_network_fails(self) -> None:
+        with self.Session() as session:
+            session.add(AppSetting(key="telegram_bot_token", value="token"))
+            session.flush()
+
+            with patch(
+                "rental_manager.main.telegram_api_request",
+                side_effect=[
+                    TelegramApiError("Telegram API deleteWebhook request failed: network"),
+                    {"ok": True, "description": "was set"},
+                    {"ok": True},
+                ],
+            ) as mocked_api:
+                result = telegram_set_webhook({"app_base_url": "https://rent.example.com"}, session)
+
+        self.assertTrue(result["ok"])
+        self.assertIn("deleteWebhook", result["delete_warning"])
+        self.assertEqual(mocked_api.call_args_list[1].args[0:2], ("token", "setWebhook"))
 
     def test_status_command_does_not_call_ai(self) -> None:
         with self.Session() as session:
