@@ -15,7 +15,7 @@ from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import sessionmaker
 
 from rental_manager.database import Base
-from rental_manager.main import apartment_month_state, build_all_debts_breakdown, build_dashboard, create_move_out_utility_lines, delete_utility_bill, expense_period_summary, move_out, owner_charge_status_label, owner_expected_ip_for_charge, panel_role_for_pin, process_move_out_notifications, provider_reading_statuses_for_month, render_message_text, rent_report, resolve_broadcast_recipients, utility_bill_for_month
+from rental_manager.main import apartment_month_state, build_all_debts_breakdown, build_dashboard, create_manual_payment, create_move_out_utility_lines, delete_utility_bill, expense_period_summary, issue_utility_bill, month_dashboard_summary, move_out, owner_charge_status_label, owner_expected_ip_for_charge, panel_role_for_pin, process_move_out_notifications, provider_reading_statuses_for_month, render_message_text, rent_report, resolve_broadcast_recipients, utility_bill_for_month
 from rental_manager.main import apply_database_import_payload, current_database_snapshot, inspect_database_import_payload, parse_database_import_bytes
 from rental_manager.models import AppSetting, Apartment, Expense, Lease, MessageLog, Meter, MeterReading, PaymentReceipt, RentalObject, RentCharge, Tenant, UtilityBill, UtilityBillLine, UtilityService, Tariff
 from rental_manager.services.billing import (
@@ -1119,6 +1119,146 @@ class DashboardCutoffTests(DatabaseTestCase):
 
         self.assertEqual(len(dashboard["rent_overdue"]), 1)
         self.assertEqual(dashboard["rent_overdue"][0]["due_date"], "2026-01-14")
+
+
+class UtilityAdvanceTests(DatabaseTestCase):
+    def _seed_bill(self, session, total_amount: float = 1000) -> tuple[Lease, UtilityBill, UtilityBillLine]:
+        rental_object = RentalObject(name="Дом авансов", short_code="ДА")
+        apartment = Apartment(name="ДА1", sort_order=1, odn_share_percent=100, active=True, object=rental_object)
+        tenant = Tenant(full_name="Жилец с авансом", active=True)
+        lease = Lease(
+            apartment=apartment,
+            tenant=tenant,
+            start_date=date(2026, 6, 1),
+            payment_day=1,
+            ip_amount=30000,
+            personal_amount=5000,
+            active=True,
+        )
+        service = UtilityService(
+            object=rental_object,
+            kind="electricity",
+            name="Электричество",
+            provider_due_day=24,
+            resident_due_days=7,
+            active=True,
+        )
+        bill = UtilityBill(
+            service=service,
+            period_start=date(2026, 6, 1),
+            period_end=date(2026, 6, 30),
+            status="draft",
+            total_consumption=100,
+            apartment_consumption=100,
+            odn_consumption=0,
+            total_cost=total_amount,
+            average_unit_price=10,
+        )
+        line = UtilityBillLine(
+            apartment=apartment,
+            lease=lease,
+            personal_consumption=100,
+            odn_consumption=0,
+            total_amount=total_amount,
+            paid_amount=0,
+            status="draft",
+        )
+        bill.lines.append(line)
+        session.add_all([rental_object, apartment, tenant, lease, service, bill])
+        session.flush()
+        return lease, bill, line
+
+    def test_manual_utility_advance_is_applied_when_bill_is_issued(self) -> None:
+        with self.Session() as session:
+            lease, bill, line = self._seed_bill(session, total_amount=1000)
+            create_manual_payment(
+                {
+                    "lease_id": lease.id,
+                    "kind": "utility_advance",
+                    "amount": 600,
+                    "paid_at": "2026-06-10T12:00:00",
+                    "notes": "аванс за июнь",
+                },
+                session=session,
+            )
+
+            payload = issue_utility_bill(bill.id, session=session)
+            session.refresh(line)
+            receipts = session.scalars(select(PaymentReceipt).where(PaymentReceipt.lease_id == lease.id).order_by(PaymentReceipt.id)).all()
+
+        self.assertEqual(payload["applied_advances"], 600)
+        self.assertEqual(line.paid_amount, 600)
+        self.assertEqual(line.status, "partial")
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(receipts[0].channel, "utilities")
+        self.assertEqual(receipts[0].source, "utility_advance")
+        self.assertEqual(receipts[0].utility_line_id, line.id)
+
+    def test_utility_advance_keeps_leftover_balance_after_issue(self) -> None:
+        with self.Session() as session:
+            lease, bill, line = self._seed_bill(session, total_amount=1000)
+            create_manual_payment(
+                {
+                    "lease_id": lease.id,
+                    "kind": "utility_advance",
+                    "amount": 1400,
+                    "paid_at": "2026-06-10T12:00:00",
+                },
+                session=session,
+            )
+
+            payload = issue_utility_bill(bill.id, session=session)
+            session.refresh(line)
+            receipts = session.scalars(select(PaymentReceipt).where(PaymentReceipt.lease_id == lease.id).order_by(PaymentReceipt.id)).all()
+            leftover = next(receipt for receipt in receipts if receipt.channel == "utility_advance")
+            applied = next(receipt for receipt in receipts if receipt.source == "utility_advance" and receipt.utility_line_id == line.id)
+
+        self.assertEqual(payload["applied_advances"], 1000)
+        self.assertEqual(line.paid_amount, 1000)
+        self.assertEqual(line.status, "paid")
+        self.assertEqual(leftover.amount, 400)
+        self.assertEqual(applied.amount, 1000)
+
+    def test_month_summary_tracks_salary_bills_and_advances(self) -> None:
+        with self.Session() as session:
+            lease, bill, line = self._seed_bill(session, total_amount=1000)
+            create_manual_payment(
+                {
+                    "lease_id": lease.id,
+                    "kind": "utility_advance",
+                    "amount": 500,
+                    "paid_at": "2026-06-05T12:00:00",
+                },
+                session=session,
+            )
+            issue_utility_bill(bill.id, session=session)
+            charge = session.scalar(select(RentCharge).where(RentCharge.lease_id == lease.id, RentCharge.due_date == date(2026, 6, 1)))
+            if not charge:
+                charge = RentCharge(
+                    lease=lease,
+                    period_start=date(2026, 6, 1),
+                    period_end=date(2026, 6, 30),
+                    due_date=date(2026, 6, 1),
+                )
+                session.add(charge)
+            charge.ip_due = 30000
+            charge.personal_due = 5000
+            charge.ip_paid = 0
+            charge.personal_paid = 2500
+            charge.status = "partial"
+            session.commit()
+
+            summary = month_dashboard_summary(session, 2026, 6, today=date(2026, 6, 21))
+
+        self.assertEqual(summary["salary_due"], 5000)
+        self.assertEqual(summary["salary_paid"], 2500)
+        self.assertTrue(summary["utility_bills_issued"])
+        self.assertFalse(summary["utility_provider_paid"])
+        self.assertEqual(summary["bill_payment_due"], 1000)
+        self.assertEqual(summary["bill_payment_paid"], 500)
+        self.assertEqual(summary["advance_paid"], 500)
+        self.assertEqual(summary["advance_due"], 1000)
+        self.assertEqual(summary["occupied"], 1)
 
 
 
