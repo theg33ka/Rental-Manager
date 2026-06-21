@@ -20,6 +20,7 @@ from rental_manager.main import (
     telegram_owner_chat_id,
     telegram_secret,
     telegram_token,
+    telegram_webhook_info,
 )
 from rental_manager.models import AiUsageDaily, Apartment, AppSetting, Lease, RentalObject, RentCharge, Tenant
 from rental_manager.services.ai_context import tenant_context_text
@@ -134,6 +135,30 @@ class TelegramAiRoutingTests(AiAgentDatabaseTestCase):
                 self.assertEqual(telegram_token(session), "env-token")
                 self.assertEqual(telegram_owner_chat_id(session), "222")
                 self.assertEqual(telegram_secret(session), "env-secret")
+
+    def test_webhook_info_is_normalized_for_ui(self) -> None:
+        with self.Session() as session:
+            session.add(AppSetting(key="telegram_bot_token", value="token"))
+            session.add(AppSetting(key="app_base_url", value="https://rent.example.com"))
+            session.flush()
+
+            with patch(
+                "rental_manager.main.telegram_api_request",
+                return_value={
+                    "ok": True,
+                    "result": {
+                        "url": "https://rent.example.com/api/integrations/telegram/webhook",
+                        "pending_update_count": 2,
+                        "allowed_updates": ["message"],
+                    },
+                },
+            ):
+                result = telegram_webhook_info(session)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["url"], "https://rent.example.com/api/integrations/telegram/webhook")
+        self.assertTrue(result["matches_expected"])
+        self.assertEqual(result["pending_update_count"], 2)
 
     def test_status_command_does_not_call_ai(self) -> None:
         with self.Session() as session:
