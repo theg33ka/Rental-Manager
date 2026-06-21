@@ -25,7 +25,7 @@ if [ -n "${HERMES_API_KEY:-}" ]; then
   if [ -n "${DEEPSEEK_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
     export OPENAI_API_KEY="$DEEPSEEK_API_KEY"
   fi
-  HERMES_START_COMMAND="${HERMES_START_COMMAND:-hermes gateway}"
+  HERMES_START_COMMAND="${HERMES_START_COMMAND:-python scripts/run-hermes-gateway.py}"
   sh -c "$HERMES_START_COMMAND" &
 fi
 
