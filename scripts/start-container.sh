@@ -20,11 +20,17 @@ if [ -n "${HERMES_API_KEY:-}" ]; then
   if [ -n "${YANDEX_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
     export OPENAI_API_KEY="$YANDEX_API_KEY"
   fi
+  if [ -n "${YANDEX_API_KEY:-}" ]; then
+    export HERMES_INFERENCE_PROVIDER="${HERMES_INFERENCE_PROVIDER:-yandex}"
+  fi
   if [ -n "${YANDEX_FOLDER_ID:-}" ] && [ -z "${OPENAI_PROJECT:-}" ]; then
     export OPENAI_PROJECT="$YANDEX_FOLDER_ID"
   fi
   if [ -n "${DEEPSEEK_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
     export OPENAI_API_KEY="$DEEPSEEK_API_KEY"
+  fi
+  if [ -n "${DEEPSEEK_API_KEY:-}" ] && [ -z "${YANDEX_API_KEY:-}" ]; then
+    export HERMES_INFERENCE_PROVIDER="${HERMES_INFERENCE_PROVIDER:-deepseek}"
   fi
   HERMES_START_COMMAND="${HERMES_START_COMMAND:-python scripts/run-hermes-gateway.py}"
   echo "[BOOT] starting Hermes gateway api_server=${API_SERVER_HOST}:${API_SERVER_PORT}"
