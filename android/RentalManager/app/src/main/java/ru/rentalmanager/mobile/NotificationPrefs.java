@@ -22,6 +22,7 @@ final class NotificationPrefs {
     static final String KEY_SUSPICIOUS_RECEIPTS = "suspicious_receipts";
     static final String KEY_MONTHLY_REPORTS = "monthly_reports";
     static final String KEY_MANUAL_DEBTS = "manual_debts";
+    static final String KEY_PREMIUM_UI = "premium_ui_enabled";
 
     static final String MODE_LOUD = "loud";
     static final String MODE_VIBRATE = "vibrate";
@@ -87,5 +88,13 @@ final class NotificationPrefs {
 
     static String quietEnd(Context context) {
         return prefs(context).getString(KEY_QUIET_END, "08:00");
+    }
+
+    static boolean premiumUiEnabled(Context context) {
+        return prefs(context).getBoolean(KEY_PREMIUM_UI, false);
+    }
+
+    static void setPremiumUiEnabled(Context context, boolean enabled) {
+        prefs(context).edit().putBoolean(KEY_PREMIUM_UI, enabled).apply();
     }
 }

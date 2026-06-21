@@ -152,7 +152,7 @@ DEFAULT_SETTINGS = {
     "message_receipt_received": "Чек получил и сохранил. Если всё совпало, я это отмечу. Если нет, передам владельцу на ручную проверку.",
     "message_receipt_review": "Чек получил, но там есть вопросы. Я уже отправил его владельцу на проверку.",
     "message_receipt_duplicate": "Этот чек уже есть в системе. Повторно засчитывать его не буду.",
-    "message_owner_receipt_alert": "Новый чек от {tenant_name}. Квартира: {apartment}. Сумма: {amount}. Канал: {channel}. Статус: {receipt_status}. {receipt_summary}",
+    "message_owner_receipt_alert": "🧾 Новый чек от {tenant_name}\n🏠 Квартира: {apartment}\n💰 Сумма: {amount}\n📌 Канал: {channel}\n⚙️ Статус: {receipt_status}\n{receipt_summary}",
 }
 SECRET_SETTINGS = {
     "telegram_bot_token": "",
@@ -244,7 +244,7 @@ MONTH_NAMES = [
 def startup() -> None:
     init_db()
     with SessionLocal() as session:
-        ensure_schema_additions(session)
+        ensure_database_schema(session)
         ensure_performance_indexes(session)
         seeded_release = seed_release_baseline_if_empty(session)
         if not seeded_release:
@@ -280,31 +280,52 @@ def start_reminder_worker() -> None:
     thread.start()
 
 
+SCHEMA_ADDITIONS = {
+    "utility_services": [
+        ("provider_reading_due_day", "INTEGER NOT NULL DEFAULT 20"),
+        ("provider_due_day", "INTEGER NOT NULL DEFAULT 24"),
+        ("resident_due_days", "INTEGER NOT NULL DEFAULT 7"),
+    ],
+}
+
+
+def ensure_database_schema(session: Session) -> None:
+    bind = session.get_bind()
+    if bind is not None:
+        Base.metadata.create_all(bind=bind)
+    ensure_schema_additions(session)
+
+
 def ensure_schema_additions(session: Session) -> None:
     bind = session.get_bind()
     dialect = bind.dialect.name if bind else ""
 
     if dialect == "sqlite":
-        columns = {row[1] for row in session.execute(text("PRAGMA table_info(utility_services)")).all()}
-        if "provider_reading_due_day" not in columns:
-            session.execute(text("ALTER TABLE utility_services ADD COLUMN provider_reading_due_day INTEGER NOT NULL DEFAULT 20"))
-            session.commit()
+        for table_name, additions in SCHEMA_ADDITIONS.items():
+            columns = {row[1] for row in session.execute(text(f"PRAGMA table_info({table_name})")).all()}
+            for column_name, ddl in additions:
+                if column_name not in columns:
+                    session.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {ddl}"))
+        session.commit()
         return
 
-    exists = session.execute(
-        text(
-            """
-            SELECT 1
-            FROM information_schema.columns
-            WHERE table_name = 'utility_services'
-              AND column_name = 'provider_reading_due_day'
-            LIMIT 1
-            """
-        )
-    ).first()
-    if not exists:
-        session.execute(text("ALTER TABLE utility_services ADD COLUMN provider_reading_due_day INTEGER NOT NULL DEFAULT 20"))
-        session.commit()
+    for table_name, additions in SCHEMA_ADDITIONS.items():
+        for column_name, ddl in additions:
+            exists = session.execute(
+                text(
+                    """
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_name = :table_name
+                      AND column_name = :column_name
+                    LIMIT 1
+                    """
+                ),
+                {"table_name": table_name, "column_name": column_name},
+            ).first()
+            if not exists:
+                session.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {ddl}"))
+    session.commit()
 
 
 PERFORMANCE_INDEXES = [
@@ -490,6 +511,11 @@ def ensure_runtime_defaults(session: Session) -> None:
         if setting and setting.value == old_value and not (env_name and env_name in os.environ):
             setting.value = new_value
             changed = True
+    old_owner_receipt_alert = "Новый чек от {tenant_name}. Квартира: {apartment}. Сумма: {amount}. Канал: {channel}. Статус: {receipt_status}. {receipt_summary}"
+    owner_receipt_setting = session.get(AppSetting, "message_owner_receipt_alert")
+    if owner_receipt_setting and owner_receipt_setting.value == old_owner_receipt_alert:
+        owner_receipt_setting.value = DEFAULT_SETTINGS["message_owner_receipt_alert"]
+        changed = True
     if changed:
         session.flush()
 
@@ -2062,14 +2088,19 @@ def api_month_progress(year: int, month: int, session: Session = Depends(get_ses
 
 
 @app.get("/api/admin/database-export")
-def export_database(session: Session = Depends(get_session)) -> StreamingResponse:
+def export_database(session: Session = Depends(get_session)) -> Response:
+    ensure_database_schema(session)
     snapshot = current_database_snapshot(session)
     raw = json.dumps(snapshot, ensure_ascii=False, indent=2).encode("utf-8")
     filename = f"rental-manager-db-export-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
-    return StreamingResponse(
-        BytesIO(raw),
+    return Response(
+        content=raw,
         media_type="application/json; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(len(raw)),
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 
@@ -3927,6 +3958,88 @@ def recipient_mismatch_issue(channel: str, issues: list[str]) -> bool:
     return False
 
 
+def personal_rent_candidates_for_payment(session: Session, lease: Lease, paid_at: datetime, cutoff: date) -> list[RentCharge]:
+    paid_day = paid_at.date()
+    generate_rent_charges(session, until=paid_day + timedelta(days=40))
+    current_charge: RentCharge | None = None
+    candidates: list[RentCharge] = []
+    charges = session.scalars(
+        select(RentCharge)
+        .where(RentCharge.lease_id == lease.id, RentCharge.due_date >= cutoff)
+        .order_by(RentCharge.due_date.desc(), RentCharge.id.desc())
+    ).all()
+    for charge in charges:
+        personal_debt = money(max(0.0, charge.personal_due - charge.personal_paid))
+        if personal_debt <= EPS:
+            continue
+        if charge.due_date.year == paid_day.year and charge.due_date.month == paid_day.month:
+            current_charge = charge
+        elif charge.due_date <= paid_day:
+            candidates.append(charge)
+    if current_charge:
+        candidates.insert(0, current_charge)
+    return candidates
+
+
+def utility_transfer_parts(lines: list[UtilityBillLine], amount: float) -> tuple[list[tuple[str, UtilityBillLine, float]], float]:
+    remaining = money(amount)
+    parts: list[tuple[str, UtilityBillLine, float]] = []
+    for line in lines:
+        debt = money(max(0.0, line.total_amount - line.paid_amount))
+        portion = min(remaining, debt)
+        if portion <= EPS:
+            continue
+        parts.append(("utility", line, money(portion)))
+        remaining = money(remaining - portion)
+        if remaining <= EPS:
+            break
+    return parts, money(remaining)
+
+
+def build_personal_transfer_plan(
+    session: Session,
+    lease: Lease,
+    amount: float,
+    *,
+    paid_at: datetime,
+) -> tuple[list[tuple[str, RentCharge | UtilityBillLine, float]], float, str]:
+    amount = money(amount)
+    cutoff = allocation_cutoff_date(session)
+    utility_candidates = [line for line in utility_line_candidates(session, lease.id) if debt_visible_by_cutoff(line.due_date, cutoff)]
+    rent_candidates = personal_rent_candidates_for_payment(session, lease, paid_at, cutoff)
+
+    parts: list[tuple[str, RentCharge | UtilityBillLine, float]] = []
+    remaining = amount
+    if rent_candidates:
+        charge = rent_candidates[0]
+        personal_debt = money(max(0.0, charge.personal_due - charge.personal_paid))
+        rent_portion = min(remaining, personal_debt)
+        if rent_portion > EPS:
+            parts.append(("rent", charge, money(rent_portion)))
+            remaining = money(remaining - rent_portion)
+
+    if remaining > EPS:
+        utility_parts, utility_remaining = utility_transfer_parts(utility_candidates, remaining)
+        parts.extend(utility_parts)
+        if utility_parts and utility_remaining > EPS:
+            kind, line, portion = parts[-1]
+            parts[-1] = (kind, line, money(portion + utility_remaining))
+            remaining = 0.0
+        else:
+            remaining = utility_remaining
+
+    if not parts:
+        return [], amount, ""
+    kinds = {kind for kind, _item, _portion in parts}
+    if kinds == {"utility"}:
+        comment = "зачёт перевода: вся сумма ушла в коммуналку"
+    elif kinds == {"rent"}:
+        comment = "зачёт перевода: личная часть аренды"
+    else:
+        comment = "зачёт перевода: личная часть аренды, всё сверх неё ушло в коммуналку"
+    return parts, money(remaining), comment
+
+
 def create_personal_priority_receipts(
     session: Session,
     lease: Lease,
@@ -3940,36 +4053,14 @@ def create_personal_priority_receipts(
     notes: str = "",
     file_path: str = "",
 ) -> list[PaymentReceipt]:
-    receipts: list[PaymentReceipt] = []
-    remaining = money(amount)
-    cutoff = allocation_cutoff_date(session)
-    utility_candidates_now = [line for line in utility_line_candidates(session, lease.id) if debt_visible_by_cutoff(line.due_date, cutoff)]
-    generate_rent_charges(session, until=(paid_at.date() if isinstance(paid_at, datetime) else paid_at) + timedelta(days=40))
-    personal_candidates_now: list[RentCharge] = []
-    current_charge: RentCharge | None = None
-    paid_day = paid_at.date() if isinstance(paid_at, datetime) else paid_at
-    all_charges = session.scalars(
-        select(RentCharge)
-        .where(RentCharge.lease_id == lease.id, RentCharge.due_date >= cutoff)
-        .order_by(RentCharge.due_date.desc(), RentCharge.id.desc())
-    ).all()
-    for charge in all_charges:
-        personal_debt = money(max(0.0, charge.personal_due - charge.personal_paid))
-        if personal_debt <= EPS:
-            continue
-        if charge.due_date.year == paid_day.year and charge.due_date.month == paid_day.month:
-            current_charge = charge
-        elif charge.due_date <= paid_day:
-            personal_candidates_now.append(charge)
-    if current_charge:
-        personal_candidates_now.insert(0, current_charge)
+    parts, remaining, _comment = build_personal_transfer_plan(session, lease, amount, paid_at=paid_at)
+    if not parts or remaining > EPS:
+        raise ValueError("по переводу не найдено долга для зачёта")
 
-    if utility_candidates_now:
-        for line in utility_candidates_now:
-            debt = money(max(0.0, line.total_amount - line.paid_amount))
-            portion = min(remaining, debt)
-            if portion <= EPS:
-                continue
+    receipts: list[PaymentReceipt] = []
+    for kind, item, portion in parts:
+        if kind == "utility":
+            line = item
             receipts.append(
                 PaymentReceipt(
                     lease_id=lease.id,
@@ -3986,19 +4077,8 @@ def create_personal_priority_receipts(
                     notes=notes,
                 )
             )
-            remaining = money(remaining - portion)
-            if remaining <= EPS:
-                break
-        if receipts and remaining > EPS and not personal_candidates_now:
-            receipts[-1].amount = money(receipts[-1].amount + remaining)
-            remaining = 0.0
-
-    if remaining > EPS and personal_candidates_now:
-        for charge in personal_candidates_now:
-            personal_debt = money(max(0.0, charge.personal_due - charge.personal_paid))
-            portion = min(remaining, personal_debt)
-            if portion <= EPS:
-                continue
+        else:
+            charge = item
             receipts.append(
                 PaymentReceipt(
                     lease_id=lease.id,
@@ -4015,15 +4095,6 @@ def create_personal_priority_receipts(
                     notes=notes,
                 )
             )
-            remaining = money(remaining - portion)
-            if remaining <= EPS:
-                break
-        if receipts and remaining > EPS:
-            receipts[-1].amount = money(receipts[-1].amount + remaining)
-            remaining = 0.0
-
-    if not receipts:
-        raise ValueError("по переводу не найдено долга для зачёта")
 
     session.add_all(receipts)
     session.flush()
@@ -4064,26 +4135,13 @@ def apply_receipt_match(session: Session, lease: Lease, parsed: dict[str, Any]) 
             return "rejected", "review", None, issues, ""
         if issues:
             return "suspicious", "review", None, issues, ""
-        utility_candidates_now = [line for line in utility_line_candidates(session, lease.id) if debt_visible_by_cutoff(line.due_date, cutoff)]
-        if utility_candidates_now:
-            return "accepted", "utility", utility_candidates_now[0].id, [], "зачёт перевода по приоритету ушёл в коммуналку"
-        paid_day = paid_at.date() if isinstance(paid_at, datetime) else paid_at.date() if paid_at else date.today()
-        generate_rent_charges(session, until=paid_day + timedelta(days=40))
-        personal_candidates_now = []
-        for charge in session.scalars(
-            select(RentCharge)
-            .where(RentCharge.lease_id == lease.id, RentCharge.due_date >= cutoff)
-            .order_by(RentCharge.due_date.desc(), RentCharge.id.desc())
-        ).all():
-            personal_debt = money(max(0.0, charge.personal_due - charge.personal_paid))
-            if personal_debt <= EPS:
-                continue
-            if charge.due_date.year == paid_day.year and charge.due_date.month == paid_day.month:
-                personal_candidates_now = [charge, *[item for item in personal_candidates_now if item.id != charge.id]]
-            elif charge.due_date <= paid_day:
-                personal_candidates_now.append(charge)
-        if personal_candidates_now:
-            return "accepted", "rent", personal_candidates_now[0].id, [], "зачёт перевода по приоритету ушёл в перевод по номеру телефона"
+        plan_paid_at = paid_at if isinstance(paid_at, datetime) else utc_now()
+        parts, remaining, allocation_comment = build_personal_transfer_plan(session, lease, amount, paid_at=plan_paid_at)
+        if parts and remaining <= EPS:
+            kinds = {kind for kind, _item, _portion in parts}
+            first_kind, first_item, _portion = parts[0]
+            match_type = "mixed" if len(kinds) > 1 else "utility" if first_kind == "utility" else "rent"
+            return "accepted", match_type, first_item.id, [], allocation_comment
         return "suspicious", "review", None, ["по переводу не найдено долга для зачёта"], ""
 
     if recipient_mismatch_issue(channel, issues):
@@ -4617,14 +4675,14 @@ def tenant_personal_data_consent_text() -> str:
 def telegram_help_text() -> str:
     return "\n".join(
         [
-            "Команды бота:",
+            "🤖 Команды owner-бота:",
             "/start - приветствие",
             "/id - показать chat id",
-            "/status - статус пульта",
-            "/reports - открытые месячные отчёты",
-            "/requisites - показать реквизиты для оплаты",
-            "/run_reminders - прогнать напоминания",
-            "/app - открыть пульт",
+            "/status - 📊 статус пульта",
+            "/reports - 🗂 открытые месячные отчёты",
+            "/requisites - 💳 показать реквизиты для оплаты",
+            "/run_reminders - 🔔 прогнать напоминания",
+            "/app - 🚪 открыть пульт",
             "/help - подсказка",
         ]
     )
@@ -4664,7 +4722,7 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
             send_telegram_text(
                 session,
                 chat_id,
-                "Бот подключён. Можно смотреть статус, отчёты и открывать пульт с телефона.",
+                "✅ Бот подключён.\n📊 Можно смотреть статус, отчёты и открывать пульт с телефона.",
                 app_keyboard(base_url),
             )
             return
@@ -4773,12 +4831,12 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
             chat_id,
             "\n".join(
                 [
-                    "Напоминания прогнаны.",
-                    f"Отправлено: {summary['sent']}",
-                    f"Дубликаты за сегодня: {summary['skipped_duplicate']}",
-                    f"Старые долги под молчанием: {summary['skipped_legacy']}",
-                    f"Без привязки к боту: {summary['skipped_unlinked']}",
-                    f"Ошибки: {summary['failed']}",
+                    "🔔 Напоминания прогнаны.",
+                    f"✅ Отправлено: {summary['sent']}",
+                    f"🔁 Дубликаты за сегодня: {summary['skipped_duplicate']}",
+                    f"⏳ Старые долги под молчанием: {summary['skipped_legacy']}",
+                    f"🔗 Без привязки к боту: {summary['skipped_unlinked']}",
+                    f"⚠️ Ошибки: {summary['failed']}",
                 ]
             ),
             app_keyboard(base_url),
@@ -4786,7 +4844,7 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
         return
     if command == "/app":
         if is_owner:
-            send_telegram_text(session, chat_id, "Открываю пульт.", app_keyboard(base_url))
+            send_telegram_text(session, chat_id, "🚪 Открываю пульт.", app_keyboard(base_url))
         else:
             send_telegram_text(session, chat_id, "Доступ к пульту только у владельца.")
         return
@@ -5147,10 +5205,13 @@ def move_out(lease_id: int, payload: dict[str, Any], session: Session = Depends(
     if end == date.today():
         move_out_summary = process_move_out_notifications(session, end)
 
+    cutoff = configured_notification_cutoff_date(session)
     rent_debt = sum(
         max(0, charge.ip_due - charge.ip_paid) + max(0, charge.personal_due - charge.personal_paid)
         for charge in lease.rent_charges
-        if charge.period_start <= end and charge.status not in {"paid", "paid_ahead"}
+        if charge.period_start <= end
+        and charge.status not in {"paid", "paid_ahead"}
+        and debt_visible_by_cutoff(charge.due_date, cutoff)
     )
     utility_lines = session.scalars(select(UtilityBillLine).where(UtilityBillLine.lease_id == lease.id)).all()
     utility_debt = sum(max(0, line.total_amount - line.paid_amount) for line in utility_lines if line.status != "paid")

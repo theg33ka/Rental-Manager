@@ -205,6 +205,15 @@ async function downloadFile(path, fallbackFilename = "download") {
 
 window.downloadFile = downloadFile;
 
+function triggerNativeDownload(path, fallbackFilename = "download") {
+  const link = document.createElement("a");
+  link.href = path;
+  link.download = fallbackFilename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+}
+
 function toast(message) {
   const node = qs("#toast");
   node.textContent = message;
@@ -1930,8 +1939,8 @@ function renderDatabaseImportInspection(result = {}) {
 }
 
 async function exportDatabase() {
-  await downloadFile("/api/admin/database-export", "rental-manager-db-export.json");
-  toast("Экспорт базы скачан");
+  triggerNativeDownload("/api/admin/database-export", "rental-manager-db-export.json");
+  toast("Экспорт базы готовится");
 }
 
 window.exportDatabase = exportDatabase;
