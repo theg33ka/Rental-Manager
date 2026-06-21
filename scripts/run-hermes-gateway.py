@@ -4,6 +4,13 @@ import sys
 
 
 def main() -> int:
+    import os
+
+    # Telegram belongs to Rental Manager; Hermes must not attach the same bot token.
+    for name in list(os.environ):
+        if name.startswith("TELEGRAM_"):
+            os.environ.pop(name, None)
+
     # Hermes 0.17 puts site-packages/plugins before site-packages while starting
     # the gateway. That shadows the real top-level cron package with
     # plugins/cron, so gateway/run.py later cannot import cron.scheduler_provider.

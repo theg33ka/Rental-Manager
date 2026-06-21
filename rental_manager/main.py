@@ -118,6 +118,10 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.mount("/static", StaticFiles(directory=ROOT_DIR / "static"), name="static")
 
 
+def runtime_log(area: str, message: str) -> None:
+    print(f"[{area}] {message}", flush=True)
+
+
 DEFAULT_SETTINGS = {
     "color_palette": "classic",
     "app_base_url": "",
@@ -174,6 +178,10 @@ INTERNAL_SETTINGS = {
 }
 BOOLEAN_SETTINGS = {"notifications_enabled", "ai_enabled", "ai_tenant_free_text_enabled"}
 ENV_SETTING_KEYS = {
+    "app_base_url": "APP_BASE_URL",
+    "telegram_owner_chat_id": "TELEGRAM_OWNER_CHAT_ID",
+    "telegram_bot_token": "TELEGRAM_BOT_TOKEN",
+    "telegram_webhook_secret": "TELEGRAM_WEBHOOK_SECRET",
     "ai_enabled": "AI_ENABLED",
     "ai_tenant_free_text_enabled": "AI_TENANT_FREE_TEXT_ENABLED",
     "hermes_api_base_url": "HERMES_API_BASE_URL",
@@ -371,6 +379,11 @@ def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/health")
+def health() -> dict[str, str]:
+    return healthz()
+
+
 @app.get("/mobile-app.apk")
 def mobile_app_apk() -> FileResponse:
     if not MOBILE_APK_PATH.exists():
@@ -385,6 +398,7 @@ def mobile_app_apk() -> FileResponse:
 def is_public_path(path: str) -> bool:
     return path in {
         "/",
+        "/health",
         "/healthz",
         "/mobile-app.apk",
         "/api/auth/status",
@@ -926,6 +940,12 @@ def save_app_base_url_if_changed(session: Session, value: Any) -> str:
 def owner_chat_allowed(session: Session, chat_id: int | str) -> bool:
     owner_id = telegram_owner_chat_id(session)
     return bool(owner_id) and str(chat_id) == owner_id
+
+
+def owner_message_allowed(session: Session, message: dict[str, Any]) -> bool:
+    chat = message.get("chat") or {}
+    sender = message.get("from") or {}
+    return owner_chat_allowed(session, chat.get("id") or "") or owner_chat_allowed(session, sender.get("id") or "")
 
 
 def notifications_enabled(session: Session) -> bool:
@@ -4549,11 +4569,17 @@ def handle_tenant_receipt_message(session: Session, message: dict[str, Any], lin
 
 def send_telegram_text(session: Session, chat_id: int | str, text: str, keyboard: dict[str, Any] | None = None) -> dict[str, Any]:
     token = telegram_token(session)
+    runtime_log("TELEGRAM", f"send attempt chat_id={chat_id} token_configured={bool(token)} text_len={len(text or '')}")
     if not token:
+        runtime_log("TELEGRAM", f"send skipped chat_id={chat_id} reason=missing_token")
         raise HTTPException(400, "Не задан токен Telegram-бота")
     try:
-        return send_message(token, chat_id, text, reply_markup=keyboard)
+        result = send_message(token, chat_id, text, reply_markup=keyboard)
+        message_id = ((result.get("result") or {}) if isinstance(result, dict) else {}).get("message_id")
+        runtime_log("TELEGRAM", f"send ok chat_id={chat_id} message_id={message_id}")
+        return result
     except TelegramApiError as exc:
+        runtime_log("TELEGRAM", f"send failed chat_id={chat_id} error={exc}")
         raise HTTPException(400, str(exc)) from exc
 
 
@@ -4904,6 +4930,7 @@ def telegram_help_text() -> str:
 
 def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
     chat = message.get("chat") or {}
+    sender = message.get("from") or {}
     chat_id = chat.get("id")
     if not chat_id:
         return
@@ -4914,7 +4941,16 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
     base_url = app_base_url(session)
     reports = build_monthly_reports(session)
     owner_id = telegram_owner_chat_id(session)
-    is_owner = owner_chat_allowed(session, chat_id)
+    is_owner = owner_message_allowed(session, message)
+    runtime_log(
+        "TELEGRAM",
+        (
+            f"message chat_id={chat_id} from_id={sender.get('id')} chat_type={chat.get('type') or '-'} "
+            f"command={command or '-'} text_len={len(text)} "
+            f"is_owner={is_owner} owner_configured={bool(owner_id)} "
+            f"linked_lease_id={getattr(linked_lease, 'id', None)}"
+        ),
+    )
 
     if message.get("contact") and not is_owner:
         if linked_lease:
@@ -5078,13 +5114,19 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
 
 @app.post("/api/integrations/telegram/webhook")
 async def telegram_webhook(request: Request, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, bool]:
+    update_types = ",".join(sorted(key for key in payload if key != "update_id")) or "-"
+    runtime_log("TELEGRAM", f"webhook update_id={payload.get('update_id')} types={update_types}")
     secret = telegram_secret(session)
     if secret:
         provided = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
         if provided != secret:
+            runtime_log("TELEGRAM", f"webhook rejected update_id={payload.get('update_id')} reason=bad_secret")
             raise HTTPException(403, "Неверный Telegram secret token")
-    if payload.get("message"):
-        handle_telegram_message(session, payload["message"])
+    message = payload.get("message") or payload.get("edited_message") or payload.get("business_message")
+    if message:
+        handle_telegram_message(session, message)
+    else:
+        runtime_log("TELEGRAM", f"webhook ignored update_id={payload.get('update_id')} reason=no_message")
     session.commit()
     return {"ok": True}
 
@@ -5099,7 +5141,7 @@ def telegram_set_webhook(payload: dict[str, Any] | None = None, session: Session
         raise HTTPException(400, "Для webhook нужен публичный HTTPS URL в app_base_url")
     payload: dict[str, Any] = {
         "url": f"{base_url}/api/integrations/telegram/webhook",
-        "allowed_updates": ["message"],
+        "allowed_updates": ["message", "edited_message", "business_message"],
     }
     secret = telegram_secret(session)
     if secret:

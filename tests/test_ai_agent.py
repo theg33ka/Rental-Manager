@@ -10,7 +10,17 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from rental_manager.database import Base
-from rental_manager.main import ai_budget_exceeded, ai_estimated_cost_rub, call_hermes_ai, handle_telegram_message, resolve_ai_model
+from rental_manager.main import (
+    ai_budget_exceeded,
+    ai_estimated_cost_rub,
+    app_base_url,
+    call_hermes_ai,
+    handle_telegram_message,
+    resolve_ai_model,
+    telegram_owner_chat_id,
+    telegram_secret,
+    telegram_token,
+)
 from rental_manager.models import AiUsageDaily, Apartment, AppSetting, Lease, RentalObject, RentCharge, Tenant
 from rental_manager.services.ai_context import tenant_context_text
 from rental_manager.services.ai_policy import AI_UNAVAILABLE_TEXT, TENANT_SYSTEM_PROMPT
@@ -104,6 +114,27 @@ class HermesFallbackTests(AiAgentDatabaseTestCase):
 
 
 class TelegramAiRoutingTests(AiAgentDatabaseTestCase):
+    def test_telegram_settings_can_come_from_env(self) -> None:
+        with self.Session() as session:
+            session.add(AppSetting(key="telegram_bot_token", value="db-token"))
+            session.add(AppSetting(key="telegram_owner_chat_id", value="111"))
+            session.flush()
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "APP_BASE_URL": "https://example.com/",
+                    "TELEGRAM_BOT_TOKEN": "env-token",
+                    "TELEGRAM_OWNER_CHAT_ID": "222",
+                    "TELEGRAM_WEBHOOK_SECRET": "env-secret",
+                },
+                clear=False,
+            ):
+                self.assertEqual(app_base_url(session), "https://example.com")
+                self.assertEqual(telegram_token(session), "env-token")
+                self.assertEqual(telegram_owner_chat_id(session), "222")
+                self.assertEqual(telegram_secret(session), "env-secret")
+
     def test_status_command_does_not_call_ai(self) -> None:
         with self.Session() as session:
             session.add(AppSetting(key="telegram_owner_chat_id", value="999"))
@@ -113,6 +144,18 @@ class TelegramAiRoutingTests(AiAgentDatabaseTestCase):
 
         mocked_ai.assert_not_called()
         mocked_send.assert_called()
+
+    def test_owner_command_can_be_authorized_by_sender_id(self) -> None:
+        with self.Session() as session:
+            session.add(AppSetting(key="telegram_owner_chat_id", value="999"))
+            session.flush()
+            with patch("rental_manager.main.build_status_message", return_value="OWNER STATUS"), patch("rental_manager.main.send_telegram_text") as mocked_send:
+                handle_telegram_message(
+                    session,
+                    {"chat": {"id": -1001, "type": "group"}, "from": {"id": 999}, "text": "/status"},
+                )
+
+        mocked_send.assert_called_with(session, -1001, "OWNER STATUS", None)
 
 
 if __name__ == "__main__":
