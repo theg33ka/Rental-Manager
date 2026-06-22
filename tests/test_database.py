@@ -7,7 +7,9 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from rental_manager.database import (
     DEFAULT_DATABASE_URL,
+    DEFAULT_POSTGRES_POOL_RECYCLE_SECONDS,
     configured_database_url,
+    database_engine_options,
     ensure_postgres_database_exists,
     normalize_database_url,
     postgres_database_bootstrap_target,
@@ -50,6 +52,22 @@ class DatabaseUrlTests(unittest.TestCase):
 
     def test_uses_sqlite_default_without_env(self) -> None:
         self.assertEqual(configured_database_url({}), DEFAULT_DATABASE_URL)
+
+    def test_sqlite_engine_options_keep_thread_check_disabled(self) -> None:
+        self.assertEqual(
+            database_engine_options("sqlite:///data/app.db"),
+            {"future": True, "connect_args": {"check_same_thread": False}},
+        )
+
+    def test_postgres_engine_options_ping_connections_before_checkout(self) -> None:
+        self.assertEqual(
+            database_engine_options("postgresql+psycopg://user:pass@host:5432/rent_db"),
+            {
+                "future": True,
+                "pool_pre_ping": True,
+                "pool_recycle": DEFAULT_POSTGRES_POOL_RECYCLE_SECONDS,
+            },
+        )
 
     def test_postgres_bootstrap_target_uses_maintenance_database(self) -> None:
         target = postgres_database_bootstrap_target("postgresql+psycopg://user:pass@host:5432/rent_db")

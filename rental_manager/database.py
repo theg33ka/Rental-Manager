@@ -15,6 +15,7 @@ DATA_DIR = ROOT_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
 DEFAULT_DATABASE_URL = f"sqlite:///{(DATA_DIR / 'rental_manager.db').as_posix()}"
 DEFAULT_POSTGRES_MAINTENANCE_DATABASE = "postgres"
+DEFAULT_POSTGRES_POOL_RECYCLE_SECONDS = 1800
 
 
 def normalize_database_url(url: str) -> str:
@@ -79,10 +80,19 @@ def ensure_postgres_database_exists(database_url: str) -> None:
         maintenance_engine.dispose()
 
 
+def database_engine_options(database_url: str) -> dict[str, object]:
+    options: dict[str, object] = {"future": True}
+    if database_url.startswith("sqlite"):
+        options["connect_args"] = {"check_same_thread": False}
+    elif make_url(database_url).get_backend_name() == "postgresql":
+        options["pool_pre_ping"] = True
+        options["pool_recycle"] = DEFAULT_POSTGRES_POOL_RECYCLE_SECONDS
+    return options
+
+
 DATABASE_URL = normalize_database_url(configured_database_url())
 
-connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-engine = create_engine(DATABASE_URL, connect_args=connect_args, future=True)
+engine = create_engine(DATABASE_URL, **database_engine_options(DATABASE_URL))
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 
 
