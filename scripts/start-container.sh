@@ -4,7 +4,17 @@ set -eu
 PORT_VALUE="${PORT:-10000}"
 echo "[BOOT] rental-manager starting port=${PORT_VALUE} db_configured=$([ -n "${RENTAL_MANAGER_DATABASE_URL:-}${DATABASE_URL:-}" ] && echo true || echo false) telegram_env_token_configured=$([ -n "${TELEGRAM_BOT_TOKEN:-}" ] && echo true || echo false)"
 
-if [ -n "${HERMES_API_KEY:-}" ]; then
+AI_DIRECT_YANDEX_VALUE="$(printf '%s' "${AI_DIRECT_YANDEX:-1}" | tr '[:upper:]' '[:lower:]')"
+DIRECT_YANDEX_ENABLED=false
+if [ -n "${YANDEX_API_KEY:-}" ]; then
+  case "$AI_DIRECT_YANDEX_VALUE" in
+    0|false|no|off) DIRECT_YANDEX_ENABLED=false ;;
+    *) DIRECT_YANDEX_ENABLED=true ;;
+  esac
+fi
+echo "[BOOT] ai_direct_yandex=${DIRECT_YANDEX_ENABLED} yandex_key_configured=$([ -n "${YANDEX_API_KEY:-}" ] && echo true || echo false)"
+
+if [ -n "${HERMES_API_KEY:-}" ] && [ "$DIRECT_YANDEX_ENABLED" != "true" ]; then
   export API_SERVER_ENABLED="${API_SERVER_ENABLED:-true}"
   export API_SERVER_KEY="${API_SERVER_KEY:-$HERMES_API_KEY}"
   export API_SERVER_HOST="${API_SERVER_HOST:-127.0.0.1}"
@@ -35,6 +45,8 @@ if [ -n "${HERMES_API_KEY:-}" ]; then
   HERMES_START_COMMAND="${HERMES_START_COMMAND:-python scripts/run-hermes-gateway.py}"
   echo "[BOOT] starting Hermes gateway api_server=${API_SERVER_HOST}:${API_SERVER_PORT}"
   sh -c "$HERMES_START_COMMAND" &
+elif [ "$DIRECT_YANDEX_ENABLED" = "true" ]; then
+  echo "[BOOT] skipping Hermes gateway; direct Yandex AI client is enabled"
 fi
 
 echo "[BOOT] starting uvicorn"

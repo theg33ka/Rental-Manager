@@ -113,6 +113,9 @@ from rental_manager.services.telegram_bot import (
 )
 
 
+APP_BUILD_MARKER = "ai-direct-yandex-2026-06-22"
+
+
 app = FastAPI(title="Rental Manager", version="0.1.0")
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.mount("/static", StaticFiles(directory=ROOT_DIR / "static"), name="static")
@@ -255,6 +258,12 @@ MONTH_NAMES = [
 
 @app.on_event("startup")
 def startup() -> None:
+    runtime_log(
+        "BOOT",
+        "app_marker="
+        f"{APP_BUILD_MARKER} ai_direct_yandex={str(yandex_direct_ai_enabled()).lower()} "
+        f"yandex_key_configured={str(bool(os.environ.get('YANDEX_API_KEY', '').strip())).lower()}",
+    )
     init_db()
     with SessionLocal() as session:
         ensure_database_schema(session)
@@ -379,7 +388,11 @@ def index() -> FileResponse:
 
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "build_marker": APP_BUILD_MARKER,
+        "ai_direct_yandex": str(yandex_direct_ai_enabled()).lower(),
+    }
 
 
 @app.get("/health")
