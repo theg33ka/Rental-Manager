@@ -15,7 +15,7 @@ from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import sessionmaker
 
 from rental_manager.database import Base
-from rental_manager.main import apartment_month_state, build_all_debts_breakdown, build_dashboard, create_manual_payment, create_move_out_utility_lines, delete_utility_bill, expense_period_summary, issue_utility_bill, month_dashboard_summary, move_out, owner_charge_status_label, owner_expected_ip_for_charge, panel_role_for_pin, process_move_out_notifications, provider_reading_statuses_for_month, render_message_text, rent_report, resolve_broadcast_recipients, utility_bill_for_month
+from rental_manager.main import apartment_month_state, build_all_debts_breakdown, build_dashboard, create_manual_payment, create_move_out_utility_lines, delete_utility_bill, expense_period_summary, issue_utility_bill, month_dashboard_summary, move_out, owner_charge_status_label, owner_expected_ip_for_charge, panel_role_for_pin, process_move_out_notifications, provider_reading_statuses_for_month, render_message_text, rent_report, resolve_broadcast_recipients, transfer_lease, utility_bill_for_month
 from rental_manager.main import apply_database_import_payload, current_database_snapshot, inspect_database_import_payload, parse_database_import_bytes
 from rental_manager.models import AppSetting, Apartment, Expense, Lease, MessageLog, Meter, MeterReading, PaymentReceipt, RentalObject, RentCharge, Tenant, UtilityBill, UtilityBillLine, UtilityService, Tariff
 from rental_manager.services.billing import (
@@ -777,6 +777,125 @@ class UtilityBillingTests(DatabaseTestCase):
             result = move_out(lease.id, {"end_date": "2026-04-10"}, session)
 
         self.assertEqual(result["summary"]["rent_debt"], 24000.0)
+
+    def test_transfer_lease_moves_tenant_to_new_apartment_and_updates_rent(self) -> None:
+        with self.Session() as session:
+            rental_object = RentalObject(name="Дом переезда", short_code="ДП")
+            old_apartment = Apartment(name="ДП1", sort_order=1, odn_share_percent=50, active=True, object=rental_object)
+            new_apartment = Apartment(name="ДП2", sort_order=2, odn_share_percent=50, active=True, object=rental_object)
+            tenant = Tenant(full_name="Переезжающий жилец", active=True)
+            lease = Lease(
+                apartment=old_apartment,
+                tenant=tenant,
+                start_date=date(2026, 4, 1),
+                payment_day=1,
+                ip_amount=10000,
+                personal_amount=2000,
+                active=True,
+            )
+            session.add_all([rental_object, old_apartment, new_apartment, tenant, lease])
+            session.flush()
+            generate_rent_charges(session, until=date(2026, 5, 31))
+
+            result = transfer_lease(
+                lease.id,
+                {
+                    "apartment_id": new_apartment.id,
+                    "transfer_date": "2026-04-10",
+                    "ip_amount": 15000,
+                    "personal_amount": 2500,
+                },
+                session,
+            )
+
+            old_lease = session.get(Lease, result["old_lease"]["id"])
+            new_lease = session.get(Lease, result["new_lease"]["id"])
+            summary = {
+                "old_end_date": old_lease.end_date,
+                "old_active": old_lease.active,
+                "new_tenant_id": new_lease.tenant_id,
+                "old_tenant_id": old_lease.tenant_id,
+                "new_apartment_id": new_lease.apartment_id,
+                "target_apartment_id": new_apartment.id,
+                "new_start_date": new_lease.start_date,
+                "new_ip_amount": new_lease.ip_amount,
+                "new_personal_amount": new_lease.personal_amount,
+                "tenant_active": new_lease.tenant.active,
+                "old_has_future_charge": any(charge.due_date > old_lease.end_date for charge in old_lease.rent_charges),
+            }
+
+        self.assertEqual(summary["old_end_date"], date(2026, 4, 9))
+        self.assertFalse(summary["old_active"])
+        self.assertEqual(summary["new_tenant_id"], summary["old_tenant_id"])
+        self.assertEqual(summary["new_apartment_id"], summary["target_apartment_id"])
+        self.assertEqual(summary["new_start_date"], date(2026, 4, 10))
+        self.assertEqual(summary["new_ip_amount"], 15000.0)
+        self.assertEqual(summary["new_personal_amount"], 2500.0)
+        self.assertTrue(summary["tenant_active"])
+        self.assertFalse(summary["old_has_future_charge"])
+
+    def test_transfer_lease_splits_utility_bill_between_old_and_new_apartment(self) -> None:
+        with self.Session() as session:
+            rental_object = RentalObject(name="Дом коммунального переезда", short_code="ДКП")
+            old_apartment = Apartment(name="ДКП1", sort_order=1, odn_share_percent=50, active=True, object=rental_object)
+            new_apartment = Apartment(name="ДКП2", sort_order=2, odn_share_percent=50, active=True, object=rental_object)
+            tenant = Tenant(full_name="Жилец с коммунальным переездом", active=True)
+            lease = Lease(
+                apartment=old_apartment,
+                tenant=tenant,
+                start_date=date(2026, 4, 1),
+                payment_day=1,
+                ip_amount=10000,
+                personal_amount=2000,
+                active=True,
+            )
+            service = UtilityService(
+                object=rental_object,
+                kind="electricity",
+                name="Электричество",
+                provider_due_day=24,
+                resident_due_days=7,
+                active=True,
+            )
+            session.add_all([rental_object, old_apartment, new_apartment, tenant, lease, service])
+            session.flush()
+            session.add(Tariff(service_id=service.id, starts_on=date(2026, 1, 1), tiers_json=json.dumps([{"limit": None, "price": 1.0}])))
+            object_meter = Meter(service_id=service.id, object_id=rental_object.id, scope="object", name="Общий", active=True)
+            old_meter = Meter(service_id=service.id, object_id=rental_object.id, apartment_id=old_apartment.id, scope="apartment", name="ДКП1", active=True)
+            new_meter = Meter(service_id=service.id, object_id=rental_object.id, apartment_id=new_apartment.id, scope="apartment", name="ДКП2", active=True)
+            session.add_all([object_meter, old_meter, new_meter])
+            session.flush()
+            session.add_all(
+                [
+                    MeterReading(meter_id=object_meter.id, reading_date=date(2026, 4, 1), value=0),
+                    MeterReading(meter_id=object_meter.id, reading_date=date(2026, 4, 10), value=90),
+                    MeterReading(meter_id=object_meter.id, reading_date=date(2026, 5, 1), value=300),
+                    MeterReading(meter_id=old_meter.id, reading_date=date(2026, 4, 1), value=0),
+                    MeterReading(meter_id=old_meter.id, reading_date=date(2026, 4, 10), value=90),
+                    MeterReading(meter_id=old_meter.id, reading_date=date(2026, 5, 1), value=90),
+                    MeterReading(meter_id=new_meter.id, reading_date=date(2026, 4, 1), value=0),
+                    MeterReading(meter_id=new_meter.id, reading_date=date(2026, 4, 10), value=0),
+                    MeterReading(meter_id=new_meter.id, reading_date=date(2026, 5, 1), value=210),
+                ]
+            )
+            session.flush()
+
+            result = transfer_lease(lease.id, {"apartment_id": new_apartment.id, "transfer_date": "2026-04-10"}, session)
+            new_lease_id = result["new_lease"]["id"]
+            old_lease_id = result["old_lease"]["id"]
+            old_apartment_id = old_apartment.id
+            new_apartment_id = new_apartment.id
+            bill, warnings = calculate_utility_bill(session, service.id, date(2026, 4, 1), date(2026, 5, 1), allow_estimate=True)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(bill.lines), 2)
+        by_lease = {line.lease_id: line for line in bill.lines}
+        self.assertEqual(by_lease[old_lease_id].apartment_id, old_apartment_id)
+        self.assertEqual(by_lease[old_lease_id].note, "01.04.2026 -> 10.04.2026 (9 дн.)")
+        self.assertEqual(by_lease[old_lease_id].total_amount, 90.0)
+        self.assertEqual(by_lease[new_lease_id].apartment_id, new_apartment_id)
+        self.assertEqual(by_lease[new_lease_id].note, "10.04.2026 -> 01.05.2026 (21 дн.)")
+        self.assertEqual(by_lease[new_lease_id].total_amount, 210.0)
 
     def test_all_debts_message_groups_rent_and_utility_by_month(self) -> None:
         with self.seed() as session:

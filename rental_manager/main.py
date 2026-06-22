@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from rental_manager.database import Base, DATABASE_URL, ROOT_DIR, SessionLocal, get_session, init_db
@@ -5533,6 +5533,127 @@ def update_lease(lease_id: int, payload: dict[str, Any], session: Session = Depe
     session.commit()
     session.refresh(lease)
     return serialize_lease(lease, session)
+
+
+def prune_unpaid_rent_charges_after(session: Session, lease: Lease, end_date: date) -> None:
+    for charge in list(lease.rent_charges):
+        if charge.due_date <= end_date:
+            continue
+        accepted_receipts = [receipt for receipt in charge.receipts if receipt.status == "accepted"]
+        if accepted_receipts:
+            continue
+        session.delete(charge)
+
+
+def copy_lease_automation(session: Session, source_lease_id: int, target_lease_id: int) -> None:
+    for template_key in LEASE_AUTOMATION_TEMPLATES:
+        cadence = get_lease_cadence(session, source_lease_id, template_key)
+        if cadence:
+            set_lease_cadence(session, target_lease_id, template_key, cadence)
+
+
+@app.post("/api/leases/{lease_id}/transfer")
+def transfer_lease(lease_id: int, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
+    lease = session.get(Lease, lease_id)
+    if not lease:
+        raise HTTPException(404, "Договор не найден")
+    if not lease.active:
+        raise HTTPException(400, "Переезд можно оформить только для активного договора")
+
+    target_apartment_id = int(payload.get("apartment_id") or payload.get("target_apartment_id") or 0)
+    if not target_apartment_id:
+        raise HTTPException(400, "Выберите квартиру для переезда")
+    target_apartment = session.get(Apartment, target_apartment_id)
+    if not target_apartment:
+        raise HTTPException(404, "Квартира для переезда не найдена")
+    if not target_apartment.active:
+        raise HTTPException(400, "Квартира выключена из учёта")
+    if target_apartment.id == lease.apartment_id:
+        raise HTTPException(400, "Новая квартира совпадает с текущей. Переезд на месте — это уже философия, не операция.")
+
+    transfer_date = parse_date(payload.get("transfer_date") or payload.get("move_date"), date.today())
+    if transfer_date <= lease.start_date:
+        raise HTTPException(400, "Дата переезда должна быть позже даты текущего заезда")
+    old_end = transfer_date - timedelta(days=1)
+
+    target_conflict = next(
+        (
+            item
+            for item in session.scalars(
+                select(Lease)
+                .where(
+                    Lease.apartment_id == target_apartment.id,
+                    Lease.active.is_(True),
+                    Lease.id != lease.id,
+                    or_(Lease.end_date.is_(None), Lease.end_date >= transfer_date),
+                )
+                .order_by(Lease.start_date)
+            ).all()
+            if not lease_ignored(session, item.id)
+        ),
+        None,
+    )
+    if target_conflict:
+        raise HTTPException(400, "В выбранной квартире есть активный жилец на дату переезда")
+
+    existing_transfer = session.scalar(
+        select(Lease)
+        .where(
+            Lease.tenant_id == lease.tenant_id,
+            Lease.apartment_id == target_apartment.id,
+            Lease.start_date == transfer_date,
+        )
+        .limit(1)
+    )
+    if existing_transfer:
+        raise HTTPException(400, "Переезд на эту дату уже оформлен")
+
+    ip_amount = float(payload.get("ip_amount") if payload.get("ip_amount") not in {None, ""} else lease.ip_amount or 0)
+    personal_amount = float(payload.get("personal_amount") if payload.get("personal_amount") not in {None, ""} else lease.personal_amount or 0)
+    if ip_amount < 0 or personal_amount < 0:
+        raise HTTPException(400, "Стоимость аренды не может быть отрицательной")
+
+    generate_rent_charges(session, until=old_end)
+    old_notes = [lease.notes or "", f"Переезд в {target_apartment.name} с {transfer_date:%d.%m.%Y}."]
+    lease.end_date = old_end
+    lease.active = old_end >= date.today()
+    lease.notes = "\n".join(part for part in old_notes if part).strip()
+    prune_unpaid_rent_charges_after(session, lease, old_end)
+
+    new_lease = Lease(
+        apartment_id=target_apartment.id,
+        tenant_id=lease.tenant_id,
+        start_date=transfer_date,
+        payment_day=lease.payment_day,
+        ip_amount=money(ip_amount),
+        personal_amount=money(personal_amount),
+        deposit_amount=lease.deposit_amount,
+        deposit_location=lease.deposit_location,
+        deposit_terms=lease.deposit_terms,
+        notes=f"Переезд из {lease.apartment.name} с {transfer_date:%d.%m.%Y}.",
+        active=True,
+    )
+    session.add(new_lease)
+    session.flush()
+    copy_lease_automation(session, lease.id, new_lease.id)
+    if lease_ignored(session, lease.id):
+        set_lease_ignored(session, new_lease.id, True)
+    lease.tenant.active = True
+    generate_rent_charges(session)
+    session.commit()
+    session.refresh(lease)
+    session.refresh(new_lease)
+    return {
+        "old_lease": serialize_lease(lease, session),
+        "new_lease": serialize_lease(new_lease, session),
+        "summary": {
+            "transfer_date": transfer_date.isoformat(),
+            "old_end_date": old_end.isoformat(),
+            "target_apartment": target_apartment.name,
+            "ip_amount": money(ip_amount),
+            "personal_amount": money(personal_amount),
+        },
+    }
 
 
 @app.delete("/api/leases/{lease_id}")
