@@ -796,6 +796,20 @@ class UtilityBillingTests(DatabaseTestCase):
             session.add_all([rental_object, old_apartment, new_apartment, tenant, lease])
             session.flush()
             generate_rent_charges(session, until=date(2026, 5, 31))
+            future_charge = session.scalar(
+                select(RentCharge).where(RentCharge.lease_id == lease.id, RentCharge.due_date == date(2026, 5, 1))
+            )
+            self.assertIsNotNone(future_charge)
+            assert future_charge is not None
+            session.add(
+                MessageLog(
+                    lease_id=lease.id,
+                    rent_charge_id=future_charge.id,
+                    template_key="message_rent_due",
+                    text="already sent",
+                )
+            )
+            session.flush()
 
             result = transfer_lease(
                 lease.id,
@@ -822,6 +836,14 @@ class UtilityBillingTests(DatabaseTestCase):
                 "new_personal_amount": new_lease.personal_amount,
                 "tenant_active": new_lease.tenant.active,
                 "old_has_future_charge": any(charge.due_date > old_lease.end_date for charge in old_lease.rent_charges),
+                "old_future_charges_deleted": session.scalar(
+                    select(RentCharge.id).where(
+                        RentCharge.lease_id == old_lease.id,
+                        RentCharge.due_date > old_lease.end_date,
+                    )
+                )
+                is None,
+                "message_log_detached": session.scalar(select(MessageLog).where(MessageLog.text == "already sent")).rent_charge_id is None,
             }
 
         self.assertEqual(summary["old_end_date"], date(2026, 4, 9))
@@ -833,6 +855,8 @@ class UtilityBillingTests(DatabaseTestCase):
         self.assertEqual(summary["new_personal_amount"], 2500.5)
         self.assertTrue(summary["tenant_active"])
         self.assertFalse(summary["old_has_future_charge"])
+        self.assertTrue(summary["old_future_charges_deleted"])
+        self.assertTrue(summary["message_log_detached"])
 
     def test_transfer_lease_splits_utility_bill_between_old_and_new_apartment(self) -> None:
         with self.Session() as session:

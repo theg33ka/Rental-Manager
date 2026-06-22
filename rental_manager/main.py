@@ -5534,12 +5534,22 @@ def update_lease(lease_id: int, payload: dict[str, Any], session: Session = Depe
 
 
 def prune_unpaid_rent_charges_after(session: Session, lease: Lease, end_date: date) -> None:
-    for charge in list(lease.rent_charges):
-        if charge.due_date <= end_date:
-            continue
+    charges = session.scalars(
+        select(RentCharge)
+        .where(
+            RentCharge.lease_id == lease.id,
+            RentCharge.due_date > end_date,
+        )
+        .order_by(RentCharge.due_date, RentCharge.id)
+    ).all()
+    for charge in charges:
         accepted_receipts = [receipt for receipt in charge.receipts if receipt.status == "accepted"]
         if accepted_receipts:
             continue
+        for receipt in charge.receipts:
+            receipt.rent_charge_id = None
+        for log in session.scalars(select(MessageLog).where(MessageLog.rent_charge_id == charge.id)).all():
+            log.rent_charge_id = None
         session.delete(charge)
 
 
