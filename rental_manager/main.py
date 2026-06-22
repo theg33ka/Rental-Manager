@@ -1989,8 +1989,6 @@ def logout_panel(request: Request, response: Response, session: Session = Depend
 
 
 def build_bootstrap_payload(request: Request, session: Session) -> dict[str, Any]:
-    generate_rent_charges(session)
-    session.commit()
     role = getattr(request.state, "panel_role", None) or panel_role_from_request(request, session)
     settings_payload = get_settings(session) if role == "owner" else public_settings(session)
     dashboard_payload = build_dashboard(session)
@@ -5552,6 +5550,28 @@ def copy_lease_automation(session: Session, source_lease_id: int, target_lease_i
             set_lease_cadence(session, target_lease_id, template_key, cadence)
 
 
+def parse_transfer_apartment_id(payload: dict[str, Any]) -> int:
+    raw = payload.get("apartment_id") or payload.get("target_apartment_id") or 0
+    try:
+        return int(raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, "Выберите квартиру для переезда") from exc
+
+
+def parse_transfer_money(payload: dict[str, Any], key: str, fallback: float) -> float:
+    raw = payload.get(key)
+    if raw in {None, ""}:
+        return money(fallback)
+    normalized = str(raw).replace("\u00a0", "").replace(" ", "").replace(",", ".").strip()
+    try:
+        value = float(normalized)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, "Стоимость аренды должна быть числом") from exc
+    if value < 0:
+        raise HTTPException(400, "Стоимость аренды не может быть отрицательной")
+    return money(value)
+
+
 @app.post("/api/leases/{lease_id}/transfer")
 def transfer_lease(lease_id: int, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
     lease = session.get(Lease, lease_id)
@@ -5560,7 +5580,7 @@ def transfer_lease(lease_id: int, payload: dict[str, Any], session: Session = De
     if not lease.active:
         raise HTTPException(400, "Переезд можно оформить только для активного договора")
 
-    target_apartment_id = int(payload.get("apartment_id") or payload.get("target_apartment_id") or 0)
+    target_apartment_id = parse_transfer_apartment_id(payload)
     if not target_apartment_id:
         raise HTTPException(400, "Выберите квартиру для переезда")
     target_apartment = session.get(Apartment, target_apartment_id)
@@ -5571,7 +5591,10 @@ def transfer_lease(lease_id: int, payload: dict[str, Any], session: Session = De
     if target_apartment.id == lease.apartment_id:
         raise HTTPException(400, "Новая квартира совпадает с текущей. Переезд на месте — это уже философия, не операция.")
 
-    transfer_date = parse_date(payload.get("transfer_date") or payload.get("move_date"), date.today())
+    try:
+        transfer_date = parse_date(payload.get("transfer_date") or payload.get("move_date"), date.today())
+    except ValueError as exc:
+        raise HTTPException(400, "Дата переезда должна быть в формате ГГГГ-ММ-ДД") from exc
     if transfer_date <= lease.start_date:
         raise HTTPException(400, "Дата переезда должна быть позже даты текущего заезда")
     old_end = transfer_date - timedelta(days=1)
@@ -5608,10 +5631,8 @@ def transfer_lease(lease_id: int, payload: dict[str, Any], session: Session = De
     if existing_transfer:
         raise HTTPException(400, "Переезд на эту дату уже оформлен")
 
-    ip_amount = float(payload.get("ip_amount") if payload.get("ip_amount") not in {None, ""} else lease.ip_amount or 0)
-    personal_amount = float(payload.get("personal_amount") if payload.get("personal_amount") not in {None, ""} else lease.personal_amount or 0)
-    if ip_amount < 0 or personal_amount < 0:
-        raise HTTPException(400, "Стоимость аренды не может быть отрицательной")
+    ip_amount = parse_transfer_money(payload, "ip_amount", float(lease.ip_amount or 0))
+    personal_amount = parse_transfer_money(payload, "personal_amount", float(lease.personal_amount or 0))
 
     generate_rent_charges(session, until=old_end)
     old_notes = [lease.notes or "", f"Переезд в {target_apartment.name} с {transfer_date:%d.%m.%Y}."]
