@@ -2820,7 +2820,7 @@ async function moveOut(id) {
 function moneyPromptValue(value) {
   const raw = String(value ?? "").trim();
   if (!raw) return null;
-  const parsed = Number(raw.replace(",", "."));
+  const parsed = Number(raw.replaceAll("\u00a0", "").replaceAll(" ", "").replace(",", "."));
   return Number.isFinite(parsed) ? parsed : null;
 }
 

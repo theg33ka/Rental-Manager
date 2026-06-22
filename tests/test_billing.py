@@ -802,8 +802,8 @@ class UtilityBillingTests(DatabaseTestCase):
                 {
                     "apartment_id": new_apartment.id,
                     "transfer_date": "2026-04-10",
-                    "ip_amount": 15000,
-                    "personal_amount": 2500,
+                    "ip_amount": "15 000",
+                    "personal_amount": "2 500,50",
                 },
                 session,
             )
@@ -830,7 +830,7 @@ class UtilityBillingTests(DatabaseTestCase):
         self.assertEqual(summary["new_apartment_id"], summary["target_apartment_id"])
         self.assertEqual(summary["new_start_date"], date(2026, 4, 10))
         self.assertEqual(summary["new_ip_amount"], 15000.0)
-        self.assertEqual(summary["new_personal_amount"], 2500.0)
+        self.assertEqual(summary["new_personal_amount"], 2500.5)
         self.assertTrue(summary["tenant_active"])
         self.assertFalse(summary["old_has_future_charge"])
 
