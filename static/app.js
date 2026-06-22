@@ -1570,6 +1570,7 @@ function renderLeases() {
         <button class="mini" onclick="startLeaseEdit(${lease.id})">Ред.</button>
         <button class="mini" onclick="openManualDebt(${lease.id})">Др. долги</button>
         <label class="checkbox-inline mini-checkbox"><input type="checkbox" ${lease.ignored ? "checked" : ""} onchange="toggleLeaseIgnored(${lease.id}, this.checked)" /> игнор</label>
+        ${lease.active ? `<button class="mini" onclick="transferLease(${lease.id})">Переезд</button>` : ""}
         ${lease.active ? `<button class="mini danger-soft" onclick="moveOut(${lease.id})">Выезд</button>` : ""}
         <button class="mini danger-soft" onclick="deleteLease(${lease.id})">Удалить</button>
       </td>
@@ -2813,6 +2814,60 @@ async function moveOut(id) {
   const result = await api(`/api/leases/${id}/move-out`, { method: "POST", body: JSON.stringify({ end_date: endDate }) });
   const s = result.summary;
   alert(`Выезд оформлен.\nПолных месяцев: ${s.full_months_lived}\nПоследний оплаченный день: ${formatDate(s.last_paid_day)}\nДолг аренда: ${money(s.rent_debt)}\nДолг коммуналка: ${money(s.utility_debt)}\nЗалог: ${money(s.deposit_amount)}\nУсловия: ${s.deposit_terms || "нет"}`);
+  await loadAll();
+}
+
+function moneyPromptValue(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  const parsed = Number(raw.replace(",", "."));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+async function transferLease(id) {
+  const lease = state.bootstrap.leases.find((item) => Number(item.id) === Number(id));
+  if (!lease) return;
+  const transferDate = prompt("Дата переезда", today());
+  if (!transferDate) return;
+
+  const targets = activeApartments()
+    .filter((apartment) => Number(apartment.id) !== Number(lease.apartment_id) && !apartment.active_lease_id)
+    .sort(compareApartmentRefs);
+  if (!targets.length) {
+    alert("Нет свободных активных квартир для переезда.");
+    return;
+  }
+  const targetText = targets.map((apartment, index) => `${index + 1}. ${apartment.object_name}, ${apartment.name}`).join("\n");
+  const selectedIndexRaw = prompt(`Куда переезжает жилец?\n${targetText}`);
+  if (!selectedIndexRaw) return;
+  const selectedIndex = Number(selectedIndexRaw);
+  const target = targets[selectedIndex - 1];
+  if (!target) {
+    alert("Не понял номер квартиры. Нумерация скучная, зато честная.");
+    return;
+  }
+
+  const ipRaw = prompt("Новый платёж на ИП. Оставь текущее значение, если не меняется.", lease.ip_amount || 0);
+  if (ipRaw === null) return;
+  const personalRaw = prompt("Новый личный перевод. Оставь текущее значение, если не меняется.", lease.personal_amount || 0);
+  if (personalRaw === null) return;
+  const ipAmount = moneyPromptValue(ipRaw) ?? Number(lease.ip_amount || 0);
+  const personalAmount = moneyPromptValue(personalRaw) ?? Number(lease.personal_amount || 0);
+  if (ipAmount < 0 || personalAmount < 0) {
+    alert("Стоимость аренды не может быть отрицательной.");
+    return;
+  }
+
+  const result = await api(`/api/leases/${id}/transfer`, {
+    method: "POST",
+    body: JSON.stringify({
+      apartment_id: target.id,
+      transfer_date: transferDate,
+      ip_amount: ipAmount,
+      personal_amount: personalAmount,
+    }),
+  });
+  toast(`Переезд оформлен: ${result.old_lease.apartment} → ${result.new_lease.apartment}`);
   await loadAll();
 }
 
