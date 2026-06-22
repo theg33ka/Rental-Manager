@@ -4741,6 +4741,16 @@ def log_ai_message(
     return message
 
 
+def increment_ai_usage_row(usage: AiUsageDaily, result: HermesResult, cost_rub: float) -> None:
+    prompt_tokens = int(result.prompt_tokens or 0)
+    completion_tokens = int(result.completion_tokens or 0)
+    usage.prompt_tokens = int(usage.prompt_tokens or 0) + prompt_tokens
+    usage.completion_tokens = int(usage.completion_tokens or 0) + completion_tokens
+    usage.total_tokens = int(usage.total_tokens or 0) + prompt_tokens + completion_tokens
+    usage.cost_rub = money(float(usage.cost_rub or 0) + cost_rub)
+    usage.calls = int(usage.calls or 0) + 1
+
+
 def add_ai_usage(session: Session, result: HermesResult, cost_rub: float, today: date | None = None) -> None:
     usage_date = today or date.today()
     usage = session.scalar(
@@ -4753,11 +4763,7 @@ def add_ai_usage(session: Session, result: HermesResult, cost_rub: float, today:
     if not usage:
         usage = AiUsageDaily(usage_date=usage_date, provider="hermes", model=result.model)
         session.add(usage)
-    usage.prompt_tokens += int(result.prompt_tokens or 0)
-    usage.completion_tokens += int(result.completion_tokens or 0)
-    usage.total_tokens += int(result.prompt_tokens or 0) + int(result.completion_tokens or 0)
-    usage.cost_rub = money(float(usage.cost_rub or 0) + cost_rub)
-    usage.calls += 1
+    increment_ai_usage_row(usage, result, cost_rub)
 
 
 def yandex_direct_ai_enabled() -> bool:

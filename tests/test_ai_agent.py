@@ -18,6 +18,7 @@ from rental_manager.main import (
     call_hermes_ai,
     handle_telegram_message,
     hermes_client_for_settings,
+    increment_ai_usage_row,
     process_telegram_update_background,
     resolve_ai_model,
     telegram_owner_chat_id,
@@ -29,7 +30,7 @@ from rental_manager.main import (
 from rental_manager.models import AiUsageDaily, Apartment, AppSetting, Lease, RentalObject, RentCharge, Tenant
 from rental_manager.services.ai_context import tenant_context_text
 from rental_manager.services.ai_policy import AI_UNAVAILABLE_TEXT, TENANT_SYSTEM_PROMPT
-from rental_manager.services.hermes_client import HermesClient, HermesClientError, YandexOpenAIClient
+from rental_manager.services.hermes_client import HermesClient, HermesClientError, HermesResult, YandexOpenAIClient
 from rental_manager.services.telegram_bot import TelegramApiError, telegram_api_request
 
 
@@ -85,6 +86,26 @@ class AiBudgetTests(AiAgentDatabaseTestCase):
             session.flush()
 
             self.assertTrue(ai_budget_exceeded(session))
+
+    def test_add_ai_usage_treats_null_counters_as_zero(self) -> None:
+        usage = AiUsageDaily(usage_date=date.today(), provider="hermes", model="yandexgpt-lite")
+        usage.prompt_tokens = None
+        usage.completion_tokens = None
+        usage.total_tokens = None
+        usage.cost_rub = None
+        usage.calls = None
+
+        increment_ai_usage_row(
+            usage,
+            HermesResult(content="ok", model="yandexgpt-lite", prompt_tokens=10, completion_tokens=5),
+            0.12,
+        )
+
+        self.assertEqual(usage.prompt_tokens, 10)
+        self.assertEqual(usage.completion_tokens, 5)
+        self.assertEqual(usage.total_tokens, 15)
+        self.assertEqual(usage.cost_rub, 0.12)
+        self.assertEqual(usage.calls, 1)
 
 
 class AiModelTests(unittest.TestCase):
