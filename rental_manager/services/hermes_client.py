@@ -81,3 +81,44 @@ class HermesClient:
             raise HermesClientError(f"Hermes API request failed: {exc}") from exc
         except json.JSONDecodeError as exc:
             raise HermesClientError("Hermes returned invalid JSON") from exc
+
+
+class YandexOpenAIClient(HermesClient):
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        folder_id: str = "",
+        timeout_seconds: int = 20,
+    ) -> None:
+        super().__init__(base_url, api_key, timeout_seconds)
+        self.folder_id = (folder_id or "").strip()
+
+    def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.api_key:
+            raise HermesClientError("Yandex API key is empty")
+
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json; charset=utf-8",
+            "Authorization": f"Api-Key {self.api_key}",
+        }
+        if self.folder_id:
+            headers["OpenAI-Project"] = self.folder_id
+
+        request = urllib.request.Request(
+            f"{self.base_url}{path}",
+            data=data,
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise HermesClientError(f"Yandex AI API failed: HTTP {exc.code}: {body[:500]}") from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise HermesClientError(f"Yandex AI API request failed: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            raise HermesClientError("Yandex AI returned invalid JSON") from exc

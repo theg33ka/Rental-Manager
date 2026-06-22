@@ -78,7 +78,7 @@ from rental_manager.services.billing import (
     update_rent_charge_status,
     update_utility_line_status,
 )
-from rental_manager.services.hermes_client import HermesClient, HermesClientError, HermesResult
+from rental_manager.services.hermes_client import HermesClient, HermesClientError, HermesResult, YandexOpenAIClient
 from rental_manager.services.payment_allocation import (
     EPS,
     build_rent_plan,
@@ -111,6 +111,9 @@ from rental_manager.services.telegram_bot import (
     telegram_file_info,
     telegram_api_request,
 )
+
+
+APP_BUILD_MARKER = "ai-direct-yandex-2026-06-22"
 
 
 app = FastAPI(title="Rental Manager", version="0.1.0")
@@ -169,6 +172,7 @@ ALL_SETTINGS = {**DEFAULT_SETTINGS, **SECRET_SETTINGS}
 INTERNAL_SETTINGS = {
     "telegram_tenant_links": "{}",
     "telegram_consent_chat_ids": "[]",
+    "processed_telegram_update_ids": "[]",
     "ignored_lease_ids": "[]",
     "accepted_monthly_reports": "[]",
     "notified_monthly_reports": "[]",
@@ -202,6 +206,8 @@ UTILITY_ADVANCE_CHANNEL = "utility_advance"
 UTILITY_ADVANCE_SOURCE = "utility_advance"
 REMINDER_WORKER_STARTED = False
 REMINDER_WORKER_INTERVAL_SECONDS = 900
+TELEGRAM_PROCESSED_UPDATE_LIMIT = 500
+TELEGRAM_UPDATE_LOCK = threading.Lock()
 LOCAL_TZ = ZoneInfo("Asia/Novosibirsk")
 DEFAULT_FALLBACK_KEYS = {
     "ip_recipient_name",
@@ -252,6 +258,12 @@ MONTH_NAMES = [
 
 @app.on_event("startup")
 def startup() -> None:
+    runtime_log(
+        "BOOT",
+        "app_marker="
+        f"{APP_BUILD_MARKER} ai_direct_yandex={str(yandex_direct_ai_enabled()).lower()} "
+        f"yandex_key_configured={str(bool(os.environ.get('YANDEX_API_KEY', '').strip())).lower()}",
+    )
     init_db()
     with SessionLocal() as session:
         ensure_database_schema(session)
@@ -376,7 +388,11 @@ def index() -> FileResponse:
 
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "build_marker": APP_BUILD_MARKER,
+        "ai_direct_yandex": str(yandex_direct_ai_enabled()).lower(),
+    }
 
 
 @app.get("/health")
@@ -556,8 +572,8 @@ def get_setting_value(session: Session, key: str) -> str:
 def get_internal_json(session: Session, key: str, fallback: Any) -> Any:
     raw = get_setting_value(session, key)
     try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
+        return json.loads(str(raw))
+    except (TypeError, json.JSONDecodeError):
         return fallback
 
 
@@ -569,6 +585,19 @@ def set_internal_json(session: Session, key: str, value: Any) -> None:
         setting = AppSetting(key=key)
         session.add(setting)
     setting.value = json.dumps(value, ensure_ascii=False)
+
+
+def mark_telegram_update_seen(session: Session, update_id: Any) -> bool:
+    if update_id in {None, ""}:
+        return True
+    key = str(update_id)
+    raw_items = get_internal_json(session, "processed_telegram_update_ids", [])
+    items = [str(item) for item in raw_items if str(item).strip()] if isinstance(raw_items, list) else []
+    if key in items:
+        return False
+    items.append(key)
+    set_internal_json(session, "processed_telegram_update_ids", items[-TELEGRAM_PROCESSED_UPDATE_LIMIT:])
+    return True
 
 
 def get_settings(session: Session) -> dict[str, str | bool]:
@@ -4731,7 +4760,20 @@ def add_ai_usage(session: Session, result: HermesResult, cost_rub: float, today:
     usage.calls += 1
 
 
+def yandex_direct_ai_enabled() -> bool:
+    if not os.environ.get("YANDEX_API_KEY", "").strip():
+        return False
+    value = os.environ.get("AI_DIRECT_YANDEX", "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
 def hermes_client_for_settings(session: Session) -> HermesClient:
+    if yandex_direct_ai_enabled():
+        return YandexOpenAIClient(
+            os.environ.get("OPENAI_BASE_URL", "https://ai.api.cloud.yandex.net/v1"),
+            os.environ.get("YANDEX_API_KEY", ""),
+            yandex_folder_id(),
+        )
     return HermesClient(get_setting_value(session, "hermes_api_base_url"), get_setting_value(session, "hermes_api_key"))
 
 
@@ -4767,6 +4809,7 @@ def call_hermes_ai(
             max_tokens=max_tokens,
         )
     except HermesClientError as exc:
+        print(f"[AI] call failed role={actor_role} model={model} error={exc}", flush=True)
         session.add(
             AiActionLog(
                 conversation_id=conversation.id,
@@ -5120,6 +5163,12 @@ def process_telegram_update_background(payload: dict[str, Any]) -> None:
             runtime_log("TELEGRAM", f"webhook ignored update_id={update_id} reason=no_message")
             return
         with SessionLocal() as session:
+            with TELEGRAM_UPDATE_LOCK:
+                if not mark_telegram_update_seen(session, update_id):
+                    session.commit()
+                    runtime_log("TELEGRAM", f"webhook duplicate skipped update_id={update_id}")
+                    return
+                session.commit()
             handle_telegram_message(session, message)
             session.commit()
     except Exception as exc:
