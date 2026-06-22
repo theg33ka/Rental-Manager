@@ -160,6 +160,7 @@ class YandexOpenAIClientTests(unittest.TestCase):
 
         request = mocked_urlopen.call_args.args[0]
         headers = {key.lower(): value for key, value in request.header_items()}
+        self.assertEqual(request.full_url, "https://ai.api.cloud.yandex.net/v1/chat/completions")
         self.assertEqual(headers["authorization"], "Api-Key test-yandex-key")
         self.assertEqual(headers["openai-project"], "folder-123")
         self.assertEqual(result.content, "ok")

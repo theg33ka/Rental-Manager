@@ -98,6 +98,10 @@ class YandexOpenAIClient(HermesClient):
         if not self.api_key:
             raise HermesClientError("Yandex API key is empty")
 
+        normalized_path = path
+        if self.base_url.endswith("/v1") and normalized_path.startswith("/v1/"):
+            normalized_path = normalized_path[3:]
+
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers = {
             "Content-Type": "application/json; charset=utf-8",
@@ -107,7 +111,7 @@ class YandexOpenAIClient(HermesClient):
             headers["OpenAI-Project"] = self.folder_id
 
         request = urllib.request.Request(
-            f"{self.base_url}{path}",
+            f"{self.base_url}{normalized_path}",
             data=data,
             headers=headers,
             method="POST",
