@@ -455,7 +455,8 @@ public class MainActivity extends Activity {
         CheckBox premium = checkbox("Новый мобильный интерфейс");
         premium.setChecked(premiumUiEnabled());
         form.addView(premium);
-        form.addView(secondaryButton("Настройки сервера", v -> showServerSettingsDialog()), new LinearLayout.LayoutParams(-1, dp(46)));
+        form.addView(secondaryButton("Сменить хост приложения", v -> showHostDialog()), new LinearLayout.LayoutParams(-1, dp(46)));
+        form.addView(secondaryButton("Публичный URL и Telegram", v -> showServerSettingsDialog()), new LinearLayout.LayoutParams(-1, dp(46)));
         form.addView(secondaryButton("Экспорт базы", v -> download("/api/admin/database-export", "rental-manager-db.json")), new LinearLayout.LayoutParams(-1, dp(46)));
         form.addView(secondaryButton("Обновить приложение", v -> download("/mobile-app.apk", "rental-manager-mobile.apk")), new LinearLayout.LayoutParams(-1, dp(46)));
         form.addView(secondaryButton("Push-уведомления", v -> startActivity(new Intent(this, NotificationSettingsActivity.class))), new LinearLayout.LayoutParams(-1, dp(46)));
@@ -1992,6 +1993,7 @@ public class MainActivity extends Activity {
         ownerChat.setText(settings.optString("telegram_owner_chat_id"));
         cutoff.setText(settings.optString("notification_cutoff_date"));
         enabled.setChecked(settings.optBoolean("notifications_enabled"));
+        form.addView(label("Это публичный URL для ссылок в Telegram. Хост приложения меняется в пункте «Сменить хост приложения».", 12, muted, false));
         form.addView(field("Публичный URL", appUrl));
         form.addView(field("ID чата владельца", ownerChat));
         form.addView(field("Игнорировать долги до", cutoff));
@@ -2254,10 +2256,15 @@ public class MainActivity extends Activity {
         input.setText(api.baseUrl());
         new AlertDialog.Builder(this)
             .setTitle("Адрес сервера")
-            .setMessage("Это адрес FastAPI-деплоя. После миграции меняется здесь, а APK остаётся тот же.")
+            .setMessage("Это адрес API для приложения. Например: https://menedzer-arendy-g33ka.waw0.amvera.tech. Путь /api дописывать не нужно.")
             .setView(input)
             .setPositiveButton("Сохранить", (dialog, which) -> {
-                NotificationPrefs.setBaseUrl(this, input.getText().toString());
+                String oldUrl = api.baseUrl();
+                String newUrl = NotificationPrefs.normalizeBaseUrl(input.getText().toString());
+                NotificationPrefs.setBaseUrl(this, newUrl);
+                if (!oldUrl.equals(newUrl)) {
+                    NotificationPrefs.prefs(this).edit().remove(ApiClient.KEY_SESSION_COOKIE).apply();
+                }
                 invalidateAllCaches();
                 screenSubtitle.setText(api.baseUrl());
                 checkServerConnection(true);
@@ -2302,6 +2309,8 @@ public class MainActivity extends Activity {
                     if (ex.statusCode == 401 || ex.statusCode == 403) {
                         setConnectionStatus(false, "нужен PIN");
                         showLogin();
+                    } else if (ex.statusCode <= 0) {
+                        setConnectionStatus(false, "не API");
                     } else {
                         setConnectionStatus(false, "ошибка " + ex.statusCode);
                     }
