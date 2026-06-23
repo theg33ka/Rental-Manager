@@ -40,11 +40,11 @@ final class ApiClient {
     }
 
     JSONObject getJson(String path) throws Exception {
-        return request("GET", path, null);
+        return parseJsonObject(requestText("GET", path, null));
     }
 
     JSONArray getArray(String path) throws Exception {
-        return new JSONArray(requestText("GET", path, null));
+        return parseJsonArray(requestText("GET", path, null));
     }
 
     JSONObject postJson(String path, JSONObject body) throws Exception {
@@ -77,10 +77,41 @@ final class ApiClient {
 
     private JSONObject request(String method, String path, JSONObject body) throws Exception {
         String response = requestText(method, path, body);
-        if (response == null || response.trim().isEmpty()) {
-            return new JSONObject();
+        return parseJsonObject(response);
+    }
+
+    private JSONObject parseJsonObject(String response) throws ApiException {
+        String text = response == null ? "" : response.trim();
+        if (text.isEmpty()) return new JSONObject();
+        if (looksLikeHtml(text)) throw htmlResponseException();
+        try {
+            return new JSONObject(text);
+        } catch (Exception ex) {
+            throw invalidJsonException();
         }
-        return new JSONObject(response);
+    }
+
+    private JSONArray parseJsonArray(String response) throws ApiException {
+        String text = response == null ? "" : response.trim();
+        if (looksLikeHtml(text)) throw htmlResponseException();
+        try {
+            return new JSONArray(text);
+        } catch (Exception ex) {
+            throw invalidJsonException();
+        }
+    }
+
+    private boolean looksLikeHtml(String text) {
+        String lower = text.toLowerCase();
+        return lower.startsWith("<!doctype html") || lower.startsWith("<html") || lower.contains("<body");
+    }
+
+    private ApiException htmlResponseException() {
+        return new ApiException(0, "Сервер вернул HTML вместо API JSON. Проверьте, что в поле хоста указан адрес сервера без /api и без пути.");
+    }
+
+    private ApiException invalidJsonException() {
+        return new ApiException(0, "Сервер ответил не JSON. Проверьте адрес хоста и доступность API.");
     }
 
     private String requestText(String method, String path, JSONObject body) throws Exception {
