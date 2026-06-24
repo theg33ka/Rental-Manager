@@ -96,6 +96,12 @@ from rental_manager.services.billing import (
 )
 from rental_manager.services.hermes_client import HermesClient, HermesClientError, HermesResult
 from rental_manager.services.hermes_tools import build_owner_read_tools_context
+from rental_manager.services.owner_operations import (
+    OWNER_OPERATION_SPECS,
+    owner_operation_label,
+    owner_operation_preview,
+    validate_owner_operation,
+)
 from rental_manager.services.payment_allocation import (
     EPS,
     build_rent_plan,
@@ -132,7 +138,7 @@ from rental_manager.services.telegram_bot import (
 )
 
 
-APP_BUILD_MARKER = "hermes-provider-tools-2026-06-24"
+APP_BUILD_MARKER = "owner-operations-confirmation-2026-06-24"
 
 
 app = FastAPI(title="Rental Manager", version="0.1.0")
@@ -5482,11 +5488,33 @@ def owner_request_allows_actions(text: str, *, audit_deep: bool = False) -> bool
     if owner_request_is_debt_details(lowered):
         return True
     explicit_action = re.search(
-        r"\b(отправ|напиш|создай|оформ|выдай|установ|перенес|добав|начисл|подготов|сделай|выполни|запусти|предложи)\w*",
+        r"\b(отправ|уведом|напиш|создай|оформ|выдай|дай|предостав|отсроч|установ|перенес|"
+        r"добав|начисл|подготов|сделай|выполни|запусти|предложи)\w*",
         lowered,
     )
     recommendation = re.search(r"\b(что\s+делать|как\s+решить|предложи\s+решени|кого\s+пнуть)\b", lowered)
     return bool(explicit_action or recommendation)
+
+
+def owner_request_explicitly_requests_action(text: str) -> bool:
+    lowered = (text or "").lower()
+    return bool(
+        re.search(
+            r"\b(отправ|уведом|напиш|создай|оформ|выдай|дай|предостав|отсроч|установ|перенес|добав|начисл|подготов|сделай|"
+            r"выполни|запусти|удали|измени|обнови|зачти|прими|отметь|сохрани|рассчитай|"
+            r"выстав|компенсир|засели|переведи|скрой|игнорир)\w*",
+            lowered,
+        )
+    )
+
+
+def owner_text_confirmation_decision(text: str) -> str:
+    normalized = re.sub(r"[.!?,\s]+", " ", (text or "").strip().lower()).strip()
+    if normalized in {"да", "ок", "окей", "подтверждаю", "подтвердить", "согласен", "выполняй", "делай"}:
+        return "confirm"
+    if normalized in {"нет", "отмена", "отклоняю", "отклонить", "не надо", "не делай"}:
+        return "reject"
+    return ""
 
 
 def tenant_message_without_name(lease: Lease, text: str) -> str:
@@ -5817,12 +5845,132 @@ def require_agent_lease(session: Session, payload: dict[str, Any]) -> Lease:
     return lease
 
 
+def owner_operation_target(
+    session: Session,
+    arguments: dict[str, Any],
+) -> tuple[Lease | None, str]:
+    entity_fields: list[tuple[str, type[Any], str]] = [
+        ("lease_id", Lease, "договор"),
+        ("charge_id", RentCharge, "начисление"),
+        ("apartment_id", Apartment, "квартира"),
+        ("object_id", RentalObject, "объект"),
+        ("service_id", UtilityService, "коммунальная услуга"),
+        ("meter_id", Meter, "счётчик"),
+        ("bill_id", UtilityBill, "коммунальный счёт"),
+        ("line_id", UtilityBillLine, "строка коммунального счёта"),
+        ("debt_id", ManualDebt, "ручной долг"),
+        ("receipt_id", PaymentReceipt, "платёж"),
+        ("expense_id", Expense, "расход"),
+    ]
+    resolved: dict[str, Any] = {}
+    for field, model, label in entity_fields:
+        raw_id = arguments.get(field)
+        if raw_id in {None, ""}:
+            continue
+        try:
+            entity_id = int(raw_id)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, f"Некорректный идентификатор: {field}") from exc
+        entity = session.get(model, entity_id)
+        if entity is None:
+            raise HTTPException(404, f"Не найден {label} с id={entity_id}")
+        arguments[field] = entity_id
+        resolved[field] = entity
+
+    lease = resolved.get("lease_id")
+    charge = resolved.get("charge_id")
+    line = resolved.get("line_id")
+    debt = resolved.get("debt_id")
+    receipt = resolved.get("receipt_id")
+    if lease is None and charge is not None:
+        lease = charge.lease
+    if lease is None and line is not None and line.lease_id:
+        lease = session.get(Lease, line.lease_id)
+    if lease is None and debt is not None:
+        lease = debt.lease
+    if lease is None and receipt is not None and receipt.lease_id:
+        lease = session.get(Lease, receipt.lease_id)
+
+    if lease is not None:
+        return lease, f"{lease.apartment.object.name}, {lease.apartment.name}, {lease.tenant.full_name} (lease_id={lease.id})"
+    apartment = resolved.get("apartment_id")
+    if apartment is not None:
+        return None, f"{apartment.object.name}, {apartment.name} (apartment_id={apartment.id})"
+    rental_object = resolved.get("object_id")
+    if rental_object is not None:
+        return None, f"{rental_object.name} (object_id={rental_object.id})"
+    service = resolved.get("service_id")
+    if service is not None:
+        return None, f"{service.object.name}, {service.name} (service_id={service.id})"
+    meter = resolved.get("meter_id")
+    if meter is not None:
+        return None, f"{meter.service.object.name}, {meter.service.name}, {meter.name} (meter_id={meter.id})"
+    bill = resolved.get("bill_id")
+    if bill is not None:
+        return None, (
+            f"{bill.service.object.name}, {bill.service.name}, "
+            f"{bill.period_start:%d.%m.%Y}–{bill.period_end:%d.%m.%Y} (bill_id={bill.id})"
+        )
+    expense = resolved.get("expense_id")
+    if expense is not None:
+        return None, f"расход {expense.category} на {money_text(expense.amount)} (expense_id={expense.id})"
+    return None, ""
+
+
 def normalize_agent_action(
     session: Session,
     action: dict[str, Any],
-) -> tuple[Lease, str, dict[str, Any], str]:
+) -> tuple[Lease | None, str, dict[str, Any], str]:
     action_type = str(action.get("type") or "").strip()
     payload = dict(action.get("payload") or {})
+    if action_type == "owner_operation":
+        operation = str(payload.get("operation") or "").strip()
+        raw_arguments = payload.get("arguments")
+        if not isinstance(raw_arguments, dict):
+            raise HTTPException(400, "Для owner_operation нужен объект arguments")
+        try:
+            payload = validate_owner_operation(operation, raw_arguments)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        action_type = operation
+    elif action_type in {"defer_rent", "move_out", "create_manual_debt", "send_tenant_message"}:
+        try:
+            payload = validate_owner_operation(action_type, payload)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    else:
+        raise HTTPException(400, "Агент предложил неподдерживаемое действие")
+
+    if action_type not in OWNER_OPERATION_SPECS:
+        raise HTTPException(400, "Агент предложил неподдерживаемую операцию")
+
+    if action_type not in {"defer_rent", "move_out", "create_manual_debt", "send_tenant_message"}:
+        lease, target = owner_operation_target(session, payload)
+        if action_type == "update_lease":
+            if lease is None:
+                raise HTTPException(404, "Договор для изменения не найден")
+            payload = {
+                "lease_id": lease.id,
+                "apartment_id": payload.get("apartment_id", lease.apartment_id),
+                "start_date": payload.get("start_date", lease.start_date.isoformat()),
+                "payment_day": payload.get("payment_day", lease.payment_day),
+                "ip_amount": payload.get("ip_amount", lease.ip_amount),
+                "personal_amount": payload.get("personal_amount", lease.personal_amount),
+                "deposit_amount": payload.get("deposit_amount", lease.deposit_amount),
+                "deposit_location": payload.get("deposit_location", lease.deposit_location),
+                "deposit_terms": payload.get("deposit_terms", lease.deposit_terms),
+                "notes": payload.get("notes", lease.notes),
+                "full_name": payload.get("full_name", lease.tenant.full_name),
+                "phone": payload.get("phone", lease.tenant.phone),
+                "telegram": payload.get("telegram", lease.tenant.telegram),
+                "whatsapp": payload.get("whatsapp", lease.tenant.whatsapp),
+                **({"end_date": payload["end_date"]} if "end_date" in payload else {}),
+                **({"tenant_notes": payload["tenant_notes"]} if "tenant_notes" in payload else {}),
+                **({"ignored": payload["ignored"]} if "ignored" in payload else {}),
+            }
+        preview = owner_operation_preview(action_type, payload, target)
+        return lease, action_type, payload, preview
+
     lease = require_agent_lease(session, payload)
     place = f"{lease.apartment.object.name}, {lease.apartment.name}, {lease.tenant.full_name}"
 
@@ -5909,12 +6057,16 @@ def normalize_agent_action(
         title = str(payload.get("title") or "Ручной долг").strip()[:180]
         normalized = {
             "lease_id": lease.id,
-            "kind": "other",
+            "kind": str(payload.get("kind") or "other"),
+            "channel": str(payload.get("channel") or ""),
             "title": title,
             "amount": amount,
             "due_date": due.isoformat(),
             "notes": str(payload.get("note") or action.get("reason") or "").strip()[:1500],
         }
+        for field in ("period_start", "period_end"):
+            if payload.get(field):
+                normalized[field] = parse_agent_date(payload.get(field), field).isoformat()
         preview = (
             f"Предлагаю создать ручной долг\n"
             f"Жилец: {place}\n"
@@ -5953,7 +6105,7 @@ def create_agent_action_proposal(
     pending = session.scalars(
         select(AgentActionProposal)
         .where(
-            AgentActionProposal.lease_id == lease.id,
+            AgentActionProposal.lease_id == (lease.id if lease else None),
             AgentActionProposal.action_type == action_type,
             AgentActionProposal.status == "pending",
         )
@@ -5978,7 +6130,7 @@ def create_agent_action_proposal(
         ttl_hours = 48
     proposal = AgentActionProposal(
         conversation_id=conversation.id,
-        lease_id=lease.id,
+        lease_id=lease.id if lease else None,
         action_type=action_type,
         status="pending",
         payload_json=payload_json,
@@ -5992,7 +6144,7 @@ def create_agent_action_proposal(
     session.add(
         AiActionLog(
             conversation_id=conversation.id,
-            lease_id=lease.id,
+            lease_id=lease.id if lease else None,
             actor_role="agent",
             action_type=action_type,
             status="pending",
@@ -6301,11 +6453,12 @@ def handle_owner_ai_message(session: Session, chat_id: int | str, text: str, *, 
     debt_details = owner_debt_details_text(session, dashboard, user_text) if owner_request_is_debt_details(user_text) else ""
 
     allows_actions = owner_request_allows_actions(user_text, audit_deep=audit_deep)
+    explicitly_requests_action = owner_request_explicitly_requests_action(user_text)
     if captured_preferences and not allows_actions:
         answer = "Принял. " + " ".join(captured_preferences)
         log_ai_message(session, conversation, "user", user_text)
         log_ai_message(session, conversation, "assistant", answer)
-        send_telegram_text(session, chat_id, answer, app_keyboard(app_base_url(session)))
+        send_telegram_text(session, chat_id, answer)
         return True
 
     model_key = "hermes_model_audit" if audit_deep else "hermes_model_default"
@@ -6332,26 +6485,138 @@ def handle_owner_ai_message(session: Session, chat_id: int | str, text: str, *, 
         scope_type="owner",
         scope_id="owner",
     )
-    send_telegram_text(
-        session,
-        chat_id,
-        debt_details or envelope.reply or "Подготовил предложения действий. Проверь карточки ниже.",
-        app_keyboard(app_base_url(session)),
-    )
     actions = envelope.actions if allows_actions else []
     if envelope.actions and not allows_actions:
         runtime_log("AGENT", f"suppressed {len(envelope.actions)} unsolicited actions chat_id={chat_id}")
+    proposals: list[AgentActionProposal] = []
+    proposal_errors: list[str] = []
     for action in actions:
         try:
-            create_agent_action_proposal(session, conversation, chat_id, action)
+            proposals.append(create_agent_action_proposal(session, conversation, chat_id, action))
         except HTTPException as exc:
-            send_telegram_text(
-                session,
-                chat_id,
-                f"Не создал предложение действия: {exc.detail}. Данные не менялись.",
-                app_keyboard(app_base_url(session)),
-            )
+            proposal_errors.append(str(exc.detail))
+
+    if debt_details:
+        send_telegram_text(session, chat_id, debt_details)
+    elif not explicitly_requests_action:
+        send_telegram_text(session, chat_id, envelope.reply or AI_UNAVAILABLE_TEXT)
+    elif not proposals:
+        detail = f" Причина: {'; '.join(proposal_errors)}." if proposal_errors else ""
+        send_telegram_text(
+            session,
+            chat_id,
+            "Действие не подготовлено: backend не получил проверяемых параметров. "
+            f"Ничего не изменено и никому ничего не отправлено.{detail}",
+        )
+    elif proposal_errors:
+        send_telegram_text(
+            session,
+            chat_id,
+            f"Часть предложений не создана: {'; '.join(proposal_errors)}. Остальные ждут подтверждения кнопками.",
+        )
     return True
+
+
+def owner_operation_result_text(operation: str, result: Any) -> str:
+    label = owner_operation_label(operation)
+    if isinstance(result, dict):
+        if operation == "run_reminders":
+            return (
+                f"Напоминания обработаны: отправлено {result.get('sent', 0)}, "
+                f"ошибок {result.get('failed', 0)}, без Telegram-привязки {result.get('skipped_unlinked', 0)}."
+            )
+        if operation == "broadcast_message":
+            return (
+                f"Рассылка завершена: отправлено {len(result.get('sent') or [])}, "
+                f"ошибок {len(result.get('failed') or [])}, пропущено {len(result.get('skipped') or [])}."
+            )
+        if operation == "generate_rent_charges":
+            return f"Начисления сформированы: новых записей {result.get('created', 0)}."
+        if operation == "send_tenant_message":
+            return f"Сообщение отправлено жильцу {result.get('tenant') or ''}.".strip()
+        if operation == "issue_utility_bill":
+            return (
+                f"Коммунальный счёт выставлен: отправлено {result.get('sent', 0)}, "
+                f"без привязки {result.get('skipped_unlinked', 0)}, "
+                f"зачтено авансов {money_text(float(result.get('applied_advances') or 0))}."
+            )
+        if operation == "save_meter_readings_batch":
+            return f"Показания сохранены: {result.get('saved', 0)}."
+    return f"Операция «{label}» выполнена."
+
+
+def execute_owner_web_operation(session: Session, operation: str, payload: dict[str, Any]) -> str:
+    if operation == "create_object":
+        result = create_object(payload, session)
+    elif operation == "create_apartment":
+        result = create_apartment(payload, session)
+    elif operation == "update_apartment":
+        result = update_apartment(int(payload["apartment_id"]), payload, session)
+    elif operation == "onboard_tenant":
+        result = onboard_tenant(payload, session)
+    elif operation == "update_lease":
+        result = update_lease(int(payload["lease_id"]), payload, session)
+    elif operation == "transfer_lease":
+        result = transfer_lease(int(payload["lease_id"]), payload, session)
+    elif operation == "delete_lease":
+        result = delete_lease(int(payload["lease_id"]), session)
+    elif operation == "set_lease_automation":
+        result = api_update_lease_automation(int(payload["lease_id"]), payload, session)
+    elif operation == "clear_lease_automation":
+        result = api_clear_lease_cadence(int(payload["lease_id"]), session)
+    elif operation == "set_lease_ignored":
+        result = api_update_lease_ignore(int(payload["lease_id"]), payload, session)
+    elif operation == "broadcast_message":
+        result = broadcast_message_to_tenants(payload, session)
+    elif operation == "run_reminders":
+        result = run_reminders_now(session)
+    elif operation == "generate_rent_charges":
+        result = generate_charges(payload, session)
+    elif operation == "add_rent_payment":
+        result = add_rent_payment(int(payload["charge_id"]), payload, session)
+    elif operation == "create_manual_payment":
+        result = create_manual_payment(payload, session)
+    elif operation == "update_manual_debt":
+        result = update_manual_debt(int(payload["debt_id"]), payload, session)
+    elif operation == "add_manual_debt_payment":
+        result = add_manual_debt_payment(int(payload["debt_id"]), payload, session)
+    elif operation == "delete_manual_debt":
+        result = delete_manual_debt(int(payload["debt_id"]), session)
+    elif operation == "update_payment_receipt":
+        result = update_payment_receipt(int(payload["receipt_id"]), payload, session)
+    elif operation == "delete_payment_receipt":
+        result = delete_payment_receipt(int(payload["receipt_id"]), session)
+    elif operation == "ignore_payment_receipt":
+        result = ignore_payment_receipt(int(payload["receipt_id"]), session)
+    elif operation == "moderate_payment_receipt":
+        result = moderate_payment_receipt(int(payload["receipt_id"]), payload, session)
+    elif operation == "update_utility_service":
+        result = update_utility_service(int(payload["service_id"]), payload, session)
+    elif operation == "save_meter_reading":
+        result = save_meter_reading(payload, session)
+    elif operation == "save_meter_readings_batch":
+        result = save_meter_readings_batch(payload, session)
+    elif operation == "create_tariff":
+        result = create_tariff(payload, session)
+    elif operation == "calculate_utility_bill":
+        result = create_utility_bill(payload, session)
+    elif operation == "delete_utility_bill":
+        result = delete_utility_bill(int(payload["bill_id"]), session)
+    elif operation == "issue_utility_bill":
+        result = issue_utility_bill(int(payload["bill_id"]), session)
+    elif operation == "mark_provider_paid":
+        result = mark_provider_paid(int(payload["bill_id"]), session)
+    elif operation == "add_utility_payment":
+        result = add_utility_payment(int(payload["line_id"]), payload, session)
+    elif operation == "create_expense":
+        result = create_expense(payload, session)
+    elif operation == "compensate_expense":
+        result = compensate_expense(int(payload["expense_id"]), session)
+    elif operation == "accept_monthly_report":
+        result = accept_monthly_report(int(payload["year"]), int(payload["month"]), payload, session)
+    else:
+        raise HTTPException(400, f"Операция «{operation}» не подключена к backend")
+    return owner_operation_result_text(operation, result)
 
 
 def execute_agent_action(session: Session, proposal: AgentActionProposal) -> str:
@@ -6359,11 +6624,11 @@ def execute_agent_action(session: Session, proposal: AgentActionProposal) -> str
         payload = json.loads(proposal.payload_json or "{}")
     except json.JSONDecodeError as exc:
         raise HTTPException(400, "Повреждены параметры предложения") from exc
-    lease = session.get(Lease, int(payload.get("lease_id") or proposal.lease_id or 0))
-    if not lease:
-        raise HTTPException(404, "Договор для действия не найден")
 
     if proposal.action_type == "defer_rent":
+        lease = session.get(Lease, int(payload.get("lease_id") or proposal.lease_id or 0))
+        if not lease:
+            raise HTTPException(404, "Договор для действия не найден")
         charge = session.get(RentCharge, int(payload.get("charge_id") or 0))
         if not charge or charge.lease_id != lease.id:
             raise HTTPException(400, "Начисление для отсрочки больше не найдено")
@@ -6396,6 +6661,9 @@ def execute_agent_action(session: Session, proposal: AgentActionProposal) -> str
         return f"Отсрочка для {lease.tenant.full_name} установлена до {until:%d.%m.%Y}."
 
     if proposal.action_type == "move_out":
+        lease = session.get(Lease, int(payload.get("lease_id") or proposal.lease_id or 0))
+        if not lease:
+            raise HTTPException(404, "Договор для действия не найден")
         end = parse_agent_date(payload.get("end_date"), "дата выезда")
         if end < date.today() or end < lease.start_date:
             raise HTTPException(400, "Дата выезда больше не допустима")
@@ -6430,12 +6698,18 @@ def execute_agent_action(session: Session, proposal: AgentActionProposal) -> str
         return f"Выезд {lease.tenant.full_name} оформлен на {end:%d.%m.%Y}."
 
     if proposal.action_type == "create_manual_debt":
+        lease = session.get(Lease, int(payload.get("lease_id") or proposal.lease_id or 0))
+        if not lease:
+            raise HTTPException(404, "Договор для действия не найден")
         debt = apply_manual_debt_payload(ManualDebt(), lease, payload)
         session.add(debt)
         session.flush()
         return f"Создан ручной долг «{debt.title}» на {money_text(debt.amount)}."
 
     if proposal.action_type == "send_tenant_message":
+        lease = session.get(Lease, int(payload.get("lease_id") or proposal.lease_id or 0))
+        if not lease:
+            raise HTTPException(404, "Договор для действия не найден")
         result = send_tenant_message(
             session,
             lease,
@@ -6445,7 +6719,7 @@ def execute_agent_action(session: Session, proposal: AgentActionProposal) -> str
         )
         return f"Сообщение отправлено жильцу {result['tenant']}."
 
-    raise HTTPException(400, "Это действие агент выполнять не умеет")
+    return execute_owner_web_operation(session, proposal.action_type, payload)
 
 
 def safe_answer_agent_callback(token: str, callback_id: str, text: str) -> None:
@@ -6556,6 +6830,36 @@ def handle_agent_callback_query(session: Session, callback: dict[str, Any]) -> N
             )
             safe_answer_agent_callback(token, callback_id, "Не выполнено: данные изменились.")
             send_telegram_text(session, chat_id, f"Действие не выполнено: {exc.detail}")
+        except Exception as exc:
+            runtime_log(
+                "AGENT",
+                f"owner operation failed proposal_id={proposal.id} action={proposal.action_type} "
+                f"error={type(exc).__name__}: {exc}",
+            )
+            proposal_id = proposal.id
+            session.rollback()
+            proposal = session.get(AgentActionProposal, proposal_id)
+            if proposal:
+                proposal.status = "failed"
+                proposal.result_text = "Внутренняя ошибка выполнения"
+                proposal.error_text = f"{type(exc).__name__}: {exc}"[:2000]
+                session.add(
+                    AiActionLog(
+                        conversation_id=proposal.conversation_id,
+                        lease_id=proposal.lease_id,
+                        actor_role="owner",
+                        action_type=proposal.action_type,
+                        status="failed",
+                        payload_json=proposal.payload_json,
+                        note=proposal.error_text,
+                    )
+                )
+            safe_answer_agent_callback(token, callback_id, "Не выполнено: внутренняя ошибка.")
+            send_telegram_text(
+                session,
+                chat_id,
+                "Действие не выполнено из-за внутренней ошибки. Данные не считаются изменёнными; подробность записана в лог.",
+            )
         else:
             proposal.status = "executed"
             proposal.executed_at = utc_now()
@@ -6573,7 +6877,7 @@ def handle_agent_callback_query(session: Session, callback: dict[str, Any]) -> N
                 )
             )
             safe_answer_agent_callback(token, callback_id, "Подтверждено и выполнено.")
-            send_telegram_text(session, chat_id, f"Готово. {result_text}", app_keyboard(app_base_url(session)))
+            send_telegram_text(session, chat_id, f"Готово. {result_text}")
 
     message_id = message.get("message_id") or proposal.owner_message_id
     if message_id:
@@ -6699,7 +7003,7 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
                 session,
                 chat_id,
                 "✅ Бот подключён.\n📊 Можно смотреть статус, отчёты и открывать пульт с телефона.",
-                app_keyboard(base_url),
+                app_keyboard(base_url, include_app=True),
             )
             return
         if linked_lease:
@@ -6832,7 +7136,7 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
         return
     if command == "/app":
         if is_owner:
-            send_telegram_text(session, chat_id, "🚪 Открываю пульт.", app_keyboard(base_url))
+            send_telegram_text(session, chat_id, "🚪 Открываю пульт.", app_keyboard(base_url, include_app=True))
         else:
             send_telegram_text(session, chat_id, "Доступ к пульту только у владельца.")
         return
@@ -6848,6 +7152,31 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
         return
 
     if text:
+        confirmation_decision = owner_text_confirmation_decision(text)
+        if confirmation_decision:
+            pending_count = int(
+                session.scalar(
+                    select(func.count(AgentActionProposal.id)).where(
+                        AgentActionProposal.status == "pending",
+                        AgentActionProposal.owner_chat_id == str(chat_id),
+                    )
+                )
+                or 0
+            )
+            if pending_count:
+                send_telegram_text(
+                    session,
+                    chat_id,
+                    "Подтверждение текстом не выполняет действия. Нажмите «Подтвердить» или «Отклонить» "
+                    "под нужным предложением — там зафиксированы точные параметры.",
+                )
+            else:
+                send_telegram_text(
+                    session,
+                    chat_id,
+                    "Сейчас нет действия, ожидающего подтверждения. Сначала сформулируйте, что именно нужно сделать.",
+                )
+            return
         handle_owner_ai_message(session, chat_id, text)
         return
     send_telegram_text(session, chat_id, telegram_help_text(), app_keyboard(base_url))

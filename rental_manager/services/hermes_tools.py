@@ -7,7 +7,22 @@ from typing import Any
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
-from rental_manager.models import AiConversation, AiMessage, Apartment, Lease, RentalObject, Tenant
+from rental_manager.models import (
+    AiConversation,
+    AiMessage,
+    Apartment,
+    Expense,
+    Lease,
+    ManualDebt,
+    Meter,
+    PaymentReceipt,
+    RentalObject,
+    Tenant,
+    UtilityBill,
+    UtilityBillLine,
+    UtilityService,
+)
+from rental_manager.services.owner_operations import owner_operation_catalog
 
 
 READ_TOOL_NAMES = (
@@ -23,10 +38,7 @@ READ_TOOL_NAMES = (
 )
 
 PROPOSE_TOOL_NAMES = (
-    "propose_send_message_to_tenant",
-    "propose_defer_rent",
-    "propose_move_out",
-    "propose_create_manual_debt",
+    "propose_owner_operation",
 )
 
 
@@ -193,7 +205,6 @@ def search_rentals(session: Session, query: str, limit: int = 20) -> list[dict[s
                 Tenant.telegram.ilike(pattern),
                 Apartment.name.ilike(pattern),
                 RentalObject.name.ilike(pattern),
-                RentalObject.address.ilike(pattern),
             )
         )
         .order_by(Lease.active.desc(), Lease.id.desc())
@@ -218,16 +229,162 @@ def build_owner_read_tools_context(
     dashboard: dict[str, Any],
     chat_id: int | str,
 ) -> str:
+    objects = session.scalars(
+        select(RentalObject)
+        .options(joinedload(RentalObject.apartments), joinedload(RentalObject.services))
+        .order_by(RentalObject.name, RentalObject.id)
+    ).unique().all()
+    services = session.scalars(
+        select(UtilityService)
+        .options(joinedload(UtilityService.object), joinedload(UtilityService.meters))
+        .order_by(UtilityService.object_id, UtilityService.name, UtilityService.id)
+    ).unique().all()
+    bills = session.scalars(
+        select(UtilityBill)
+        .options(joinedload(UtilityBill.service).joinedload(UtilityService.object))
+        .order_by(UtilityBill.created_at.desc(), UtilityBill.id.desc())
+        .limit(30)
+    ).all()
+    manual_debts = session.scalars(
+        select(ManualDebt)
+        .where(ManualDebt.active.is_(True))
+        .order_by(ManualDebt.due_date.desc(), ManualDebt.id.desc())
+        .limit(40)
+    ).all()
+    receipts = session.scalars(
+        select(PaymentReceipt)
+        .order_by(PaymentReceipt.paid_at.desc(), PaymentReceipt.id.desc())
+        .limit(40)
+    ).all()
+    expenses = session.scalars(
+        select(Expense)
+        .order_by(Expense.expense_date.desc(), Expense.id.desc())
+        .limit(30)
+    ).all()
+    utility_lines = session.scalars(
+        select(UtilityBillLine)
+        .where(UtilityBillLine.status.in_(["issued", "partial", "overdue"]))
+        .order_by(UtilityBillLine.due_date.desc(), UtilityBillLine.id.desc())
+        .limit(40)
+    ).all()
     snapshot = {
         "available_read_tools": READ_TOOL_NAMES,
         "available_propose_tools": PROPOSE_TOOL_NAMES,
+        "owner_operations": owner_operation_catalog(),
         "rentals_summary": get_rentals_summary(session),
         "tenants_summary": get_tenants_summary(session),
         "properties_summary": get_properties_summary(session),
         "overdue_payments": get_overdue_payments(dashboard)[:30],
         "contracts_ending_soon": get_contracts_ending_soon(session, 30)[:30],
         "owner_chat_context": get_owner_chat_context(session, chat_id, 8),
-        "safety": "Read tools may return data immediately. Propose tools only create pending actions.",
+        "properties": [
+            {
+                "object_id": item.id,
+                "name": item.name,
+                "active": item.active,
+                "apartments": [
+                    {
+                        "apartment_id": apartment.id,
+                        "name": apartment.name,
+                        "active": apartment.active,
+                        "odn_share_percent": apartment.odn_share_percent,
+                    }
+                    for apartment in item.apartments
+                ],
+            }
+            for item in objects
+        ],
+        "utility_services": [
+            {
+                "service_id": item.id,
+                "object_id": item.object_id,
+                "object": item.object.name,
+                "name": item.name,
+                "kind": item.kind,
+                "provider_reading_due_day": item.provider_reading_due_day,
+                "provider_due_day": item.provider_due_day,
+                "resident_due_days": item.resident_due_days,
+                "meters": [
+                    {
+                        "meter_id": meter.id,
+                        "name": meter.name,
+                        "scope": meter.scope,
+                        "apartment_id": meter.apartment_id,
+                        "active": meter.active,
+                    }
+                    for meter in item.meters
+                ],
+            }
+            for item in services
+        ],
+        "recent_utility_bills": [
+            {
+                "bill_id": item.id,
+                "service_id": item.service_id,
+                "object": item.service.object.name,
+                "service": item.service.name,
+                "period_start": item.period_start.isoformat(),
+                "period_end": item.period_end.isoformat(),
+                "status": item.status,
+                "provider_paid": item.provider_paid,
+            }
+            for item in bills
+        ],
+        "open_utility_lines": [
+            {
+                "line_id": item.id,
+                "bill_id": item.bill_id,
+                "lease_id": item.lease_id,
+                "apartment_id": item.apartment_id,
+                "amount": item.total_amount,
+                "paid": item.paid_amount,
+                "status": item.status,
+                "due_date": item.due_date.isoformat() if item.due_date else None,
+            }
+            for item in utility_lines
+        ],
+        "active_manual_debts": [
+            {
+                "debt_id": item.id,
+                "lease_id": item.lease_id,
+                "title": item.title,
+                "amount": item.amount,
+                "paid_amount": item.paid_amount,
+                "due_date": item.due_date.isoformat() if item.due_date else None,
+                "status": item.status,
+            }
+            for item in manual_debts
+        ],
+        "recent_payment_receipts": [
+            {
+                "receipt_id": item.id,
+                "lease_id": item.lease_id,
+                "rent_charge_id": item.rent_charge_id,
+                "utility_line_id": item.utility_line_id,
+                "amount": item.amount,
+                "channel": item.channel,
+                "status": item.status,
+                "paid_at": item.paid_at.isoformat(),
+            }
+            for item in receipts
+        ],
+        "recent_expenses": [
+            {
+                "expense_id": item.id,
+                "object_id": item.object_id,
+                "apartment_id": item.apartment_id,
+                "expense_date": item.expense_date.isoformat(),
+                "category": item.category,
+                "amount": item.amount,
+                "source_funds": item.source_funds,
+                "compensation_status": item.compensation_status,
+            }
+            for item in expenses
+        ],
+        "safety": (
+            "Read data may be returned immediately. Every owner_operation only creates a pending proposal. "
+            "Execution is possible exclusively through the Telegram confirmation button."
+        ),
     }
     return "Hermes internal read/propose tool snapshot:\n" + json.dumps(
         snapshot,

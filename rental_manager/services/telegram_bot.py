@@ -53,9 +53,14 @@ def build_reports_message(reports: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def app_keyboard(base_url: str, reports: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+def app_keyboard(
+    base_url: str,
+    reports: list[dict[str, Any]] | None = None,
+    *,
+    include_app: bool = False,
+) -> dict[str, Any] | None:
     rows: list[list[dict[str, Any]]] = []
-    if base_url:
+    if base_url and include_app:
         rows.append([{"text": "🚪 Открыть пульт", "url": base_url}])
     if reports:
         for report in reports[:3]:

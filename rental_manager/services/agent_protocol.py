@@ -7,6 +7,7 @@ from typing import Any
 
 
 ALLOWED_ACTION_TYPES = {
+    "owner_operation",
     "defer_rent",
     "move_out",
     "create_manual_debt",
