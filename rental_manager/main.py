@@ -26,6 +26,10 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 
 from rental_manager.database import Base, DATABASE_URL, ROOT_DIR, SessionLocal, get_session, init_db
 from rental_manager.models import (
+    AgentActionProposal,
+    AgentMemory,
+    AgentTask,
+    AgentTenantState,
     AiActionLog,
     AiConversation,
     AiMessage,
@@ -54,13 +58,18 @@ from rental_manager.services.ai_policy import (
     AI_DISABLED_TEXT,
     AI_UNAVAILABLE_TEXT,
     AUDIT_USER_PROMPT,
+    OWNER_AGENT_SYSTEM_PROMPT,
     OWNER_SYSTEM_PROMPT,
+    SUPERVISOR_SYSTEM_PROMPT,
+    TENANT_AGENT_SYSTEM_PROMPT,
+    TENANT_DEBT_FOLLOWUP_SYSTEM_PROMPT,
     TENANT_ESCALATION_TEXT,
     TENANT_SYSTEM_PROMPT,
     clean_ai_response,
     estimate_tokens,
     tenant_question_needs_owner,
 )
+from rental_manager.services.agent_protocol import AgentEnvelope, action_confirmation_keyboard, parse_agent_envelope
 from rental_manager.services.billing import (
     IGNORE_LEASE_MARK,
     RENT_GENERATION_START,
@@ -99,9 +108,11 @@ from rental_manager.services.receipt_parser import parse_receipt_file
 from rental_manager.services.seed import seed_if_empty, seed_release_baseline_if_empty
 from rental_manager.services.telegram_bot import (
     TelegramApiError,
+    answer_callback_query,
     app_keyboard,
     build_reports_message,
     build_status_message,
+    clear_inline_keyboard,
     copy_message,
     download_telegram_file,
     owner_commands,
@@ -113,7 +124,7 @@ from rental_manager.services.telegram_bot import (
 )
 
 
-APP_BUILD_MARKER = "ai-direct-yandex-2026-06-22"
+APP_BUILD_MARKER = "agent-memory-actions-2026-06-24"
 
 
 app = FastAPI(title="Rental Manager", version="0.1.0")
@@ -136,6 +147,10 @@ DEFAULT_SETTINGS = {
     "automation_utility_cadence": "daily_evening",
     "ai_enabled": False,
     "ai_tenant_free_text_enabled": True,
+    "ai_dialog_reminders_enabled": True,
+    "ai_supervisor_enabled": True,
+    "ai_supervisor_hour": "10",
+    "ai_action_confirmation_ttl_hours": "48",
     "hermes_api_base_url": "http://127.0.0.1:8642",
     "hermes_model_default": "yandexgpt-lite",
     "hermes_model_audit": "yandexgpt",
@@ -180,7 +195,13 @@ INTERNAL_SETTINGS = {
     "processed_move_out_notifications": "[]",
     "panel_auth_sessions": "{}",
 }
-BOOLEAN_SETTINGS = {"notifications_enabled", "ai_enabled", "ai_tenant_free_text_enabled"}
+BOOLEAN_SETTINGS = {
+    "notifications_enabled",
+    "ai_enabled",
+    "ai_tenant_free_text_enabled",
+    "ai_dialog_reminders_enabled",
+    "ai_supervisor_enabled",
+}
 ENV_SETTING_KEYS = {
     "app_base_url": "APP_BASE_URL",
     "telegram_owner_chat_id": "TELEGRAM_OWNER_CHAT_ID",
@@ -188,6 +209,10 @@ ENV_SETTING_KEYS = {
     "telegram_webhook_secret": "TELEGRAM_WEBHOOK_SECRET",
     "ai_enabled": "AI_ENABLED",
     "ai_tenant_free_text_enabled": "AI_TENANT_FREE_TEXT_ENABLED",
+    "ai_dialog_reminders_enabled": "AI_DIALOG_REMINDERS_ENABLED",
+    "ai_supervisor_enabled": "AI_SUPERVISOR_ENABLED",
+    "ai_supervisor_hour": "AI_SUPERVISOR_HOUR",
+    "ai_action_confirmation_ttl_hours": "AI_ACTION_CONFIRMATION_TTL_HOURS",
     "hermes_api_base_url": "HERMES_API_BASE_URL",
     "hermes_model_default": "HERMES_MODEL_DEFAULT",
     "hermes_model_audit": "HERMES_MODEL_AUDIT",
@@ -275,6 +300,7 @@ def startup() -> None:
         generate_rent_charges(session)
         notify_available_monthly_reports(session)
         session.commit()
+        ensure_runtime_telegram_webhook(session)
     start_reminder_worker()
 
 
@@ -759,6 +785,10 @@ def table_model_map() -> dict[str, Any]:
         "ai_conversations": AiConversation,
         "ai_messages": AiMessage,
         "ai_action_logs": AiActionLog,
+        "agent_memories": AgentMemory,
+        "agent_action_proposals": AgentActionProposal,
+        "agent_tenant_states": AgentTenantState,
+        "agent_tasks": AgentTask,
         "ai_usage_daily": AiUsageDaily,
         "utility_services": UtilityService,
         "meters": Meter,
@@ -2244,7 +2274,27 @@ def api_update_lease_ignore(lease_id: int, payload: dict[str, Any], session: Ses
 
 
 def import_release_baseline(session: Session) -> dict[str, int]:
-    for model in [AiActionLog, AiMessage, AiConversation, AiUsageDaily, MessageLog, PaymentReceipt, ManualDebt, UtilityBillLine, UtilityBill, RentCharge, Lease, Tenant, Expense, MeterReading, Tariff]:
+    for model in [
+        AgentActionProposal,
+        AgentMemory,
+        AgentTask,
+        AgentTenantState,
+        AiActionLog,
+        AiMessage,
+        AiConversation,
+        AiUsageDaily,
+        MessageLog,
+        PaymentReceipt,
+        ManualDebt,
+        UtilityBillLine,
+        UtilityBill,
+        RentCharge,
+        Lease,
+        Tenant,
+        Expense,
+        MeterReading,
+        Tariff,
+    ]:
         session.execute(delete(model))
     session.flush()
     seed_if_empty(session)
@@ -3938,11 +3988,408 @@ def run_owner_due_payment_digest(session: Session, today: date, now: datetime) -
     return 1
 
 
+def tenant_recent_dialogue_text(session: Session, lease: Lease, limit: int = 10) -> str:
+    conversation = session.scalar(
+        select(AiConversation)
+        .where(
+            AiConversation.lease_id == lease.id,
+            AiConversation.role == "tenant",
+            AiConversation.status == "active",
+        )
+        .order_by(AiConversation.updated_at.desc(), AiConversation.id.desc())
+        .limit(1)
+    )
+    if not conversation:
+        return "Недавний диалог: сообщений ещё нет."
+    rows = session.scalars(
+        select(AiMessage)
+        .where(AiMessage.conversation_id == conversation.id)
+        .order_by(AiMessage.created_at.desc(), AiMessage.id.desc())
+        .limit(limit)
+    ).all()
+    if not rows:
+        return "Недавний диалог: сообщений ещё нет."
+    labels = {"user": "жилец", "assistant": "агент"}
+    return "Недавний диалог:\n" + "\n".join(
+        f"- {labels.get(row.role, row.role)}: {(row.text or '')[:700]}" for row in reversed(rows)
+    )
+
+
+def fallback_debt_followup_text(state: AgentTenantState, debt: float) -> str:
+    level = int(state.escalation_level or 0)
+    if level <= 0:
+        return f"Добрый день. Вчера ожидалась оплата, но пока она не поступила. Подскажите, сегодня сможете оплатить {money_text(debt)}?"
+    if level == 1:
+        return f"Добрый день. Оплата {money_text(debt)} всё ещё не поступила. Назовите, пожалуйста, конкретную дату оплаты."
+    if level == 2:
+        return (
+            f"Оплата {money_text(debt)} по-прежнему не поступила, а сроки уже переносились. "
+            f"Нужна конкретная и выполнимая дата оплаты."
+        )
+    return (
+        f"Задолженность {money_text(debt)} не погашена, предыдущие обещания не выполнены. "
+        f"Ситуация передана владельцу. Сообщите окончательный план оплаты."
+    )
+
+
+def run_tenant_rent_dialogue(
+    session: Session,
+    charge: RentCharge,
+    today: date,
+) -> str:
+    lease = charge.lease
+    state = agent_tenant_state(session, lease)
+    debt = money(
+        max(0.0, float(charge.ip_due or 0) - float(charge.ip_paid or 0))
+        + max(0.0, float(charge.personal_due or 0) - float(charge.personal_paid or 0))
+    )
+    if debt <= EPS:
+        state.status = "normal"
+        state.escalation_level = 0
+        state.consecutive_excuses = 0
+        state.promise_date = None
+        state.promise_text = ""
+        state.next_contact_on = None
+        return "paid"
+
+    overdue_days = max(1, (today - charge.due_date).days)
+    if state.promise_date and today <= state.promise_date:
+        return "waiting_promise"
+    if state.next_contact_on and state.next_contact_on > today:
+        return "waiting_schedule"
+    if reminder_sent_today(session, "agent_rent_followup", rent_charge_id=charge.id, today=today):
+        return "duplicate"
+
+    if state.promise_date and today > state.promise_date:
+        state.consecutive_excuses = int(state.consecutive_excuses or 0) + 1
+        state.escalation_level = min(3, max(int(state.escalation_level or 0) + 1, 1))
+        state.status = "promise_broken"
+    elif overdue_days >= 7:
+        state.escalation_level = max(int(state.escalation_level or 0), 2)
+    elif overdue_days >= 3:
+        state.escalation_level = max(int(state.escalation_level or 0), 1)
+
+    context = "\n\n".join(
+        [
+            tenant_context_text(session, lease, get_settings(session), today),
+            tenant_state_context(state),
+            tenant_recent_dialogue_text(session, lease),
+            agent_memory_context(
+                session,
+                scope_type="lease",
+                scope_id=str(lease.id),
+                lease_id=lease.id,
+            ),
+            f"Просрочка: {overdue_days} дн. Текущий долг: {money_text(debt)}.",
+        ]
+    )
+    answer = call_hermes_ai(
+        session,
+        chat_id=lease_chat_id(session, lease) or f"lease:{lease.id}",
+        actor_role="tenant_automation",
+        lease=lease,
+        system_prompt=TENANT_DEBT_FOLLOWUP_SYSTEM_PROMPT,
+        context=context,
+        user_text="Сформулируй следующее сообщение жильцу по текущей просрочке.",
+        model=resolve_ai_model(get_setting_value(session, "hermes_model_default")),
+        max_tokens=350,
+    )
+    if answer in {AI_UNAVAILABLE_TEXT, AI_DISABLED_TEXT, AI_BUDGET_EXCEEDED_TEXT}:
+        answer = fallback_debt_followup_text(state, debt)
+    send_tenant_message(
+        session,
+        lease,
+        "custom",
+        charge=charge,
+        custom_text=answer,
+        note="agent-auto-followup",
+    )
+    session.add(
+        MessageLog(
+            lease_id=lease.id,
+            rent_charge_id=charge.id,
+            channel="internal",
+            template_key="agent_rent_followup",
+            status="sent",
+            recipient_chat_id=str(lease_chat_id(session, lease) or ""),
+            text=answer,
+            note=f"level={int(state.escalation_level or 0)} overdue_days={overdue_days}",
+        )
+    )
+    state.last_agent_message_at = utc_now()
+    state.next_contact_on = today + timedelta(days=2 if int(state.escalation_level or 0) < 3 else 1)
+    state.status = "contacted"
+
+    owner_id = telegram_owner_chat_id(session)
+    if owner_id and telegram_token(session):
+        send_telegram_text(
+            session,
+            owner_id,
+            (
+                f"Агент написал должнику\n"
+                f"{lease.apartment.object.name}, {lease.apartment.name}, {lease.tenant.full_name}\n"
+                f"Долг: {money_text(debt)}, просрочка: {overdue_days} дн., уровень: {int(state.escalation_level or 0)}\n"
+                f"Текст: {answer}"
+            ),
+            app_keyboard(app_base_url(session)),
+        )
+        state.last_owner_update_at = utc_now()
+    return "sent"
+
+
+def upsert_agent_task(
+    session: Session,
+    *,
+    issue_key: str,
+    category: str,
+    severity: str,
+    title: str,
+    details: str,
+    lease_id: int | None = None,
+    due_date: date | None = None,
+) -> AgentTask:
+    task = session.scalar(select(AgentTask).where(AgentTask.issue_key == issue_key).limit(1))
+    now = utc_now()
+    if not task:
+        task = AgentTask(
+            issue_key=issue_key,
+            lease_id=lease_id,
+            category=category,
+            first_seen_at=now,
+        )
+        session.add(task)
+    task.status = "open"
+    task.severity = severity
+    task.title = title[:240]
+    task.details = details[:2000]
+    task.due_date = due_date
+    task.last_seen_at = now
+    task.resolved_at = None
+    return task
+
+
+def sync_agent_tasks(session: Session, dashboard: dict[str, Any] | None = None) -> list[AgentTask]:
+    if dashboard is None:
+        dashboard = build_dashboard(session)
+    seen: set[str] = set()
+    today = date.today()
+
+    for item in [*dashboard.get("rent_overdue", []), *dashboard.get("rent_partial", [])]:
+        charge_id = int(item.get("id") or 0)
+        if not charge_id:
+            continue
+        key = f"rent:{charge_id}"
+        seen.add(key)
+        due = date.fromisoformat(item["due_date"]) if item.get("due_date") else None
+        days = (today - due).days if due else 0
+        upsert_agent_task(
+            session,
+            issue_key=key,
+            category="rent",
+            severity="critical" if days >= 7 else "high",
+            title=f"Просроченная аренда: {item.get('apartment') or ''} {item.get('tenant') or ''}".strip(),
+            details=f"Долг {money_text(float(item.get('debt') or 0))}, просрочка {max(days, 0)} дн.",
+            lease_id=int(item.get("lease_id") or 0) or None,
+            due_date=due,
+        )
+
+    for item in dashboard.get("utility_overdue", []):
+        line_id = int(item.get("id") or 0)
+        if not line_id:
+            continue
+        key = f"utility:{line_id}"
+        seen.add(key)
+        due = date.fromisoformat(item["due_date"]) if item.get("due_date") else None
+        upsert_agent_task(
+            session,
+            issue_key=key,
+            category="utility",
+            severity="high",
+            title=f"Просрочена коммуналка: {item.get('apartment') or ''} {item.get('tenant') or ''}".strip(),
+            details=f"Долг {money_text(float(item.get('debt') or 0))}.",
+            lease_id=int(item.get("lease_id") or 0) or None,
+            due_date=due,
+        )
+
+    for item in dashboard.get("suspicious_receipts", []):
+        receipt_id = int(item.get("id") or 0)
+        if not receipt_id:
+            continue
+        key = f"receipt:{receipt_id}"
+        seen.add(key)
+        upsert_agent_task(
+            session,
+            issue_key=key,
+            category="receipt",
+            severity="high",
+            title=f"Проверить подозрительный чек #{receipt_id}",
+            details=f"Сумма {money_text(float(item.get('amount') or 0))}, статус требует ручного решения.",
+            lease_id=int(item.get("lease_id") or 0) or None,
+        )
+
+    for item in dashboard.get("stale_readings", []):
+        service_id = int(item.get("service_id") or 0)
+        key = f"reading:{service_id}"
+        seen.add(key)
+        upsert_agent_task(
+            session,
+            issue_key=key,
+            category="reading",
+            severity="medium",
+            title=f"Обновить показания: {item.get('object') or ''} / {item.get('service') or ''}",
+            details=f"Последняя дата: {item.get('last_date') or 'нет данных'}.",
+        )
+
+    for item in dashboard.get("manual_debts", []):
+        debt_id = int(item.get("id") or 0)
+        if not debt_id:
+            continue
+        key = f"manual-debt:{debt_id}"
+        seen.add(key)
+        upsert_agent_task(
+            session,
+            issue_key=key,
+            category="manual_debt",
+            severity="high" if item.get("status") == "overdue" else "medium",
+            title=f"Ручной долг: {item.get('apartment') or ''} {item.get('tenant') or ''}".strip(),
+            details=f"{item.get('title') or 'долг'} — {money_text(float(item.get('debt') or 0))}.",
+            lease_id=int(item.get("lease_id") or 0) or None,
+            due_date=date.fromisoformat(item["due_date"]) if item.get("due_date") else None,
+        )
+
+    for item in dashboard.get("pending_personal_expenses", []):
+        expense_id = int(item.get("id") or 0)
+        if not expense_id:
+            continue
+        key = f"expense:{expense_id}"
+        seen.add(key)
+        upsert_agent_task(
+            session,
+            issue_key=key,
+            category="expense",
+            severity="medium",
+            title=f"Вернуть личные расходы: {item.get('category') or 'расход'}",
+            details=f"{money_text(float(item.get('amount') or 0))}. {item.get('description') or ''}".strip(),
+        )
+
+    for item in dashboard.get("provider_debts", []):
+        bill_id = int(item.get("id") or 0)
+        if not bill_id:
+            continue
+        key = f"provider:{bill_id}"
+        seen.add(key)
+        upsert_agent_task(
+            session,
+            issue_key=key,
+            category="provider",
+            severity="high",
+            title=f"Оплатить поставщика: {item.get('object') or ''} / {item.get('service') or ''}",
+            details=f"Счёт на {money_text(float(item.get('total_cost') or 0))}, период до {item.get('period_end') or ''}.",
+            due_date=date.fromisoformat(item["due_date"]) if item.get("due_date") else None,
+        )
+
+    for item in dashboard.get("monthly_reports", []):
+        year = int(item.get("year") or 0)
+        month = int(item.get("month") or 0)
+        if not year or not month:
+            continue
+        key = f"report:{year:04d}-{month:02d}"
+        seen.add(key)
+        upsert_agent_task(
+            session,
+            issue_key=key,
+            category="report",
+            severity="medium",
+            title=f"Закрыть месячный отчёт: {item.get('month_name') or month} {year}",
+            details=f"{int(item.get('issue_count') or 0)} незакрытых проблем.",
+        )
+
+    managed_categories = {"rent", "utility", "receipt", "reading", "manual_debt", "expense", "provider", "report"}
+    open_tasks = session.scalars(select(AgentTask).where(AgentTask.status == "open")).all()
+    for task in open_tasks:
+        if task.category in managed_categories and task.issue_key not in seen:
+            task.status = "resolved"
+            task.resolved_at = utc_now()
+    session.flush()
+    return session.scalars(
+        select(AgentTask)
+        .where(AgentTask.status == "open")
+        .order_by(AgentTask.severity.desc(), AgentTask.first_seen_at, AgentTask.id)
+    ).all()
+
+
+def run_owner_supervisor_digest(
+    session: Session,
+    today: date,
+    now: datetime,
+    dashboard: dict[str, Any] | None = None,
+) -> int:
+    if not ai_enabled(session) or not setting_bool_value(get_setting_value(session, "ai_supervisor_enabled")):
+        return 0
+    try:
+        hour = min(22, max(0, int(get_setting_value(session, "ai_supervisor_hour") or 10)))
+    except ValueError:
+        hour = 10
+    if now < datetime.combine(today, time(hour=hour), tzinfo=LOCAL_TZ):
+        return 0
+    owner_id = telegram_owner_chat_id(session)
+    if not owner_id or not telegram_token(session):
+        return 0
+    tasks = sync_agent_tasks(session, dashboard)
+    pending = [
+        task
+        for task in tasks
+        if not task.last_notified_at or task.last_notified_at.date() < today
+    ]
+    if not pending:
+        return 0
+    dashboard = dashboard or build_dashboard(session)
+    lines = [
+        f"- [{task.severity}] {task.title}: {task.details} "
+        f"(в работе {max(0, (today - task.first_seen_at.date()).days)} дн.)"
+        for task in pending[:20]
+    ]
+    context = owner_agent_context(session, owner_id, dashboard) + "\n\nЗадачи для сегодняшней ревизии:\n" + "\n".join(lines)
+    conversation, envelope = call_agent_envelope(
+        session,
+        chat_id=owner_id,
+        actor_role="owner",
+        lease=None,
+        system_prompt=OWNER_AGENT_SYSTEM_PROMPT + "\n" + SUPERVISOR_SYSTEM_PROMPT,
+        context=context,
+        user_text="Проведи сегодняшнюю строгую ревизию. Предложи безопасные действия только там, где данных достаточно.",
+        model=resolve_ai_model(get_setting_value(session, "hermes_model_default")),
+        max_tokens=1200,
+    )
+    store_agent_memories(
+        session,
+        conversation,
+        envelope.memories,
+        scope_type="owner",
+        scope_id="owner",
+    )
+    answer = envelope.reply
+    if answer in {"", AI_UNAVAILABLE_TEXT, AI_DISABLED_TEXT, AI_BUDGET_EXCEEDED_TEXT}:
+        answer = "Утренняя ревизия. Сегодня нужно закрыть:\n" + "\n".join(lines[:10])
+    send_telegram_text(session, owner_id, answer, app_keyboard(app_base_url(session)))
+    for action in envelope.actions:
+        try:
+            create_agent_action_proposal(session, conversation, owner_id, action)
+        except HTTPException as exc:
+            runtime_log("AGENT", f"supervisor proposal skipped error={exc.detail}")
+    notified_at = utc_now()
+    for task in pending:
+        task.last_notified_at = notified_at
+        task.notification_count = int(task.notification_count or 0) + 1
+    return 1
+
+
 def run_due_reminders(session: Session, today: date | None = None) -> dict[str, Any]:
     today = today or date.today()
     now = local_now()
     cutoff = notification_cutoff_date(session)
     if not notifications_enabled(session):
+        supervisor_sent = run_owner_supervisor_digest(session, today, now, build_dashboard(session))
         return {
             "enabled": False,
             "cutoff_date": cutoff.isoformat(),
@@ -3952,6 +4399,7 @@ def run_due_reminders(session: Session, today: date | None = None) -> dict[str, 
             "skipped_duplicate": 0,
             "skipped_unlinked": 0,
             "failed": 0,
+            "supervisor_digest_sent": supervisor_sent,
         }
 
     summary = {
@@ -3996,6 +4444,16 @@ def run_due_reminders(session: Session, today: date | None = None) -> dict[str, 
                 summary["failed"] += 1
             continue
         elif charge.status in {"overdue", "partial"} and charge.due_date < today:
+            if ai_enabled(session) and setting_bool_value(get_setting_value(session, "ai_dialog_reminders_enabled")):
+                try:
+                    dialogue_result = run_tenant_rent_dialogue(session, charge, today)
+                    if dialogue_result == "sent":
+                        summary["sent"] += 1
+                    else:
+                        summary["skipped_duplicate"] += 1
+                except HTTPException:
+                    summary["failed"] += 1
+                continue
             template_key = "message_rent_overdue"
         if not template_key:
             continue
@@ -4043,7 +4501,9 @@ def run_due_reminders(session: Session, today: date | None = None) -> dict[str, 
         except HTTPException:
             summary["failed"] += 1
 
+    dashboard = build_dashboard(session)
     summary["owner_due_digest_sent"] = run_owner_due_payment_digest(session, today, now)
+    summary["supervisor_digest_sent"] = run_owner_supervisor_digest(session, today, now, dashboard)
     summary["move_out_processed"] = process_move_out_notifications(session, today)["processed"]
     return summary
 
@@ -4739,6 +5199,87 @@ def log_ai_message(
     return message
 
 
+def recent_ai_history(session: Session, conversation: AiConversation, limit: int = 12) -> list[dict[str, str]]:
+    rows = session.scalars(
+        select(AiMessage)
+        .where(AiMessage.conversation_id == conversation.id, AiMessage.role.in_(["user", "assistant"]))
+        .order_by(AiMessage.created_at.desc(), AiMessage.id.desc())
+        .limit(max(1, limit))
+    ).all()
+    return [
+        {"role": row.role, "content": (row.text or "")[:2400]}
+        for row in reversed(rows)
+        if (row.text or "").strip()
+    ]
+
+
+def agent_memory_context(
+    session: Session,
+    *,
+    scope_type: str,
+    scope_id: str,
+    lease_id: int | None = None,
+    limit: int = 20,
+) -> str:
+    query = select(AgentMemory).where(
+        AgentMemory.scope_type == scope_type,
+        AgentMemory.scope_id == scope_id,
+        AgentMemory.status == "active",
+    )
+    if lease_id is not None:
+        query = query.where(AgentMemory.lease_id == lease_id)
+    memories = session.scalars(
+        query.order_by(AgentMemory.importance.desc(), AgentMemory.updated_at.desc(), AgentMemory.id.desc()).limit(limit)
+    ).all()
+    if not memories:
+        return "Долговременная память: пока пусто."
+    return "Долговременная память:\n" + "\n".join(
+        f"- [{memory.kind}] {memory.content}" for memory in memories
+    )
+
+
+def store_agent_memories(
+    session: Session,
+    conversation: AiConversation,
+    memories: list[dict[str, Any]],
+    *,
+    scope_type: str,
+    scope_id: str,
+    lease_id: int | None = None,
+) -> None:
+    for item in memories[:5]:
+        content = str(item.get("content") or "").strip()[:500]
+        if not content:
+            continue
+        existing = session.scalar(
+            select(AgentMemory)
+            .where(
+                AgentMemory.scope_type == scope_type,
+                AgentMemory.scope_id == scope_id,
+                AgentMemory.kind == str(item.get("kind") or "fact"),
+                func.lower(AgentMemory.content) == content.lower(),
+                AgentMemory.status == "active",
+            )
+            .limit(1)
+        )
+        if existing:
+            existing.importance = max(int(existing.importance or 1), int(item.get("importance") or 1))
+            existing.updated_at = utc_now()
+            continue
+        session.add(
+            AgentMemory(
+                scope_type=scope_type,
+                scope_id=scope_id,
+                conversation_id=conversation.id,
+                lease_id=lease_id,
+                kind=str(item.get("kind") or "fact"),
+                content=content,
+                importance=min(3, max(1, int(item.get("importance") or 1))),
+                source="agent",
+            )
+        )
+
+
 def increment_ai_usage_row(usage: AiUsageDaily, result: HermesResult, cost_rub: float) -> None:
     prompt_tokens = int(result.prompt_tokens or 0)
     completion_tokens = int(result.completion_tokens or 0)
@@ -4781,6 +5322,52 @@ def hermes_client_for_settings(session: Session) -> HermesClient:
     return HermesClient(get_setting_value(session, "hermes_api_base_url"), get_setting_value(session, "hermes_api_key"))
 
 
+def invoke_ai_completion(
+    session: Session,
+    *,
+    conversation: AiConversation,
+    actor_role: str,
+    lease: Lease | None,
+    messages: list[dict[str, str]],
+    model: str,
+    max_tokens: int,
+    temperature: float = 0.2,
+) -> HermesResult | None:
+    try:
+        result = hermes_client_for_settings(session).chat_completions(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+    except HermesClientError as exc:
+        print(f"[AI] call failed role={actor_role} model={model} error={exc}", flush=True)
+        session.add(
+            AiActionLog(
+                conversation_id=conversation.id,
+                lease_id=lease.id if lease else None,
+                actor_role=actor_role,
+                action_type="agent_call",
+                status="failed",
+                note=str(exc),
+            )
+        )
+        return None
+
+    prompt_tokens = result.prompt_tokens or estimate_tokens("\n".join(item["content"] for item in messages))
+    completion_tokens = result.completion_tokens or estimate_tokens(result.content)
+    normalized = HermesResult(
+        content=result.content,
+        model=result.model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        raw=result.raw,
+    )
+    cost = ai_estimated_cost_rub(normalized.model, normalized.prompt_tokens, normalized.completion_tokens)
+    add_ai_usage(session, normalized, cost)
+    return normalized
+
+
 def call_hermes_ai(
     session: Session,
     *,
@@ -4799,45 +5386,28 @@ def call_hermes_ai(
         return AI_BUDGET_EXCEEDED_TEXT
 
     conversation = ai_conversation(session, chat_id, actor_role, lease)
+    history = recent_ai_history(session, conversation)
     log_ai_message(session, conversation, "user", user_text)
     messages = [
         {"role": "system", "content": system_prompt.strip()},
         {"role": "system", "content": context.strip()},
+        *history,
         {"role": "user", "content": user_text.strip()},
     ]
-    try:
-        result = hermes_client_for_settings(session).chat_completions(
-            model=model,
-            messages=messages,
-            temperature=0.2,
-            max_tokens=max_tokens,
-        )
-    except HermesClientError as exc:
-        print(f"[AI] call failed role={actor_role} model={model} error={exc}", flush=True)
-        session.add(
-            AiActionLog(
-                conversation_id=conversation.id,
-                lease_id=lease.id if lease else None,
-                actor_role=actor_role,
-                action_type="hermes_call",
-                status="failed",
-                note=str(exc),
-            )
-        )
+    normalized = invoke_ai_completion(
+        session,
+        conversation=conversation,
+        actor_role=actor_role,
+        lease=lease,
+        messages=messages,
+        model=model,
+        max_tokens=max_tokens,
+    )
+    if normalized is None:
         return AI_UNAVAILABLE_TEXT
 
-    prompt_tokens = result.prompt_tokens or estimate_tokens("\n".join(item["content"] for item in messages))
-    completion_tokens = result.completion_tokens or estimate_tokens(result.content)
-    normalized = HermesResult(
-        content=result.content,
-        model=result.model,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        raw=result.raw,
-    )
-    cost = ai_estimated_cost_rub(normalized.model, normalized.prompt_tokens, normalized.completion_tokens)
-    add_ai_usage(session, normalized, cost)
     answer = clean_ai_response(normalized.content) or AI_UNAVAILABLE_TEXT
+    cost = ai_estimated_cost_rub(normalized.model, normalized.prompt_tokens, normalized.completion_tokens)
     log_ai_message(
         session,
         conversation,
@@ -4851,12 +5421,429 @@ def call_hermes_ai(
     return answer
 
 
+def call_agent_envelope(
+    session: Session,
+    *,
+    chat_id: int | str,
+    actor_role: str,
+    lease: Lease | None,
+    system_prompt: str,
+    context: str,
+    user_text: str,
+    model: str,
+    max_tokens: int = 1000,
+) -> tuple[AiConversation, AgentEnvelope]:
+    conversation = ai_conversation(session, chat_id, actor_role, lease)
+    if not ai_enabled(session):
+        return conversation, AgentEnvelope(reply=AI_DISABLED_TEXT)
+    if ai_budget_exceeded(session):
+        return conversation, AgentEnvelope(reply=AI_BUDGET_EXCEEDED_TEXT)
+
+    history = recent_ai_history(session, conversation)
+    log_ai_message(session, conversation, "user", user_text)
+    messages = [
+        {"role": "system", "content": system_prompt.strip()},
+        {"role": "system", "content": context.strip()},
+        *history,
+        {"role": "user", "content": user_text.strip()},
+    ]
+    normalized = invoke_ai_completion(
+        session,
+        conversation=conversation,
+        actor_role=actor_role,
+        lease=lease,
+        messages=messages,
+        model=model,
+        max_tokens=max_tokens,
+        temperature=0.15,
+    )
+    if normalized is None:
+        return conversation, AgentEnvelope(reply=AI_UNAVAILABLE_TEXT)
+    envelope = parse_agent_envelope(normalized.content)
+    answer = clean_ai_response(envelope.reply) or AI_UNAVAILABLE_TEXT
+    envelope = AgentEnvelope(
+        reply=answer,
+        actions=envelope.actions,
+        memories=envelope.memories,
+        intent=envelope.intent,
+        promise_date=envelope.promise_date,
+        needs_owner=envelope.needs_owner,
+        owner_summary=envelope.owner_summary,
+    )
+    cost = ai_estimated_cost_rub(normalized.model, normalized.prompt_tokens, normalized.completion_tokens)
+    log_ai_message(
+        session,
+        conversation,
+        "assistant",
+        answer,
+        model=normalized.model,
+        prompt_tokens=normalized.prompt_tokens,
+        completion_tokens=normalized.completion_tokens,
+        cost_rub=cost,
+    )
+    return conversation, envelope
+
+
+def agent_tenant_state(session: Session, lease: Lease) -> AgentTenantState:
+    state = session.scalar(select(AgentTenantState).where(AgentTenantState.lease_id == lease.id).limit(1))
+    if state:
+        return state
+    state = AgentTenantState(lease_id=lease.id)
+    session.add(state)
+    session.flush()
+    return state
+
+
+def tenant_state_context(state: AgentTenantState) -> str:
+    return "\n".join(
+        [
+            "Состояние диалога:",
+            f"- уровень строгости: {int(state.escalation_level or 0)}",
+            f"- последовательных отписок/сорванных обещаний: {int(state.consecutive_excuses or 0)}",
+            f"- обещанная дата оплаты: {state.promise_date.isoformat() if state.promise_date else 'нет'}",
+            f"- формулировка обещания: {state.promise_text or 'нет'}",
+            f"- следующая проверка: {state.next_contact_on.isoformat() if state.next_contact_on else 'не назначена'}",
+        ]
+    )
+
+
+def parse_agent_date(value: Any, field_label: str) -> date:
+    raw = str(value or "").strip()
+    if not raw:
+        raise HTTPException(400, f"Не указана дата: {field_label}")
+    try:
+        return date.fromisoformat(raw)
+    except ValueError as exc:
+        raise HTTPException(400, f"Дата «{field_label}» должна быть в формате ГГГГ-ММ-ДД") from exc
+
+
+def require_agent_lease(session: Session, payload: dict[str, Any]) -> Lease:
+    try:
+        lease_id = int(payload.get("lease_id") or 0)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, "Агент не указал корректный lease_id") from exc
+    lease = session.get(Lease, lease_id)
+    if not lease:
+        raise HTTPException(404, "Договор из предложения агента не найден")
+    return lease
+
+
+def normalize_agent_action(
+    session: Session,
+    action: dict[str, Any],
+) -> tuple[Lease, str, dict[str, Any], str]:
+    action_type = str(action.get("type") or "").strip()
+    payload = dict(action.get("payload") or {})
+    lease = require_agent_lease(session, payload)
+    place = f"{lease.apartment.object.name}, {lease.apartment.name}, {lease.tenant.full_name}"
+
+    if action_type == "defer_rent":
+        try:
+            charge_id = int(payload.get("charge_id") or 0)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, "Для отсрочки не указан корректный charge_id") from exc
+        charge = session.get(RentCharge, charge_id)
+        if not charge or charge.lease_id != lease.id:
+            raise HTTPException(400, "Начисление для отсрочки не относится к указанному договору")
+        update_rent_charge_status(charge)
+        debt = money(
+            max(0.0, float(charge.ip_due or 0) - float(charge.ip_paid or 0))
+            + max(0.0, float(charge.personal_due or 0) - float(charge.personal_paid or 0))
+        )
+        if debt <= EPS:
+            raise HTTPException(400, "По этому начислению уже нет долга")
+        until = parse_agent_date(payload.get("deferral_until"), "дата отсрочки")
+        if until <= date.today() or until > date.today() + timedelta(days=180):
+            raise HTTPException(400, "Отсрочка должна быть в пределах следующих 180 дней")
+        normalized = {
+            "lease_id": lease.id,
+            "charge_id": charge.id,
+            "deferral_until": until.isoformat(),
+            "note": str(payload.get("note") or action.get("reason") or "").strip()[:1000],
+            "notify_tenant": setting_bool_value(payload.get("notify_tenant", True)),
+            "tenant_message": str(payload.get("tenant_message") or "").strip()[:3500],
+        }
+        preview = (
+            f"Предлагаю выдать отсрочку\n"
+            f"Жилец: {place}\n"
+            f"Долг: {money_text(debt)}\n"
+            f"Новый срок: {until:%d.%m.%Y}\n"
+            f"Причина: {normalized['note'] or 'не указана'}"
+        )
+        return lease, action_type, normalized, preview
+
+    if action_type == "move_out":
+        end = parse_agent_date(payload.get("end_date"), "дата выезда")
+        if end < date.today() or end < lease.start_date:
+            raise HTTPException(400, "Дата выезда не может быть в прошлом или раньше начала договора")
+        normalized = {
+            "lease_id": lease.id,
+            "end_date": end.isoformat(),
+            "notes": str(payload.get("notes") or action.get("reason") or "").strip()[:1500],
+            "notify_tenant": setting_bool_value(payload.get("notify_tenant", False)),
+            "tenant_message": str(payload.get("tenant_message") or "").strip()[:3500],
+        }
+        preview = (
+            f"Предлагаю оформить выезд\n"
+            f"Жилец: {place}\n"
+            f"Дата выезда: {end:%d.%m.%Y}\n"
+            f"Примечание: {normalized['notes'] or 'не указано'}"
+        )
+        return lease, action_type, normalized, preview
+
+    if action_type == "create_manual_debt":
+        try:
+            amount = money(float(str(payload.get("amount") or "0").replace(" ", "").replace(",", ".")))
+        except ValueError as exc:
+            raise HTTPException(400, "Сумма ручного долга должна быть числом") from exc
+        if amount <= 0 or amount > 10_000_000:
+            raise HTTPException(400, "Сумма ручного долга должна быть больше нуля и меньше 10 млн")
+        due = parse_agent_date(payload.get("due_date"), "срок ручного долга")
+        title = str(payload.get("title") or "Ручной долг").strip()[:180]
+        normalized = {
+            "lease_id": lease.id,
+            "kind": "other",
+            "title": title,
+            "amount": amount,
+            "due_date": due.isoformat(),
+            "notes": str(payload.get("note") or action.get("reason") or "").strip()[:1500],
+        }
+        preview = (
+            f"Предлагаю создать ручной долг\n"
+            f"Жилец: {place}\n"
+            f"Назначение: {title}\n"
+            f"Сумма: {money_text(amount)}\n"
+            f"Срок: {due:%d.%m.%Y}"
+        )
+        return lease, action_type, normalized, preview
+
+    if action_type == "send_tenant_message":
+        message_text = str(payload.get("text") or "").strip()
+        if not message_text:
+            raise HTTPException(400, "Агент предложил пустое сообщение")
+        if len(message_text) > 3500:
+            raise HTTPException(400, "Сообщение жильцу длиннее 3500 символов")
+        normalized = {"lease_id": lease.id, "text": message_text}
+        preview = f"Предлагаю отправить сообщение\nЖилец: {place}\n\n{message_text}"
+        return lease, action_type, normalized, preview
+
+    raise HTTPException(400, "Агент предложил неподдерживаемое действие")
+
+
+def create_agent_action_proposal(
+    session: Session,
+    conversation: AiConversation,
+    owner_chat_id: int | str,
+    action: dict[str, Any],
+) -> AgentActionProposal:
+    lease, action_type, payload, preview = normalize_agent_action(session, action)
+    try:
+        ttl_hours = min(168, max(1, int(get_setting_value(session, "ai_action_confirmation_ttl_hours") or 48)))
+    except ValueError:
+        ttl_hours = 48
+    proposal = AgentActionProposal(
+        conversation_id=conversation.id,
+        lease_id=lease.id,
+        action_type=action_type,
+        status="pending",
+        payload_json=json.dumps(payload, ensure_ascii=False),
+        preview_text=preview,
+        requested_by="agent",
+        owner_chat_id=str(owner_chat_id),
+        expires_at=utc_now() + timedelta(hours=ttl_hours),
+    )
+    session.add(proposal)
+    session.flush()
+    response = send_telegram_text(
+        session,
+        owner_chat_id,
+        preview + "\n\nНикаких изменений пока не внесено.",
+        action_confirmation_keyboard(proposal.id),
+    )
+    proposal.owner_message_id = int(((response.get("result") or {}) if isinstance(response, dict) else {}).get("message_id") or 0) or None
+    return proposal
+
+
+def owner_agent_context(session: Session, chat_id: int | str, dashboard: dict[str, Any]) -> str:
+    leases = session.scalars(
+        select(Lease)
+        .options(
+            joinedload(Lease.apartment).joinedload(Apartment.object),
+            joinedload(Lease.tenant),
+        )
+        .where(Lease.active.is_(True))
+        .order_by(Lease.apartment_id, Lease.id)
+    ).all()
+    lease_lines = ["Активные договоры и идентификаторы для возможных действий:"]
+    for lease in leases[:50]:
+        lease_lines.append(
+            f"- lease_id={lease.id}; {lease.apartment.object.name}; {lease.apartment.name}; "
+            f"{lease.tenant.full_name}; дата начала={lease.start_date.isoformat()}; залог={money_text(lease.deposit_amount)}"
+        )
+        charges = session.scalars(
+            select(RentCharge)
+            .where(RentCharge.lease_id == lease.id)
+            .order_by(RentCharge.due_date.desc(), RentCharge.id.desc())
+            .limit(4)
+        ).all()
+        for charge in reversed(charges):
+            update_rent_charge_status(charge)
+            debt = money(
+                max(0.0, float(charge.ip_due or 0) - float(charge.ip_paid or 0))
+                + max(0.0, float(charge.personal_due or 0) - float(charge.personal_paid or 0))
+            )
+            if debt > EPS or charge.due_date >= date.today():
+                lease_lines.append(
+                    f"  charge_id={charge.id}; срок={charge.due_date.isoformat()}; "
+                    f"статус={charge.status}; долг={debt}; "
+                    f"отсрочка={charge.deferral_until.isoformat() if charge.deferral_until else 'нет'}"
+                )
+
+    tasks = session.scalars(
+        select(AgentTask)
+        .where(AgentTask.status == "open")
+        .order_by(AgentTask.severity.desc(), AgentTask.first_seen_at, AgentTask.id)
+        .limit(20)
+    ).all()
+    task_text = "Открытые задачи супервизора:\n" + (
+        "\n".join(f"- [{task.severity}] {task.title}: {task.details}" for task in tasks)
+        if tasks
+        else "- нет"
+    )
+    pending_count = int(
+        session.scalar(select(func.count(AgentActionProposal.id)).where(AgentActionProposal.status == "pending")) or 0
+    )
+    return "\n\n".join(
+        [
+            owner_context_text(session, dashboard),
+            "\n".join(lease_lines),
+            task_text,
+            f"Предложений действий, ожидающих подтверждения: {pending_count}",
+            agent_memory_context(session, scope_type="owner", scope_id="owner"),
+        ]
+    )
+
+
+def update_tenant_state_from_envelope(
+    state: AgentTenantState,
+    envelope: AgentEnvelope,
+    user_text: str,
+    today: date | None = None,
+) -> None:
+    today = today or date.today()
+    state.last_tenant_message_at = utc_now()
+    if envelope.intent == "payment_promise":
+        promised = None
+        try:
+            promised = date.fromisoformat(envelope.promise_date) if envelope.promise_date else None
+        except ValueError:
+            promised = None
+        if promised and today <= promised <= today + timedelta(days=60):
+            state.promise_date = promised
+            state.promise_text = user_text[:1000]
+            state.next_contact_on = promised + timedelta(days=1)
+            state.status = "promised"
+        else:
+            state.status = "awaiting_date"
+    elif envelope.intent == "payment_sent":
+        state.status = "awaiting_receipt"
+        state.consecutive_excuses = 0
+        state.next_contact_on = today + timedelta(days=1)
+    elif envelope.intent in {"excuse", "deferral_request"}:
+        state.consecutive_excuses = int(state.consecutive_excuses or 0) + 1
+        state.escalation_level = min(3, max(int(state.escalation_level or 0), state.consecutive_excuses - 1))
+        state.status = "needs_attention"
+        state.next_contact_on = today + timedelta(days=1)
+
+
+def notify_owner_about_tenant_dialogue(
+    session: Session,
+    lease: Lease,
+    text: str,
+    summary: str,
+) -> None:
+    owner_id = telegram_owner_chat_id(session)
+    if not owner_id or not telegram_token(session):
+        return
+    send_telegram_text(
+        session,
+        owner_id,
+        (
+            f"Жилец запросил решение владельца\n"
+            f"{lease.apartment.object.name}, {lease.apartment.name}, {lease.tenant.full_name}\n"
+            f"Сообщение: {text}\n"
+            f"Суть: {summary or 'нужно посмотреть диалог'}\n\n"
+            f"Агент ничего в системе не менял."
+        ),
+        app_keyboard(app_base_url(session)),
+    )
+
+
+def notify_owner_about_tenant_update(
+    session: Session,
+    lease: Lease,
+    envelope: AgentEnvelope,
+    state: AgentTenantState,
+) -> None:
+    if envelope.intent not in {"payment_promise", "payment_sent", "excuse"}:
+        return
+    owner_id = telegram_owner_chat_id(session)
+    if not owner_id or not telegram_token(session):
+        return
+    if envelope.intent == "payment_promise":
+        detail = f"обещал оплатить {state.promise_date:%d.%m.%Y}" if state.promise_date else "обещал оплатить, но точную дату не назвал"
+    elif envelope.intent == "payment_sent":
+        detail = "сообщил об оплате; агент попросил прислать чек"
+    else:
+        detail = f"очередная отписка, счётчик: {int(state.consecutive_excuses or 0)}"
+    send_telegram_text(
+        session,
+        owner_id,
+        f"Диалог по оплате: {lease.apartment.name}, {lease.tenant.full_name} — {detail}.",
+        app_keyboard(app_base_url(session)),
+    )
+    state.last_owner_update_at = utc_now()
+
+
 def handle_tenant_ai_message(session: Session, chat_id: int | str, lease: Lease, text: str) -> bool:
     if not text or text.startswith("/") or not ai_tenant_free_text_enabled(session):
         return False
-    if tenant_question_needs_owner(text):
-        conversation = ai_conversation(session, chat_id, "tenant", lease)
-        log_ai_message(session, conversation, "user", text)
+    state = agent_tenant_state(session, lease)
+    context = "\n\n".join(
+        [
+            tenant_context_text(session, lease, get_settings(session)),
+            tenant_state_context(state),
+            agent_memory_context(
+                session,
+                scope_type="lease",
+                scope_id=str(lease.id),
+                lease_id=lease.id,
+            ),
+        ]
+    )
+    conversation, envelope = call_agent_envelope(
+        session,
+        chat_id=chat_id,
+        actor_role="tenant",
+        lease=lease,
+        system_prompt=TENANT_AGENT_SYSTEM_PROMPT,
+        context=context,
+        user_text=text,
+        model=resolve_ai_model(get_setting_value(session, "hermes_model_default")),
+        max_tokens=850,
+    )
+    store_agent_memories(
+        session,
+        conversation,
+        envelope.memories,
+        scope_type="lease",
+        scope_id=str(lease.id),
+        lease_id=lease.id,
+    )
+    update_tenant_state_from_envelope(state, envelope, text)
+    notify_owner_about_tenant_update(session, lease, envelope, state)
+    needs_owner = envelope.needs_owner or tenant_question_needs_owner(text)
+    if needs_owner:
         session.add(
             AiActionLog(
                 conversation_id=conversation.id,
@@ -4864,32 +5851,15 @@ def handle_tenant_ai_message(session: Session, chat_id: int | str, lease: Lease,
                 actor_role="tenant",
                 action_type="owner_escalation",
                 status="pending",
-                payload_json=json.dumps({"text": text}, ensure_ascii=False),
-                note="tenant free-text requires owner decision",
+                payload_json=json.dumps({"text": text, "summary": envelope.owner_summary}, ensure_ascii=False),
+                note="tenant dialogue requires owner decision",
             )
         )
-        owner_id = telegram_owner_chat_id(session)
-        if owner_id and telegram_token(session):
-            send_telegram_text(
-                session,
-                owner_id,
-                f"Вопрос жильца требует решения владельца:\n{lease.apartment.object.name}, {lease.apartment.name}, {lease.tenant.full_name}\n\n{text}",
-                app_keyboard(app_base_url(session)),
-            )
-        send_telegram_text(session, chat_id, TENANT_ESCALATION_TEXT, tenant_keyboard())
-        return True
-
-    answer = call_hermes_ai(
-        session,
-        chat_id=chat_id,
-        actor_role="tenant",
-        lease=lease,
-        system_prompt=TENANT_SYSTEM_PROMPT,
-        context=tenant_context_text(session, lease, get_settings(session)),
-        user_text=text,
-        model=resolve_ai_model(get_setting_value(session, "hermes_model_default")),
-    )
-    send_telegram_text(session, chat_id, answer, tenant_keyboard())
+        notify_owner_about_tenant_dialogue(session, lease, text, envelope.owner_summary)
+    answer = envelope.reply
+    if needs_owner and answer in {"", AI_UNAVAILABLE_TEXT}:
+        answer = TENANT_ESCALATION_TEXT
+    send_telegram_text(session, chat_id, answer or AI_UNAVAILABLE_TEXT, tenant_keyboard())
     return True
 
 
@@ -4898,20 +5868,244 @@ def handle_owner_ai_message(session: Session, chat_id: int | str, text: str, *, 
     if not user_text:
         return False
     dashboard = build_dashboard(session)
+    sync_agent_tasks(session, dashboard)
     model_key = "hermes_model_audit" if audit_deep else "hermes_model_default"
-    answer = call_hermes_ai(
+    conversation, envelope = call_agent_envelope(
         session,
         chat_id=chat_id,
         actor_role="owner",
         lease=None,
-        system_prompt=OWNER_SYSTEM_PROMPT,
-        context=owner_context_text(session, dashboard),
+        system_prompt=OWNER_AGENT_SYSTEM_PROMPT,
+        context=owner_agent_context(session, chat_id, dashboard),
         user_text=user_text,
         model=resolve_ai_model(get_setting_value(session, model_key)),
-        max_tokens=1200 if audit_deep else 800,
+        max_tokens=1500 if audit_deep else 1100,
     )
-    send_telegram_text(session, chat_id, answer, app_keyboard(app_base_url(session), dashboard.get("monthly_reports")))
+    store_agent_memories(
+        session,
+        conversation,
+        envelope.memories,
+        scope_type="owner",
+        scope_id="owner",
+    )
+    send_telegram_text(
+        session,
+        chat_id,
+        envelope.reply or "Подготовил предложения действий. Проверь карточки ниже.",
+        app_keyboard(app_base_url(session), dashboard.get("monthly_reports")),
+    )
+    for action in envelope.actions:
+        try:
+            create_agent_action_proposal(session, conversation, chat_id, action)
+        except HTTPException as exc:
+            send_telegram_text(
+                session,
+                chat_id,
+                f"Не создал предложение действия: {exc.detail}. Данные не менялись.",
+                app_keyboard(app_base_url(session)),
+            )
     return True
+
+
+def execute_agent_action(session: Session, proposal: AgentActionProposal) -> str:
+    try:
+        payload = json.loads(proposal.payload_json or "{}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(400, "Повреждены параметры предложения") from exc
+    lease = session.get(Lease, int(payload.get("lease_id") or proposal.lease_id or 0))
+    if not lease:
+        raise HTTPException(404, "Договор для действия не найден")
+
+    if proposal.action_type == "defer_rent":
+        charge = session.get(RentCharge, int(payload.get("charge_id") or 0))
+        if not charge or charge.lease_id != lease.id:
+            raise HTTPException(400, "Начисление для отсрочки больше не найдено")
+        update_rent_charge_status(charge)
+        debt = money(
+            max(0.0, float(charge.ip_due or 0) - float(charge.ip_paid or 0))
+            + max(0.0, float(charge.personal_due or 0) - float(charge.personal_paid or 0))
+        )
+        if debt <= EPS:
+            raise HTTPException(400, "Долг уже закрыт, отсрочка не нужна")
+        until = parse_agent_date(payload.get("deferral_until"), "дата отсрочки")
+        if until <= date.today():
+            raise HTTPException(400, "Дата отсрочки уже наступила")
+        charge.deferral_until = until
+        charge.deferral_note = str(payload.get("note") or "").strip()
+        update_rent_charge_status(charge)
+        if setting_bool_value(payload.get("notify_tenant")):
+            message_text = str(payload.get("tenant_message") or "").strip() or (
+                f"Владелец подтвердил отсрочку оплаты до {until:%d.%m.%Y}. "
+                f"Текущий долг: {money_text(debt)}."
+            )
+            send_tenant_message(
+                session,
+                lease,
+                "custom",
+                charge=charge,
+                custom_text=message_text,
+                note=f"agent-action:{proposal.id}",
+            )
+        return f"Отсрочка для {lease.tenant.full_name} установлена до {until:%d.%m.%Y}."
+
+    if proposal.action_type == "move_out":
+        end = parse_agent_date(payload.get("end_date"), "дата выезда")
+        if end < date.today() or end < lease.start_date:
+            raise HTTPException(400, "Дата выезда больше не допустима")
+        generate_rent_charges(session, until=end)
+        lease.end_date = end
+        lease.active = end > date.today()
+        if payload.get("notes"):
+            lease.notes = (lease.notes + "\n" + str(payload["notes"])).strip()
+        prune_unpaid_rent_charges_after(session, lease, end)
+        other_active = session.scalar(
+            select(Lease.id).where(
+                Lease.tenant_id == lease.tenant_id,
+                Lease.id != lease.id,
+                Lease.active.is_(True),
+            ).limit(1)
+        )
+        lease.tenant.active = bool(lease.active or other_active)
+        if end == date.today():
+            process_move_out_notifications(session, end)
+        if setting_bool_value(payload.get("notify_tenant")):
+            message_text = str(payload.get("tenant_message") or "").strip() or (
+                f"Владелец подтвердил оформление выезда на {end:%d.%m.%Y}. "
+                f"Итоговый расчёт будет сформирован по данным системы."
+            )
+            send_tenant_message(
+                session,
+                lease,
+                "custom",
+                custom_text=message_text,
+                note=f"agent-action:{proposal.id}",
+            )
+        return f"Выезд {lease.tenant.full_name} оформлен на {end:%d.%m.%Y}."
+
+    if proposal.action_type == "create_manual_debt":
+        debt = apply_manual_debt_payload(ManualDebt(), lease, payload)
+        session.add(debt)
+        session.flush()
+        return f"Создан ручной долг «{debt.title}» на {money_text(debt.amount)}."
+
+    if proposal.action_type == "send_tenant_message":
+        result = send_tenant_message(
+            session,
+            lease,
+            "custom",
+            custom_text=str(payload.get("text") or ""),
+            note=f"agent-action:{proposal.id}",
+        )
+        return f"Сообщение отправлено жильцу {result['tenant']}."
+
+    raise HTTPException(400, "Это действие агент выполнять не умеет")
+
+
+def safe_answer_agent_callback(token: str, callback_id: str, text: str) -> None:
+    try:
+        answer_callback_query(token, callback_id, text)
+    except TelegramApiError as exc:
+        runtime_log("TELEGRAM", f"callback answer failed error={exc}")
+
+
+def handle_agent_callback_query(session: Session, callback: dict[str, Any]) -> None:
+    callback_id = str(callback.get("id") or "")
+    data = str(callback.get("data") or "")
+    sender = callback.get("from") or {}
+    message = callback.get("message") or {}
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id") or sender.get("id")
+    token = telegram_token(session)
+    if not callback_id or not chat_id or not token:
+        return
+
+    if str(sender.get("id") or "") != str(telegram_owner_chat_id(session) or ""):
+        safe_answer_agent_callback(token, callback_id, "Подтверждать действия может только владелец.")
+        return
+
+    match = re.fullmatch(r"agent:(confirm|reject):(\d+)", data)
+    if not match:
+        safe_answer_agent_callback(token, callback_id, "Неизвестная кнопка.")
+        return
+    decision, proposal_id_text = match.groups()
+    proposal = session.scalar(
+        select(AgentActionProposal)
+        .where(AgentActionProposal.id == int(proposal_id_text))
+        .with_for_update()
+    )
+    if not proposal:
+        safe_answer_agent_callback(token, callback_id, "Предложение не найдено.")
+        return
+    if proposal.status != "pending":
+        safe_answer_agent_callback(token, callback_id, f"Уже обработано: {proposal.status}.")
+        return
+    if proposal.expires_at and proposal.expires_at < utc_now():
+        proposal.status = "expired"
+        safe_answer_agent_callback(token, callback_id, "Срок подтверждения истёк.")
+        return
+
+    if decision == "reject":
+        proposal.status = "rejected"
+        proposal.result_text = "Отклонено владельцем"
+        session.add(
+            AiActionLog(
+                conversation_id=proposal.conversation_id,
+                lease_id=proposal.lease_id,
+                actor_role="owner",
+                action_type=proposal.action_type,
+                status="rejected",
+                payload_json=proposal.payload_json,
+                note="owner rejected agent proposal",
+            )
+        )
+        safe_answer_agent_callback(token, callback_id, "Отклонено. Данные не менялись.")
+        send_telegram_text(session, chat_id, f"Отклонено: {proposal.preview_text.splitlines()[0]}.")
+    else:
+        proposal.status = "executing"
+        proposal.confirmed_at = utc_now()
+        session.flush()
+        try:
+            result_text = execute_agent_action(session, proposal)
+        except HTTPException as exc:
+            proposal.status = "failed"
+            proposal.result_text = str(exc.detail)
+            session.add(
+                AiActionLog(
+                    conversation_id=proposal.conversation_id,
+                    lease_id=proposal.lease_id,
+                    actor_role="owner",
+                    action_type=proposal.action_type,
+                    status="failed",
+                    payload_json=proposal.payload_json,
+                    note=str(exc.detail),
+                )
+            )
+            safe_answer_agent_callback(token, callback_id, "Не выполнено: данные изменились.")
+            send_telegram_text(session, chat_id, f"Действие не выполнено: {exc.detail}")
+        else:
+            proposal.status = "executed"
+            proposal.executed_at = utc_now()
+            proposal.result_text = result_text
+            session.add(
+                AiActionLog(
+                    conversation_id=proposal.conversation_id,
+                    lease_id=proposal.lease_id,
+                    actor_role="owner",
+                    action_type=proposal.action_type,
+                    status="executed",
+                    payload_json=proposal.payload_json,
+                    note=result_text,
+                )
+            )
+            safe_answer_agent_callback(token, callback_id, "Подтверждено и выполнено.")
+            send_telegram_text(session, chat_id, f"Готово. {result_text}", app_keyboard(app_base_url(session)))
+
+    message_id = message.get("message_id") or proposal.owner_message_id
+    if message_id:
+        try:
+            clear_inline_keyboard(token, chat_id, int(message_id))
+        except TelegramApiError:
+            pass
 
 
 def tenant_requisites_text(session: Session) -> str:
@@ -4963,6 +6157,7 @@ def telegram_help_text() -> str:
     return "\n".join(
         [
             "🤖 Команды owner-бота:",
+            "Обычный текст — разговор с агентом; команды ниже обрабатываются механически.",
             "/start - приветствие",
             "/id - показать chat id",
             "/status - 📊 статус пульта",
@@ -5156,15 +6351,19 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
         )
         return
 
+    if text:
+        handle_owner_ai_message(session, chat_id, text)
+        return
     send_telegram_text(session, chat_id, telegram_help_text(), app_keyboard(base_url))
 
 
 def process_telegram_update_background(payload: dict[str, Any]) -> None:
     update_id = payload.get("update_id")
     try:
+        callback = payload.get("callback_query")
         message = payload.get("message") or payload.get("edited_message") or payload.get("business_message")
-        if not message:
-            runtime_log("TELEGRAM", f"webhook ignored update_id={update_id} reason=no_message")
+        if not message and not callback:
+            runtime_log("TELEGRAM", f"webhook ignored update_id={update_id} reason=no_supported_update")
             return
         with SessionLocal() as session:
             with TELEGRAM_UPDATE_LOCK:
@@ -5173,7 +6372,10 @@ def process_telegram_update_background(payload: dict[str, Any]) -> None:
                     runtime_log("TELEGRAM", f"webhook duplicate skipped update_id={update_id}")
                     return
                 session.commit()
-            handle_telegram_message(session, message)
+            if callback:
+                handle_agent_callback_query(session, callback)
+            else:
+                handle_telegram_message(session, message)
             session.commit()
     except Exception as exc:
         runtime_log("TELEGRAM", f"background failed update_id={update_id} error={exc!r}")
@@ -5203,6 +6405,25 @@ async def telegram_webhook(request: Request, payload: dict[str, Any]) -> dict[st
     return {"ok": True}
 
 
+def ensure_runtime_telegram_webhook(session: Session) -> None:
+    token = telegram_token(session)
+    base_url = app_base_url(session)
+    if not token or not base_url.startswith("https://"):
+        return
+    payload: dict[str, Any] = {
+        "url": f"{base_url}/api/integrations/telegram/webhook",
+        "allowed_updates": ["message", "edited_message", "business_message", "callback_query"],
+    }
+    secret = telegram_secret(session)
+    if secret:
+        payload["secret_token"] = secret
+    try:
+        result = telegram_api_request(token, "setWebhook", payload)
+        runtime_log("TELEGRAM", f"runtime webhook refresh ok={bool(result.get('ok'))}")
+    except TelegramApiError as exc:
+        runtime_log("TELEGRAM", f"runtime webhook refresh skipped error={exc}")
+
+
 @app.post("/api/integrations/telegram/set-webhook")
 def telegram_set_webhook(payload: dict[str, Any] | None = None, session: Session = Depends(get_session)) -> dict[str, Any]:
     token = telegram_token(session)
@@ -5213,7 +6434,7 @@ def telegram_set_webhook(payload: dict[str, Any] | None = None, session: Session
         raise HTTPException(400, "Для webhook нужен публичный HTTPS URL в app_base_url")
     payload: dict[str, Any] = {
         "url": f"{base_url}/api/integrations/telegram/webhook",
-        "allowed_updates": ["message", "edited_message", "business_message"],
+        "allowed_updates": ["message", "edited_message", "business_message", "callback_query"],
         "drop_pending_updates": True,
     }
     secret = telegram_secret(session)
@@ -5693,6 +6914,30 @@ def delete_lease(lease_id: int, session: Session = Depends(get_session)) -> dict
     if not lease:
         raise HTTPException(404, "Договор не найден")
     tenant = lease.tenant
+    for state in session.scalars(select(AgentTenantState).where(AgentTenantState.lease_id == lease.id)).all():
+        session.delete(state)
+    for memory in session.scalars(select(AgentMemory).where(AgentMemory.lease_id == lease.id)).all():
+        session.delete(memory)
+    for proposal in session.scalars(select(AgentActionProposal).where(AgentActionProposal.lease_id == lease.id)).all():
+        proposal.lease_id = None
+        if proposal.status == "pending":
+            proposal.status = "cancelled"
+            proposal.result_text = "Договор удалён до подтверждения действия"
+    for task in session.scalars(select(AgentTask).where(AgentTask.lease_id == lease.id)).all():
+        task.lease_id = None
+        task.status = "resolved"
+        task.resolved_at = utc_now()
+    for ai_message in session.scalars(select(AiMessage).where(AiMessage.lease_id == lease.id)).all():
+        ai_message.lease_id = None
+    for action_log in session.scalars(select(AiActionLog).where(AiActionLog.lease_id == lease.id)).all():
+        action_log.lease_id = None
+    for conversation in session.scalars(
+        select(AiConversation).where(
+            or_(AiConversation.lease_id == lease.id, AiConversation.tenant_id == lease.tenant_id)
+        )
+    ).all():
+        conversation.lease_id = None
+        conversation.tenant_id = None
     session.execute(delete(MessageLog).where(MessageLog.lease_id == lease.id))
     for receipt in session.scalars(select(PaymentReceipt).where(PaymentReceipt.lease_id == lease.id)).all():
         linked_expense = linked_expense_fund_record(session, receipt.id)
