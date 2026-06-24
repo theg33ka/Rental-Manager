@@ -47,7 +47,7 @@ const statusText = {
   compensated: "компенсировано",
   not_required: "не требуется",
   suspicious: "проверить",
-  accepted: "принят",
+  accepted: "зачтён",
   moderated: "модерировано",
   rejected: "отклонён",
   ignored: "скрыт",
@@ -1759,6 +1759,7 @@ function renderRentHistory() {
             </label>
             <div class="receipt-editor__actions">
               <button class="mini primary" type="submit">Сохранить</button>
+              ${receipt.status === "suspicious" ? '<button class="mini success-soft" type="submit" data-action="accept">Зачесть платёж</button>' : ""}
               <button class="mini" type="button" onclick="cancelPaymentReceiptEdit()">Отмена</button>
             </div>
           </form>
@@ -1817,6 +1818,11 @@ async function savePaymentReceiptEdit(event, receiptId) {
   const receipt = history.receipts.find((item) => item.id === receiptId);
   if (!receipt) return;
   const payload = formData(event.currentTarget);
+  const acceptPayment = event.submitter?.dataset.action === "accept";
+  if (acceptPayment && !payload.target_ref) {
+    toast("Укажите, за что зачесть платёж");
+    return;
+  }
   payload.amount = Number(payload.amount);
   if (payload.target_ref) {
     const [targetKind, targetId] = payload.target_ref.split(":");
@@ -1829,13 +1835,16 @@ async function savePaymentReceiptEdit(event, receiptId) {
   } else {
     delete payload.channel;
   }
+  if (acceptPayment) {
+    payload.status = "accepted";
+  }
   delete payload.target_ref;
   await api(`/api/payment-receipts/${receiptId}`, {
     method: "PATCH",
     body: JSON.stringify(payload),
   });
   state.editingPaymentReceiptId = null;
-  toast("Платёж обновлён");
+  toast(acceptPayment ? "Платёж проверен и зачтён" : "Платёж обновлён");
   await openPaymentHistory(history.lease_id);
   await loadAll();
 }

@@ -6227,6 +6227,13 @@ def update_payment_receipt(receipt_id: int, payload: dict[str, Any], session: Se
         receipt.lease_id = lease.id
         receipt.utility_line_id = None
         receipt.apartment_id = lease.apartment_id
+    requested_status = (payload.get("status") or "").strip()
+    if requested_status:
+        if requested_status != "accepted":
+            raise HTTPException(400, "через редактор платёж можно только перевести в статус «зачтён»")
+        if not receipt.rent_charge_id and not receipt.utility_line_id and receipt.channel != UTILITY_ADVANCE_CHANNEL:
+            raise HTTPException(400, "сначала укажите, за что зачесть платёж")
+        receipt.status = "accepted"
     session.flush()
     sync_expense_fund_receipt(session, receipt)
     if receipt.status == "accepted":

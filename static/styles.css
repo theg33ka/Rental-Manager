@@ -260,6 +260,12 @@ button:hover,
   color: var(--danger);
 }
 
+.success-soft {
+  border-color: var(--primary);
+  background: var(--ok-bg);
+  color: var(--primary-strong);
+}
+
 .contact-telegram {
   border-color: var(--telegram);
   background: var(--telegram);
