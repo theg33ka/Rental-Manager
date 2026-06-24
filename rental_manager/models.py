@@ -260,6 +260,31 @@ class AgentTenantState(Base):
     lease: Mapped[Lease] = relationship()
 
 
+class PaymentSituation(Base):
+    __tablename__ = "payment_situations"
+    __table_args__ = (UniqueConstraint("kind", "reference_id", name="uq_payment_situation_kind_reference"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    lease_id: Mapped[int] = mapped_column(ForeignKey("leases.id"))
+    kind: Mapped[str] = mapped_column(String(40))
+    reference_id: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(60), default="awaiting_payment")
+    mode: Mapped[str] = mapped_column(String(20), default="normal")
+    notification_count: Mapped[int] = mapped_column(Integer, default=0)
+    tenant_response_count: Mapped[int] = mapped_column(Integer, default=0)
+    promise_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    paused_until: Mapped[date | None] = mapped_column(Date, nullable=True)
+    last_notification_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_tenant_response_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    owner_last_notified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    escalated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
+
+    lease: Mapped[Lease] = relationship()
+
+
 class AgentTask(Base):
     __tablename__ = "agent_tasks"
     __table_args__ = (UniqueConstraint("issue_key", name="uq_agent_task_issue_key"),)

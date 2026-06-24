@@ -42,6 +42,7 @@ from rental_manager.models import (
     Meter,
     MeterReading,
     PaymentReceipt,
+    PaymentSituation,
     RentalObject,
     RentCharge,
     Tariff,
@@ -138,7 +139,7 @@ from rental_manager.services.telegram_bot import (
 )
 
 
-APP_BUILD_MARKER = "owner-operations-confirmation-2026-06-24"
+APP_BUILD_MARKER = "smart-payment-notifications-2026-06-24"
 
 
 app = FastAPI(title="Rental Manager", version="0.1.0")
@@ -156,8 +157,8 @@ DEFAULT_SETTINGS = {
     "telegram_owner_chat_id": "",
     "notifications_enabled": False,
     "notification_cutoff_date": "",
-    "automation_rent_due_cadence": "twice_daily",
-    "automation_rent_overdue_cadence": "twice_daily",
+    "automation_rent_due_cadence": "daily_evening",
+    "automation_rent_overdue_cadence": "daily_evening",
     "automation_utility_cadence": "daily_evening",
     "ai_enabled": False,
     "ai_tenant_free_text_enabled": True,
@@ -181,12 +182,59 @@ DEFAULT_SETTINGS = {
     "personal_recipient_name": "",
     "personal_recipient_phone": "",
     "personal_recipient_bank": "",
-    "message_rent_due": "Здравствуйте. Напоминаю: по квартире {apartment} сегодня ожидается оплата аренды. ИП: {ip_due}. Перевод: {personal_due}. Итого: {total_due}.",
-    "message_rent_overdue": "Здравствуйте. По квартире {apartment} сейчас просрочена аренда. Долг: {debt}. ИП: {ip_due}. Перевод: {personal_due}.",
-    "message_utility_bill": "Здравствуйте. Сформированы счета по коммунальным платежам.\n{utility_debt_details}\n\nВсего: {utility_total}. Срок оплаты до {utility_due_date}. Оплата переводом на {personal_recipient_phone_text} {personal_recipient_bank_text}.\n\nОтправьте чеки в этот чат в виде документа, скриншоты больше не принимаются.\n(История платежей в приложении банка -> чек об операции -> сохранить или отправить)",
-    "message_all_debts": "Здравствуйте. Уведомляем вас о наличии следующих задолженностей:\n{all_debts_breakdown}\n\nОтправьте чеки в этот чат в виде документа, скриншоты больше не принимаются.\n(История платежей в приложении банка -> чек об операции -> сохранить или отправить)",
-    "message_receipt_received": "Чек получил и сохранил. Если всё совпало, я это отмечу. Если нет, передам владельцу на ручную проверку.",
-    "message_receipt_review": "Чек получил, но там есть вопросы. Я уже отправил его владельцу на проверку.",
+    "message_rent_upcoming": (
+        "Здравствуйте! Напоминаю, что {rent_due_date} ожидается оплата аренды за период {rent_period}.\n\n"
+        "К оплате: {total_due}\n"
+        "• {ip_due} — на расчётный счёт ИП {ip_recipient_name_text}, счёт {ip_recipient_account_text}\n"
+        "• {personal_due} — переводом по номеру {personal_recipient_phone_text}, {personal_recipient_bank_text}\n\n"
+        "После каждого перевода отправьте чек PDF-документом в этот чат."
+    ),
+    "message_rent_due": (
+        "Сегодня день оплаты аренды за период {rent_period}.\n\n"
+        "К оплате: {total_due}\n"
+        "• {ip_due} — на расчётный счёт ИП {ip_recipient_name_text}, счёт {ip_recipient_account_text}\n"
+        "• {personal_due} — переводом по номеру {personal_recipient_phone_text}, {personal_recipient_bank_text}\n\n"
+        "После оплаты отправьте чек PDF-документом. Если переводы выполнялись отдельно, отправьте оба чека."
+    ),
+    "message_rent_overdue": (
+        "Оплата аренды пока не подтверждена.\n\n"
+        "Текущий долг: {debt}\n"
+        "• на ИП {ip_recipient_name_text}, счёт {ip_recipient_account_text}: {ip_due}\n"
+        "• по номеру {personal_recipient_phone_text}, {personal_recipient_bank_text}: {personal_due}\n"
+        "Период: {rent_period}\n\n"
+        "Сообщите статус оплаты или отправьте чек PDF-документом, если перевод уже выполнен."
+    ),
+    "message_rent_status_request": (
+        "Оплата аренды всё ещё не подтверждена.\n\n"
+        "Долг: {debt}\n"
+        "• на ИП {ip_recipient_name_text}, счёт {ip_recipient_account_text}: {ip_due}\n"
+        "• по номеру {personal_recipient_phone_text}, {personal_recipient_bank_text}: {personal_due}\n\n"
+        "Пожалуйста, выберите актуальный статус. После ответа автоматические напоминания будут поставлены на паузу."
+    ),
+    "message_utility_bill": (
+        "Сформированы счета по коммунальным платежам:\n{utility_debt_details}\n\n"
+        "Всего: {utility_total}. Срок оплаты — до {utility_due_date}.\n"
+        "Коммуналка оплачивается переводом по номеру {personal_recipient_phone_text}, "
+        "{personal_recipient_bank_text}. Учтённые авансы уже вычтены из суммы.\n\n"
+        "После оплаты отправьте чек PDF-документом в этот чат."
+    ),
+    "message_utility_overdue": (
+        "Коммунальные платежи пока не подтверждены:\n{utility_debt_details}\n\n"
+        "Остаток: {utility_total}. Оплата переводом по номеру {personal_recipient_phone_text}, "
+        "{personal_recipient_bank_text}.\n\n"
+        "Сообщите статус или отправьте чек PDF-документом."
+    ),
+    "message_all_debts": (
+        "Здравствуйте. Сейчас в системе открыты следующие платежи:\n{all_debts_breakdown}\n\n"
+        "Аренда оплачивается двумя назначениями: указанная часть — на расчётный счёт ИП, "
+        "дополнительная часть — переводом по номеру телефона. Коммуналка оплачивается по номеру телефона.\n"
+        "После каждого перевода отправьте соответствующий чек в этот чат в виде документа PDF."
+    ),
+    "message_receipt_received": (
+        "Чек получен. Если сумма, получатель и назначение совпали, платёж будет зачтён автоматически. "
+        "Если проверка найдёт расхождение, чек получит владелец."
+    ),
+    "message_receipt_review": "Чек получен, но автоматически зачесть его не получилось. Передал владельцу на проверку; напоминания по этой ситуации остановлены.",
     "message_receipt_duplicate": "Этот чек уже есть в системе. Повторно засчитывать его не буду.",
     "message_owner_receipt_alert": "🧾 Новый чек от {tenant_name}\n🏠 Квартира: {apartment}\n💰 Сумма: {amount}\n📌 Канал: {channel}\n⚙️ Статус: {receipt_status}\n{receipt_summary}",
 }
@@ -206,6 +254,7 @@ INTERNAL_SETTINGS = {
     "accepted_monthly_reports": "[]",
     "notified_monthly_reports": "[]",
     "owner_due_digest_dates": "[]",
+    "owner_payment_digest_dates": "[]",
     "processed_move_out_notifications": "[]",
     "panel_auth_sessions": "{}",
 }
@@ -420,6 +469,8 @@ PERFORMANCE_INDEXES = [
     ("ix_rm_ai_conversations_chat_role", "ai_conversations (chat_id, role, status)"),
     ("ix_rm_ai_messages_conversation_created", "ai_messages (conversation_id, created_at)"),
     ("ix_rm_ai_usage_daily_date", "ai_usage_daily (usage_date, provider, model)"),
+    ("ix_rm_payment_situations_lease_status", "payment_situations (lease_id, status, mode)"),
+    ("ix_rm_payment_situations_kind_reference", "payment_situations (kind, reference_id)"),
 ]
 
 
@@ -596,6 +647,19 @@ def ensure_runtime_defaults(session: Session) -> None:
     if owner_receipt_setting and owner_receipt_setting.value == old_owner_receipt_alert:
         owner_receipt_setting.value = DEFAULT_SETTINGS["message_owner_receipt_alert"]
         changed = True
+    old_message_defaults = {
+        "message_rent_due": "Здравствуйте. Напоминаю: по квартире {apartment} сегодня ожидается оплата аренды. ИП: {ip_due}. Перевод: {personal_due}. Итого: {total_due}.",
+        "message_rent_overdue": "Здравствуйте. По квартире {apartment} сейчас просрочена аренда. Долг: {debt}. ИП: {ip_due}. Перевод: {personal_due}.",
+        "message_utility_bill": "Здравствуйте. Сформированы счета по коммунальным платежам.\n{utility_debt_details}\n\nВсего: {utility_total}. Срок оплаты до {utility_due_date}. Оплата переводом на {personal_recipient_phone_text} {personal_recipient_bank_text}.\n\nОтправьте чеки в этот чат в виде документа, скриншоты больше не принимаются.\n(История платежей в приложении банка -> чек об операции -> сохранить или отправить)",
+        "message_all_debts": "Здравствуйте. Уведомляем вас о наличии следующих задолженностей:\n{all_debts_breakdown}\n\nОтправьте чеки в этот чат в виде документа, скриншоты больше не принимаются.\n(История платежей в приложении банка -> чек об операции -> сохранить или отправить)",
+        "message_receipt_received": "Чек получил и сохранил. Если всё совпало, я это отмечу. Если нет, передам владельцу на ручную проверку.",
+        "message_receipt_review": "Чек получил, но там есть вопросы. Я уже отправил его владельцу на проверку.",
+    }
+    for key, old_value in old_message_defaults.items():
+        setting = session.get(AppSetting, key)
+        if setting and setting.value == old_value:
+            setting.value = str(DEFAULT_SETTINGS[key])
+            changed = True
     if changed:
         session.flush()
 
@@ -810,6 +874,7 @@ def table_model_map() -> dict[str, Any]:
         "agent_memories": AgentMemory,
         "agent_action_proposals": AgentActionProposal,
         "agent_tenant_states": AgentTenantState,
+        "payment_situations": PaymentSituation,
         "agent_tasks": AgentTask,
         "ai_usage_daily": AiUsageDaily,
         "utility_services": UtilityService,
@@ -1417,8 +1482,11 @@ def fill_template(template: str, context: dict[str, Any]) -> str:
 def reminder_label(template_key: str) -> str:
     return {
         "message_rent_due": "аренда сегодня",
+        "message_rent_upcoming": "аренда через 3 дня",
         "message_rent_overdue": "долг по аренде",
+        "message_rent_status_request": "запрос статуса аренды",
         "message_utility_bill": "коммуналка",
+        "message_utility_overdue": "просроченная коммуналка",
         "message_all_debts": "все долги",
         "custom": "свой текст",
     }.get(template_key, template_key or "сообщение")
@@ -2329,6 +2397,7 @@ def import_release_baseline(session: Session) -> dict[str, int]:
         AgentMemory,
         AgentTask,
         AgentTenantState,
+        PaymentSituation,
         AiActionLog,
         AiMessage,
         AiConversation,
@@ -3400,7 +3469,7 @@ def build_message_context(
     utility_lines = selected_utility_lines(session, lease, line, utility_lines_override, today)
     current_utility_total = sum(max(0.0, item.total_amount - item.paid_amount) for item in utility_lines)
     utility_due_date_value = utility_due_date_override or next((item.due_date for item in utility_lines if item.due_date), line.due_date if line else None)
-    utility_due_date = format_date(utility_due_date_value) if utility_due_date_value else ""
+    utility_due_date = format_full_date(utility_due_date_value) if utility_due_date_value else ""
     utility_period = ""
     utility_service = ""
     if utility_lines:
@@ -3462,8 +3531,10 @@ def build_message_context(
         "all_debt_total": money_text(total_rent_debt + total_utility_debt + total_manual_debt),
         "all_debts_breakdown": build_all_debts_breakdown(session, lease, today),
         "custom_text": custom_text,
-        "personal_recipient_phone_text": get_settings(session).get("personal_recipient_phone") or "+79133854441",
-        "personal_recipient_bank_text": get_settings(session).get("personal_recipient_bank") or "Сбербанк",
+        "ip_recipient_name_text": get_settings(session).get("ip_recipient_name") or "ИП не указан",
+        "ip_recipient_account_text": get_settings(session).get("ip_recipient_account") or "счёт не указан",
+        "personal_recipient_phone_text": get_settings(session).get("personal_recipient_phone") or "номер не указан",
+        "personal_recipient_bank_text": get_settings(session).get("personal_recipient_bank") or "банк не указан",
     }
 
 
@@ -3603,6 +3674,7 @@ def send_tenant_message(
     note: str = "manual",
     utility_lines_override: list[UtilityBillLine] | None = None,
     utility_due_date_override: date | None = None,
+    keyboard: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     chat_id = lease_chat_id(session, lease)
     if not chat_id:
@@ -3619,7 +3691,7 @@ def send_tenant_message(
     )
     if not text.strip():
         raise HTTPException(400, "Текст сообщения пустой")
-    send_telegram_text(session, chat_id, text)
+    send_telegram_text(session, chat_id, text, keyboard)
     session.add(
         MessageLog(
             lease_id=lease.id,
@@ -4075,6 +4147,324 @@ def reminder_sent_today(
     return bool(session.scalar(query.limit(1)))
 
 
+PAYMENT_SITUATION_FINAL_STATUSES = {"paid", "cancelled"}
+PAYMENT_SITUATION_PAUSED_STATUSES = {
+    "awaiting_receipt",
+    "awaiting_payment_date",
+    "receipt_pending_review",
+    "promised",
+    "short_deferral",
+    "question",
+    "escalated",
+    "manual",
+    "ignored",
+}
+MAX_AUTOMATIC_SITUATION_REMINDERS = 3
+
+
+def situation_metadata(situation: PaymentSituation) -> dict[str, Any]:
+    try:
+        parsed = json.loads(situation.metadata_json or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def save_situation_metadata(situation: PaymentSituation, metadata: dict[str, Any]) -> None:
+    situation.metadata_json = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
+
+
+def payment_situation(
+    session: Session,
+    kind: str,
+    reference_id: int,
+    lease_id: int,
+) -> PaymentSituation:
+    situation = session.scalar(
+        select(PaymentSituation)
+        .where(
+            PaymentSituation.kind == kind,
+            PaymentSituation.reference_id == int(reference_id),
+        )
+        .limit(1)
+    )
+    if situation:
+        return situation
+    situation = PaymentSituation(
+        lease_id=lease_id,
+        kind=kind,
+        reference_id=int(reference_id),
+        status="awaiting_payment",
+        mode="normal",
+    )
+    session.add(situation)
+    session.flush()
+    return situation
+
+
+def payment_situation_target(
+    session: Session,
+    situation: PaymentSituation,
+) -> RentCharge | UtilityBillLine | None:
+    if situation.kind == "rent":
+        return session.get(RentCharge, situation.reference_id)
+    if situation.kind == "utility":
+        return session.get(UtilityBillLine, situation.reference_id)
+    return None
+
+
+def situation_due_date(target: RentCharge | UtilityBillLine | None) -> date | None:
+    return target.due_date if target else None
+
+
+def situation_debt(target: RentCharge | UtilityBillLine | None) -> float:
+    if isinstance(target, RentCharge):
+        return money(
+            max(0.0, float(target.ip_due or 0) - float(target.ip_paid or 0))
+            + max(0.0, float(target.personal_due or 0) - float(target.personal_paid or 0))
+        )
+    if isinstance(target, UtilityBillLine):
+        return money(max(0.0, float(target.total_amount or 0) - float(target.paid_amount or 0)))
+    return 0.0
+
+
+def situation_lease(target: RentCharge | UtilityBillLine | None) -> Lease | None:
+    return target.lease if target else None
+
+
+def sync_payment_situation(
+    session: Session,
+    situation: PaymentSituation,
+    today: date | None = None,
+) -> PaymentSituation:
+    today = today or date.today()
+    target = payment_situation_target(session, situation)
+    if isinstance(target, RentCharge):
+        update_rent_charge_status(target, today)
+    elif isinstance(target, UtilityBillLine):
+        update_utility_line_status(target, today)
+    if target is None:
+        situation.status = "cancelled"
+        return situation
+    if situation_debt(target) <= EPS:
+        situation.status = "paid"
+        situation.paused_until = None
+        situation.promise_date = None
+        return situation
+    if situation.status in {"promised", "short_deferral"} and situation.paused_until:
+        if today < situation.paused_until:
+            return situation
+        situation.status = "awaiting_payment"
+        situation.paused_until = None
+    if situation.mode == "manual":
+        situation.status = "manual"
+    return situation
+
+
+def situation_payment_breakdown(target: RentCharge | UtilityBillLine) -> list[str]:
+    if isinstance(target, RentCharge):
+        ip_left = money(max(0.0, float(target.ip_due or 0) - float(target.ip_paid or 0)))
+        personal_left = money(max(0.0, float(target.personal_due or 0) - float(target.personal_paid or 0)))
+        return [
+            f"на расчётный счёт ИП: {money_text(ip_left)}",
+            f"переводом по номеру телефона: {money_text(personal_left)}",
+        ]
+    service = target.bill.service.name if target.bill and target.bill.service else "коммунальные услуги"
+    return [f"{service}: {money_text(situation_debt(target))} — перевод по номеру телефона"]
+
+
+def tenant_situation_keyboard(situation: PaymentSituation, *, overdue: bool = False) -> dict[str, Any]:
+    later_text = "📅 Указать дату оплаты" if overdue else "🕓 Оплачу позже"
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "✅ Оплатил(а)", "callback_data": f"tenantpay:{situation.id}:paid"},
+                {"text": "📎 Отправить чек", "callback_data": f"tenantpay:{situation.id}:receipt"},
+            ],
+            [
+                {"text": later_text, "callback_data": f"tenantpay:{situation.id}:later"},
+                {"text": "💬 Есть вопрос", "callback_data": f"tenantpay:{situation.id}:question"},
+            ],
+        ]
+    }
+
+
+def owner_situation_keyboard(situation: PaymentSituation) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "💬 Подготовить сообщение", "callback_data": f"ownersit:{situation.id}:suggest"},
+                {"text": "⏳ Подождать день", "callback_data": f"ownersit:{situation.id}:wait"},
+            ],
+            [
+                {"text": "🔕 В ручной режим", "callback_data": f"ownersit:{situation.id}:manual"},
+            ],
+        ]
+    }
+
+
+def financial_notification_sent_today(session: Session, lease_id: int, today: date) -> bool:
+    local_start = datetime.combine(today, time.min, tzinfo=LOCAL_TZ)
+    utc_start = local_start.astimezone(timezone.utc).replace(tzinfo=None)
+    utc_end = (local_start + timedelta(days=1)).astimezone(timezone.utc).replace(tzinfo=None)
+    return bool(
+        session.scalar(
+            select(MessageLog.id)
+            .where(
+                MessageLog.lease_id == lease_id,
+                MessageLog.channel == "telegram",
+                MessageLog.note.like("auto-financial:%"),
+                MessageLog.created_at >= utc_start,
+                MessageLog.created_at < utc_end,
+            )
+            .limit(1)
+        )
+    )
+
+
+def situation_stage_sent(session: Session, situation: PaymentSituation, stage: str) -> bool:
+    note = f"auto-financial:{situation.kind}:{situation.id}:{stage}"
+    return bool(session.scalar(select(MessageLog.id).where(MessageLog.note == note).limit(1)))
+
+
+def send_payment_situation_message(
+    session: Session,
+    situation: PaymentSituation,
+    template_key: str,
+    stage: str,
+    today: date,
+) -> bool:
+    target = payment_situation_target(session, situation)
+    lease = situation_lease(target)
+    if target is None or lease is None:
+        return False
+    if financial_notification_sent_today(session, lease.id, today):
+        return False
+    if situation.notification_count >= MAX_AUTOMATIC_SITUATION_REMINDERS:
+        return False
+    text = render_message_text(
+        session,
+        template_key,
+        lease,
+        charge=target if isinstance(target, RentCharge) else None,
+        line=target if isinstance(target, UtilityBillLine) else None,
+    )
+    chat_id = lease_chat_id(session, lease)
+    if not chat_id:
+        return False
+    send_telegram_text(
+        session,
+        chat_id,
+        text,
+        tenant_situation_keyboard(situation, overdue=bool(situation_due_date(target) and situation_due_date(target) < today)),
+    )
+    session.add(
+        MessageLog(
+            lease_id=lease.id,
+            rent_charge_id=target.id if isinstance(target, RentCharge) else None,
+            utility_line_id=target.id if isinstance(target, UtilityBillLine) else None,
+            channel="telegram",
+            template_key=template_key,
+            status="sent",
+            recipient_chat_id=str(chat_id),
+            text=text,
+            note=f"auto-financial:{situation.kind}:{situation.id}:{stage}",
+        )
+    )
+    situation.notification_count = int(situation.notification_count or 0) + 1
+    situation.last_notification_at = utc_now()
+    situation.status = {
+        "upcoming": "first_reminder_sent",
+        "due": "due_today",
+        "overdue_1": "overdue",
+        "overdue_3": "overdue",
+    }.get(stage, situation.status)
+    session.flush()
+    return True
+
+
+def situation_owner_event_sent(situation: PaymentSituation, event: str) -> bool:
+    events = situation_metadata(situation).get("owner_events") or []
+    return event in events
+
+
+def mark_situation_owner_event(situation: PaymentSituation, event: str) -> None:
+    metadata = situation_metadata(situation)
+    events = [str(item) for item in metadata.get("owner_events") or []]
+    if event not in events:
+        events.append(event)
+    metadata["owner_events"] = events[-30:]
+    save_situation_metadata(situation, metadata)
+    situation.owner_last_notified_at = utc_now()
+
+
+def owner_situation_text(
+    situation: PaymentSituation,
+    target: RentCharge | UtilityBillLine,
+    event: str,
+    today: date,
+) -> str:
+    lease = target.lease
+    due = situation_due_date(target) or today
+    overdue_days = max(0, (today - due).days)
+    kind_label = "аренды" if situation.kind == "rent" else "коммунальных платежей"
+    event_title = {
+        "due_unpaid": "Сегодня был день оплаты, но платёж пока не поступил.",
+        "overdue_1": f"Оплата {kind_label} просрочена на 1 день.",
+        "overdue_3": f"Оплата {kind_label} просрочена на 3 дня.",
+        "overdue_5": f"Оплата {kind_label} просрочена на 5 дней.",
+        "ignored": "Жилец не отвечает на финансовые уведомления.",
+        "question": f"Жилец задал вопрос по оплате {kind_label}.",
+        "promise": f"Жилец сообщил новую дату оплаты {kind_label}.",
+        "short_deferral": "Система автоматически зафиксировала короткую отсрочку.",
+        "receipt": f"Жилец отправил чек по оплате {kind_label}.",
+        "manual": "Ситуация переведена в ручной режим.",
+    }.get(event, f"Обновилась ситуация по оплате {kind_label}.")
+    lines = [
+        event_title,
+        "",
+        f"Объект: {lease.apartment.object.name}",
+        f"Квартира: {lease.apartment.name}",
+        f"Жилец: {lease.tenant.full_name}",
+        f"Сумма к оплате: {money_text(situation_debt(target))}",
+        f"Срок: {format_full_date(due)}",
+        f"Просрочка: {overdue_days} дн.",
+        f"Автоматических уведомлений: {int(situation.notification_count or 0)}",
+        f"Статус: {situation.status}",
+    ]
+    if isinstance(target, RentCharge):
+        lines.extend(["", "Назначения платежей:", *[f"• {item}" for item in situation_payment_breakdown(target)]])
+    elif target.bill and target.bill.service:
+        lines.append(f"Услуга: {target.bill.service.name}; оплата переводом по номеру телефона.")
+    if situation.promise_date:
+        lines.append(f"Новая дата ожидания: {format_full_date(situation.promise_date)}")
+    if event == "ignored":
+        lines.extend(["", "Автосистема остановила сообщения по этой ситуации, чтобы не спамить."])
+    return "\n".join(lines)
+
+
+def notify_owner_situation_event(
+    session: Session,
+    situation: PaymentSituation,
+    event: str,
+    today: date,
+) -> bool:
+    if situation_owner_event_sent(situation, event):
+        return False
+    owner_id = telegram_owner_chat_id(session)
+    target = payment_situation_target(session, situation)
+    if not owner_id or not telegram_token(session) or target is None:
+        return False
+    send_telegram_text(
+        session,
+        owner_id,
+        owner_situation_text(situation, target, event, today),
+        owner_situation_keyboard(situation),
+    )
+    mark_situation_owner_event(situation, event)
+    return True
+
+
 def due_day_notice_allows_send(session: Session, charge: RentCharge, now: datetime) -> bool:
     slot = datetime.combine(charge.due_date, time(hour=10), tzinfo=LOCAL_TZ)
     if now < slot:
@@ -4083,7 +4473,7 @@ def due_day_notice_allows_send(session: Session, charge: RentCharge, now: dateti
 
 
 def run_owner_due_payment_digest(session: Session, today: date, now: datetime) -> int:
-    if now < datetime.combine(today, time(hour=21), tzinfo=LOCAL_TZ):
+    if now < datetime.combine(today, time(hour=20), tzinfo=LOCAL_TZ):
         return 0
     owner_id = telegram_owner_chat_id(session)
     if not owner_id or not telegram_token(session):
@@ -4120,6 +4510,90 @@ def run_owner_due_payment_digest(session: Session, today: date, now: datetime) -
         return 0
     sent_set.add(today_key)
     set_internal_json(session, "owner_due_digest_dates", sorted(sent_set))
+    return 1
+
+
+def run_owner_payment_digest(session: Session, today: date, now: datetime) -> int:
+    if now < datetime.combine(today, time(hour=10), tzinfo=LOCAL_TZ):
+        return 0
+    owner_id = telegram_owner_chat_id(session)
+    if not owner_id or not telegram_token(session):
+        return 0
+    sent_dates = get_internal_json(session, "owner_payment_digest_dates", [])
+    sent_set = {str(item) for item in sent_dates if isinstance(item, str)} if isinstance(sent_dates, list) else set()
+    today_key = today.isoformat()
+    if today_key in sent_set:
+        return 0
+
+    for charge in session.scalars(
+        select(RentCharge).join(Lease).where(Lease.active.is_(True))
+    ).all():
+        update_rent_charge_status(charge, today)
+        if situation_debt(charge) > EPS:
+            sync_payment_situation(
+                session,
+                payment_situation(session, "rent", charge.id, charge.lease_id),
+                today,
+            )
+    for line in session.scalars(
+        select(UtilityBillLine).join(Lease, UtilityBillLine.lease_id == Lease.id).where(Lease.active.is_(True))
+    ).all():
+        update_utility_line_status(line, today)
+        if line.lease_id and situation_debt(line) > EPS:
+            sync_payment_situation(
+                session,
+                payment_situation(session, "utility", line.id, int(line.lease_id)),
+                today,
+            )
+
+    situations = session.scalars(
+        select(PaymentSituation)
+        .where(PaymentSituation.status.not_in(PAYMENT_SITUATION_FINAL_STATUSES))
+        .order_by(PaymentSituation.kind, PaymentSituation.id)
+    ).all()
+    due_today: list[str] = []
+    overdue: list[str] = []
+    needs_review: list[str] = []
+    automated: list[str] = []
+    for situation in situations:
+        sync_payment_situation(session, situation, today)
+        target = payment_situation_target(session, situation)
+        if target is None or situation.status in PAYMENT_SITUATION_FINAL_STATUSES:
+            continue
+        lease = target.lease
+        label = f"{lease.tenant.full_name} — {lease.apartment.object.name}, {lease.apartment.name}"
+        debt = money_text(situation_debt(target))
+        due = situation_due_date(target)
+        if situation.status in {"receipt_pending_review", "question", "escalated", "manual", "ignored"}:
+            needs_review.append(f"{label}: {situation.status}, {debt}")
+        elif situation.status == "short_deferral":
+            automated.append(f"{label}: пауза до {format_full_date(situation.promise_date)}, {debt}")
+        elif due == today:
+            due_today.append(f"{label}: {debt}")
+        elif due and due < today:
+            overdue.append(f"{label}: {(today - due).days} дн., {debt}, статус {situation.status}")
+
+    if not any([due_today, overdue, needs_review, automated]):
+        sent_set.add(today_key)
+        set_internal_json(session, "owner_payment_digest_dates", sorted(sent_set))
+        return 0
+    lines = ["Сводка по платежам на сегодня:"]
+    sections = [
+        ("Сегодня должны оплатить", due_today),
+        ("Просрочки", overdue),
+        ("Нужна проверка владельца", needs_review),
+        ("Автоматически обработано", automated),
+    ]
+    for title, items in sections:
+        if not items:
+            continue
+        lines.extend(["", f"{title}:"])
+        lines.extend(f"{index}. {item}" for index, item in enumerate(items[:8], start=1))
+        if len(items) > 8:
+            lines.append(f"…ещё {len(items) - 8}")
+    send_telegram_text(session, owner_id, "\n".join(lines))
+    sent_set.add(today_key)
+    set_internal_json(session, "owner_payment_digest_dates", sorted(sent_set))
     return 1
 
 
@@ -4522,9 +4996,12 @@ def run_owner_supervisor_digest(
 def run_due_reminders(session: Session, today: date | None = None) -> dict[str, Any]:
     today = today or date.today()
     now = local_now()
+    tenant_window_open = 10 <= now.hour < 20
     cutoff = notification_cutoff_date(session)
     if not notifications_enabled(session):
-        supervisor_sent = run_owner_supervisor_digest(session, today, now, build_dashboard(session))
+        dashboard = build_dashboard(session)
+        supervisor_sent = run_owner_supervisor_digest(session, today, now, dashboard)
+        payment_digest_sent = run_owner_payment_digest(session, today, now)
         return {
             "enabled": False,
             "cutoff_date": cutoff.isoformat(),
@@ -4535,6 +5012,7 @@ def run_due_reminders(session: Session, today: date | None = None) -> dict[str, 
             "skipped_unlinked": 0,
             "failed": 0,
             "supervisor_digest_sent": supervisor_sent,
+            "owner_payment_digest_sent": payment_digest_sent,
         }
 
     summary = {
@@ -4557,7 +5035,6 @@ def run_due_reminders(session: Session, today: date | None = None) -> dict[str, 
     ).all()
     for charge in charges:
         update_rent_charge_status(charge, today)
-        template_key = ""
         if lease_ignored(session, charge.lease_id):
             summary["skipped_disabled"] += 1
             continue
@@ -4567,41 +5044,55 @@ def run_due_reminders(session: Session, today: date | None = None) -> dict[str, 
         if not lease_chat_id(session, charge.lease):
             summary["skipped_unlinked"] += 1
             continue
-        if charge.status == "pending" and charge.due_date == today:
-            template_key = "message_rent_due"
-            if not due_day_notice_allows_send(session, charge, now):
-                summary["skipped_duplicate"] += 1
-                continue
+        situation = sync_payment_situation(
+            session,
+            payment_situation(session, "rent", charge.id, charge.lease_id),
+            today,
+        )
+        rent_cadence_key = "message_rent_due" if charge.due_date >= today else "message_rent_overdue"
+        if get_lease_cadence(session, charge.lease_id, rent_cadence_key) == "never":
+            situation.mode = "manual"
+            situation.status = "manual"
+        if situation.status in PAYMENT_SITUATION_FINAL_STATUSES:
+            continue
+        if situation.mode == "manual" or situation.status in PAYMENT_SITUATION_PAUSED_STATUSES:
+            summary["skipped_disabled"] += 1
+            continue
+        due_delta = (today - charge.due_date).days
+        stage = ""
+        template_key = ""
+        if due_delta == -3 and tenant_window_open:
+            stage, template_key = "upcoming", "message_rent_upcoming"
+        elif due_delta == 0 and tenant_window_open:
+            stage, template_key = "due", "message_rent_due"
+        elif due_delta == 1 and tenant_window_open:
+            stage, template_key = "overdue_1", "message_rent_overdue"
+        elif due_delta >= 3 and tenant_window_open and situation.notification_count < MAX_AUTOMATIC_SITUATION_REMINDERS:
+            if situation.promise_date and today >= situation.promise_date and situation.paused_until is None:
+                stage = f"promise_followup_{situation.promise_date.isoformat()}"
+            else:
+                stage = "overdue_3"
+            template_key = "message_rent_status_request"
+
+        if stage and situation_stage_sent(session, situation, stage):
+            summary["skipped_duplicate"] += 1
+        elif stage:
             try:
-                send_tenant_message(session, charge.lease, template_key, charge=charge, note="auto")
-                summary["sent"] += 1
+                if send_payment_situation_message(session, situation, template_key, stage, today):
+                    summary["sent"] += 1
+                else:
+                    summary["skipped_duplicate"] += 1
             except HTTPException:
                 summary["failed"] += 1
-            continue
-        elif charge.status in {"overdue", "partial"} and charge.due_date < today:
-            if ai_enabled(session) and setting_bool_value(get_setting_value(session, "ai_dialog_reminders_enabled")):
-                try:
-                    dialogue_result = run_tenant_rent_dialogue(session, charge, today)
-                    if dialogue_result == "sent":
-                        summary["sent"] += 1
-                    else:
-                        summary["skipped_duplicate"] += 1
-                except HTTPException:
-                    summary["failed"] += 1
-                continue
-            template_key = "message_rent_overdue"
-        if not template_key:
-            continue
-        latest = latest_message_log(session, rent_charge_id=charge.id)
-        cadence = get_lease_cadence(session, charge.lease_id, template_key) or reminder_cadence(session, template_key)
-        if not cadence_allows_send(cadence, latest.created_at if latest else None, now):
-            summary["skipped_duplicate"] += 1
-            continue
-        try:
-            send_tenant_message(session, charge.lease, template_key, charge=charge, note="auto")
-            summary["sent"] += 1
-        except HTTPException:
-            summary["failed"] += 1
+
+        if due_delta == 0 and now >= datetime.combine(today, time(hour=20), tzinfo=LOCAL_TZ):
+            notify_owner_situation_event(session, situation, "due_unpaid", today)
+        if due_delta in {1, 3, 5}:
+            notify_owner_situation_event(session, situation, f"overdue_{due_delta}", today)
+        if due_delta >= 3 and situation.notification_count >= MAX_AUTOMATIC_SITUATION_REMINDERS:
+            situation.status = "ignored"
+            situation.escalated_at = situation.escalated_at or utc_now()
+            notify_owner_situation_event(session, situation, "ignored", today)
 
     lines = session.scalars(
         select(UtilityBillLine)
@@ -4623,21 +5114,57 @@ def run_due_reminders(session: Session, today: date | None = None) -> dict[str, 
         if not line.lease or not lease_chat_id(session, line.lease):
             summary["skipped_unlinked"] += 1
             continue
-        if not (line.status in {"issued", "overdue", "partial"} and line.due_date <= today):
+        if line.status not in {"issued", "overdue", "partial"}:
             continue
-        latest = latest_message_log(session, utility_line_id=line.id)
-        cadence = get_lease_cadence(session, line.lease_id or 0, "message_utility_bill") or reminder_cadence(session, "message_utility_bill")
-        if not cadence_allows_send(cadence, latest.created_at if latest else None, now):
+        situation = sync_payment_situation(
+            session,
+            payment_situation(session, "utility", line.id, int(line.lease_id or 0)),
+            today,
+        )
+        if get_lease_cadence(session, int(line.lease_id or 0), "message_utility_bill") == "never":
+            situation.mode = "manual"
+            situation.status = "manual"
+        if situation.status in PAYMENT_SITUATION_FINAL_STATUSES:
+            continue
+        if situation.mode == "manual" or situation.status in PAYMENT_SITUATION_PAUSED_STATUSES:
+            summary["skipped_disabled"] += 1
+            continue
+        due_delta = (today - line.due_date).days
+        stage = ""
+        if due_delta == 0 and tenant_window_open:
+            stage = "due"
+        elif due_delta == 1 and tenant_window_open:
+            stage = "overdue_1"
+        elif due_delta >= 3 and tenant_window_open and situation.notification_count < MAX_AUTOMATIC_SITUATION_REMINDERS:
+            if situation.promise_date and today >= situation.promise_date and situation.paused_until is None:
+                stage = f"promise_followup_{situation.promise_date.isoformat()}"
+            else:
+                stage = "overdue_3"
+        template_key = "message_utility_bill" if due_delta == 0 else "message_utility_overdue"
+
+        if stage and situation_stage_sent(session, situation, stage):
             summary["skipped_duplicate"] += 1
-            continue
-        try:
-            send_tenant_message(session, line.lease, "message_utility_bill", line=line, note="auto")
-            summary["sent"] += 1
-        except HTTPException:
-            summary["failed"] += 1
+        elif stage:
+            try:
+                if send_payment_situation_message(session, situation, template_key, stage, today):
+                    summary["sent"] += 1
+                else:
+                    summary["skipped_duplicate"] += 1
+            except HTTPException:
+                summary["failed"] += 1
+
+        if due_delta == 0 and now >= datetime.combine(today, time(hour=20), tzinfo=LOCAL_TZ):
+            notify_owner_situation_event(session, situation, "due_unpaid", today)
+        if due_delta in {1, 3, 5}:
+            notify_owner_situation_event(session, situation, f"overdue_{due_delta}", today)
+        if due_delta >= 3 and situation.notification_count >= MAX_AUTOMATIC_SITUATION_REMINDERS:
+            situation.status = "ignored"
+            situation.escalated_at = situation.escalated_at or utc_now()
+            notify_owner_situation_event(session, situation, "ignored", today)
 
     dashboard = build_dashboard(session)
-    summary["owner_due_digest_sent"] = run_owner_due_payment_digest(session, today, now)
+    summary["owner_due_digest_sent"] = 0
+    summary["owner_payment_digest_sent"] = run_owner_payment_digest(session, today, now)
     summary["supervisor_digest_sent"] = run_owner_supervisor_digest(session, today, now, dashboard)
     summary["move_out_processed"] = process_move_out_notifications(session, today)["processed"]
     return summary
@@ -5160,6 +5687,31 @@ def handle_tenant_receipt_message(session: Session, message: dict[str, Any], lin
             )
         )
 
+    if lease:
+        situations = session.scalars(
+            select(PaymentSituation)
+            .where(
+                PaymentSituation.lease_id == lease.id,
+                PaymentSituation.status.not_in(PAYMENT_SITUATION_FINAL_STATUSES),
+            )
+            .order_by(PaymentSituation.updated_at.desc(), PaymentSituation.id.desc())
+        ).all()
+        preferred_kind = "utility" if match_type == "utility" or channel == "utilities" else "rent" if match_type == "rent" or channel in {"ip", "personal"} else ""
+        affected = [item for item in situations if not preferred_kind or item.kind == preferred_kind]
+        if not affected and situations:
+            affected = [situations[0]]
+        for situation in affected:
+            situation.last_tenant_response_at = utc_now()
+            situation.tenant_response_count = int(situation.tenant_response_count or 0) + 1
+            if status == "accepted":
+                sync_payment_situation(session, situation)
+                if situation.status != "paid":
+                    situation.status = "awaiting_payment"
+            elif status != "duplicate":
+                situation.status = "receipt_pending_review"
+                situation.escalated_at = utc_now()
+            notify_owner_situation_event(session, situation, "receipt", date.today())
+
     if status == "accepted":
         send_telegram_text(session, chat_id, message_template(session, "message_receipt_received"), tenant_keyboard())
     elif status == "duplicate":
@@ -5174,7 +5726,6 @@ def handle_tenant_receipt_message(session: Session, message: dict[str, Any], lin
             session,
             owner_id,
             owner_receipt_alert_text(session, lease, parsed, status, issues, message_sender_label(message), allocation_comment),
-            app_keyboard(app_base_url(session)),
         )
         if message.get("message_id"):
             try:
@@ -5183,7 +5734,6 @@ def handle_tenant_receipt_message(session: Session, message: dict[str, Any], lin
                     to_chat_id=owner_id,
                     from_chat_id=chat_id,
                     message_id=int(message["message_id"]),
-                    reply_markup=app_keyboard(app_base_url(session)),
                 )
             except RuntimeError:
                 pass
@@ -5861,6 +6411,7 @@ def owner_operation_target(
         ("debt_id", ManualDebt, "ручной долг"),
         ("receipt_id", PaymentReceipt, "платёж"),
         ("expense_id", Expense, "расход"),
+        ("situation_id", PaymentSituation, "платёжная ситуация"),
     ]
     resolved: dict[str, Any] = {}
     for field, model, label in entity_fields:
@@ -5914,6 +6465,15 @@ def owner_operation_target(
     expense = resolved.get("expense_id")
     if expense is not None:
         return None, f"расход {expense.category} на {money_text(expense.amount)} (expense_id={expense.id})"
+    payment_state = resolved.get("situation_id")
+    if payment_state is not None:
+        target = payment_situation_target(session, payment_state)
+        lease = situation_lease(target)
+        if lease:
+            return lease, (
+                f"{lease.apartment.object.name}, {lease.apartment.name}, {lease.tenant.full_name}; "
+                f"{payment_state.kind}, situation_id={payment_state.id}"
+            )
     return None, ""
 
 
@@ -6420,9 +6980,34 @@ def handle_tenant_ai_message(session: Session, chat_id: int | str, lease: Lease,
         lease_id=lease.id,
     )
     update_tenant_state_from_envelope(state, envelope, text)
+    situation = active_payment_situation_for_lease(session, lease.id)
+    if situation:
+        situation.last_tenant_response_at = utc_now()
+        situation.tenant_response_count = int(situation.tenant_response_count or 0) + 1
+        if envelope.intent == "payment_sent":
+            situation.status = "awaiting_receipt"
+        elif envelope.intent == "payment_promise" and envelope.promise_date:
+            promised = parse_tenant_payment_date(envelope.promise_date)
+            target = payment_situation_target(session, situation)
+            if promised and target:
+                reason = f"жилец сообщил: {text[:600]}"
+                if short_deferral_is_safe(situation, target, promised, date.today()):
+                    apply_short_payment_deferral(session, situation, promised, reason)
+                    return True
+                propose_long_payment_deferral(session, situation, promised, reason)
+                send_telegram_text(
+                    session,
+                    chat_id,
+                    f"Запрос на перенос оплаты до {format_full_date(promised)} передан владельцу.",
+                )
+                return True
     notify_owner_about_tenant_update(session, lease, envelope, state)
     needs_owner = envelope.needs_owner or tenant_question_needs_owner(text)
     if needs_owner:
+        if situation:
+            situation.status = "question"
+            situation.escalated_at = utc_now()
+            notify_owner_situation_event(session, situation, "question", date.today())
         session.add(
             AiActionLog(
                 conversation_id=conversation.id,
@@ -6572,6 +7157,52 @@ def execute_owner_web_operation(session: Session, operation: str, payload: dict[
         result = run_reminders_now(session)
     elif operation == "generate_rent_charges":
         result = generate_charges(payload, session)
+    elif operation == "defer_payment_situation":
+        situation = session.get(PaymentSituation, int(payload["situation_id"]))
+        if not situation:
+            raise HTTPException(404, "Платёжная ситуация не найдена")
+        target = payment_situation_target(session, situation)
+        if target is None:
+            raise HTTPException(404, "Начисление платёжной ситуации больше не существует")
+        sync_payment_situation(session, situation)
+        if situation_debt(target) <= EPS:
+            raise HTTPException(400, "Платёж уже закрыт, перенос даты не требуется")
+        promised = parse_agent_date(payload.get("promise_date"), "новая дата оплаты")
+        if promised < date.today():
+            raise HTTPException(400, "Новая дата оплаты уже в прошлом")
+        notify_tenant = setting_bool_value(payload.get("notify_tenant", True))
+        tenant_chat_id = lease_chat_id(session, target.lease)
+        if notify_tenant and not tenant_chat_id:
+            raise HTTPException(400, "Жилец не привязан к Telegram, уведомить его о переносе невозможно")
+        situation.promise_date = promised
+        situation.paused_until = promised
+        situation.status = "promised"
+        if isinstance(target, RentCharge):
+            target.deferral_until = promised
+            target.deferral_note = str(payload.get("reason") or "подтверждено владельцем")
+            update_rent_charge_status(target)
+        if notify_tenant:
+            send_telegram_text(
+                session,
+                tenant_chat_id,
+                (
+                    f"Спасибо, зафиксировал дату оплаты: {format_full_date(promised)}.\n\n"
+                    "До этой даты автоматические напоминания по этому платежу поставлены на паузу."
+                ),
+            )
+        session.commit()
+        result = {"ok": True}
+    elif operation == "set_payment_situation_mode":
+        situation = session.get(PaymentSituation, int(payload["situation_id"]))
+        if not situation:
+            raise HTTPException(404, "Платёжная ситуация не найдена")
+        mode = str(payload.get("mode") or "").strip()
+        if mode not in {"normal", "manual"}:
+            raise HTTPException(400, "Режим должен быть normal или manual")
+        situation.mode = mode
+        situation.status = "manual" if mode == "manual" else "awaiting_payment"
+        session.commit()
+        result = {"ok": True}
     elif operation == "add_rent_payment":
         result = add_rent_payment(int(payload["charge_id"]), payload, session)
     elif operation == "create_manual_payment":
@@ -6720,6 +7351,291 @@ def execute_agent_action(session: Session, proposal: AgentActionProposal) -> str
         return f"Сообщение отправлено жильцу {result['tenant']}."
 
     return execute_owner_web_operation(session, proposal.action_type, payload)
+
+
+def active_payment_situation_for_lease(session: Session, lease_id: int) -> PaymentSituation | None:
+    situations = session.scalars(
+        select(PaymentSituation)
+        .where(
+            PaymentSituation.lease_id == lease_id,
+            PaymentSituation.status.not_in(PAYMENT_SITUATION_FINAL_STATUSES),
+        )
+        .order_by(PaymentSituation.updated_at.desc(), PaymentSituation.id.desc())
+    ).all()
+    priority = {
+        "awaiting_payment_date": 0,
+        "question": 1,
+        "overdue": 2,
+        "due_today": 3,
+        "first_reminder_sent": 4,
+        "awaiting_payment": 5,
+    }
+    return min(situations, key=lambda item: priority.get(item.status, 10), default=None)
+
+
+def parse_tenant_payment_date(text: str, today: date | None = None) -> date | None:
+    today = today or date.today()
+    lowered = re.sub(r"\s+", " ", (text or "").strip().lower())
+    if not lowered:
+        return None
+    if "сегодня" in lowered:
+        return today
+    if "завтра" in lowered:
+        return today + timedelta(days=1)
+    after_days = re.search(r"через\s+(\d{1,2})\s*(?:дн|дня|день|дней)", lowered)
+    if after_days:
+        return today + timedelta(days=int(after_days.group(1)))
+    iso = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", lowered)
+    if iso:
+        try:
+            return date.fromisoformat(iso.group(1))
+        except ValueError:
+            return None
+    short = re.search(r"\b(\d{1,2})[./](\d{1,2})(?:[./](20\d{2}))?\b", lowered)
+    if short:
+        day, month = int(short.group(1)), int(short.group(2))
+        year = int(short.group(3) or today.year)
+        try:
+            result = date(year, month, day)
+        except ValueError:
+            return None
+        if not short.group(3) and result < today:
+            try:
+                result = date(today.year + 1, month, day)
+            except ValueError:
+                return None
+        return result
+    return None
+
+
+def short_deferral_is_safe(
+    situation: PaymentSituation,
+    target: RentCharge | UtilityBillLine,
+    promised: date,
+    today: date,
+) -> bool:
+    due = situation_due_date(target) or today
+    return (
+        today <= promised <= today + timedelta(days=3)
+        and max(0, (today - due).days) <= 3
+        and situation.mode == "normal"
+        and situation.status not in {"ignored", "escalated", "manual", "receipt_pending_review"}
+        and int(situation.notification_count or 0) < MAX_AUTOMATIC_SITUATION_REMINDERS
+    )
+
+
+def apply_short_payment_deferral(
+    session: Session,
+    situation: PaymentSituation,
+    promised: date,
+    reason: str,
+) -> None:
+    target = payment_situation_target(session, situation)
+    if target is None:
+        raise HTTPException(404, "Платёжная ситуация больше не существует")
+    situation.promise_date = promised
+    situation.paused_until = promised
+    situation.status = "short_deferral"
+    situation.last_tenant_response_at = utc_now()
+    situation.tenant_response_count = int(situation.tenant_response_count or 0) + 1
+    metadata = situation_metadata(situation)
+    metadata["deferral_reason"] = reason[:1000]
+    metadata["automatic_short_deferral"] = True
+    save_situation_metadata(situation, metadata)
+    if isinstance(target, RentCharge):
+        target.deferral_until = promised
+        target.deferral_note = f"короткая автоотсрочка: {reason[:500]}"
+        update_rent_charge_status(target)
+    lease = target.lease
+    send_telegram_text(
+        session,
+        lease_chat_id(session, lease),
+        (
+            f"Спасибо, зафиксировал дату оплаты: {format_full_date(promised)}.\n\n"
+            "До этой даты напоминания по этому платежу поставлены на паузу. "
+            "После оплаты отправьте чек PDF-документом."
+        ),
+    )
+    notify_owner_situation_event(session, situation, "short_deferral", date.today())
+
+
+def propose_long_payment_deferral(
+    session: Session,
+    situation: PaymentSituation,
+    promised: date,
+    reason: str,
+) -> None:
+    owner_id = telegram_owner_chat_id(session)
+    if not owner_id:
+        raise HTTPException(400, "Owner chat не настроен")
+    conversation = ai_conversation(session, owner_id, "owner", None)
+    create_agent_action_proposal(
+        session,
+        conversation,
+        owner_id,
+        {
+            "type": "owner_operation",
+            "payload": {
+                "operation": "defer_payment_situation",
+                "arguments": {
+                    "situation_id": situation.id,
+                    "promise_date": promised.isoformat(),
+                    "reason": reason,
+                    "notify_tenant": True,
+                },
+            },
+            "reason": reason,
+        },
+    )
+    situation.status = "escalated"
+    situation.escalated_at = utc_now()
+
+
+def handle_tenant_payment_text(session: Session, lease: Lease, chat_id: int | str, text: str) -> bool:
+    situation = active_payment_situation_for_lease(session, lease.id)
+    if not situation:
+        return False
+    promised = parse_tenant_payment_date(text)
+    expects_date = situation.status == "awaiting_payment_date"
+    mentions_payment_date = bool(
+        re.search(r"\b(оплачу|переведу|смогу\s+оплатить|через\s+\d+\s*д|завтра|сегодня)\b", text.lower())
+    )
+    if not expects_date and not mentions_payment_date:
+        return False
+    if not promised:
+        send_telegram_text(
+            session,
+            chat_id,
+            "Не смог определить дату. Напишите её, например: «завтра», «через 2 дня» или «28.06.2026».",
+        )
+        return True
+    target = payment_situation_target(session, situation)
+    if target is None:
+        return False
+    reason = f"жилец написал: {text.strip()[:600]}"
+    if short_deferral_is_safe(situation, target, promised, date.today()):
+        apply_short_payment_deferral(session, situation, promised, reason)
+    else:
+        situation.promise_date = promised
+        situation.last_tenant_response_at = utc_now()
+        situation.tenant_response_count = int(situation.tenant_response_count or 0) + 1
+        propose_long_payment_deferral(session, situation, promised, reason)
+        send_telegram_text(
+            session,
+            chat_id,
+            (
+                f"Запрос на перенос оплаты до {format_full_date(promised)} передан владельцу. "
+                "До его решения я не буду обещать изменение срока."
+            ),
+        )
+    return True
+
+
+def handle_payment_situation_callback_query(session: Session, callback: dict[str, Any]) -> bool:
+    data = str(callback.get("data") or "")
+    match = re.fullmatch(r"(tenantpay|ownersit):(\d+):([a-z_]+)", data)
+    if not match:
+        return False
+    scope, situation_id_text, action = match.groups()
+    callback_id = str(callback.get("id") or "")
+    sender = callback.get("from") or {}
+    message = callback.get("message") or {}
+    chat_id = ((message.get("chat") or {}).get("id")) or sender.get("id")
+    token = telegram_token(session)
+    situation = session.get(PaymentSituation, int(situation_id_text))
+    if not callback_id or not chat_id or not token or not situation:
+        return True
+    target = payment_situation_target(session, situation)
+    if target is None:
+        safe_answer_agent_callback(token, callback_id, "Платёж уже не найден.")
+        return True
+    lease = target.lease
+
+    if scope == "tenantpay":
+        if str(lease_chat_id(session, lease)) != str(chat_id):
+            safe_answer_agent_callback(token, callback_id, "Эта кнопка относится к другому договору.")
+            return True
+        situation.last_tenant_response_at = utc_now()
+        situation.tenant_response_count = int(situation.tenant_response_count or 0) + 1
+        if action in {"paid", "receipt"}:
+            situation.status = "awaiting_receipt"
+            situation.paused_until = None
+            safe_answer_agent_callback(token, callback_id, "Жду чек PDF-документом.")
+            send_telegram_text(
+                session,
+                chat_id,
+                (
+                    "Спасибо. Пришлите, пожалуйста, чек PDF-документом для подтверждения. "
+                    "Для аренды нужны отдельные чеки на перевод ИП и перевод по номеру, если обе части оплачены отдельно."
+                ),
+            )
+        elif action == "later":
+            situation.status = "awaiting_payment_date"
+            safe_answer_agent_callback(token, callback_id, "Напишите точную дату оплаты.")
+            send_telegram_text(
+                session,
+                chat_id,
+                "Укажите дату, когда сможете оплатить: например, «завтра», «через 2 дня» или «28.06.2026».",
+            )
+        elif action == "question":
+            situation.status = "question"
+            situation.escalated_at = utc_now()
+            safe_answer_agent_callback(token, callback_id, "Вопрос передан владельцу.")
+            send_telegram_text(session, chat_id, "Спасибо, передал вопрос владельцу. До ответа напоминания поставлены на паузу.")
+            notify_owner_situation_event(session, situation, "question", date.today())
+        return True
+
+    if not owner_chat_allowed(session, sender.get("id") or ""):
+        safe_answer_agent_callback(token, callback_id, "Эти действия доступны только владельцу.")
+        return True
+    if action == "manual":
+        conversation = ai_conversation(session, chat_id, "owner", None)
+        create_agent_action_proposal(
+            session,
+            conversation,
+            chat_id,
+            {
+                "type": "owner_operation",
+                "payload": {
+                    "operation": "set_payment_situation_mode",
+                    "arguments": {"situation_id": situation.id, "mode": "manual"},
+                },
+                "reason": "владелец выбрал ручной режим в карточке платёжной ситуации",
+            },
+        )
+        safe_answer_agent_callback(token, callback_id, "Нужно подтверждение владельца.")
+    elif action == "wait":
+        conversation = ai_conversation(session, chat_id, "owner", None)
+        create_agent_action_proposal(
+            session,
+            conversation,
+            chat_id,
+            {
+                "type": "owner_operation",
+                "payload": {
+                    "operation": "defer_payment_situation",
+                    "arguments": {
+                        "situation_id": situation.id,
+                        "promise_date": (date.today() + timedelta(days=1)).isoformat(),
+                        "reason": "владелец выбрал паузу на один день",
+                        "notify_tenant": False,
+                    },
+                },
+                "reason": "владелец выбрал паузу на один день",
+            },
+        )
+        safe_answer_agent_callback(token, callback_id, "Нужно подтверждение владельца.")
+    elif action == "suggest":
+        safe_answer_agent_callback(token, callback_id, "Готовлю предложение сообщения.")
+        handle_owner_ai_message(
+            session,
+            chat_id,
+            (
+                f"Подготовь индивидуальное сообщение жильцу по payment situation {situation.id}. "
+                "Не отправляй без отдельного подтверждения."
+            ),
+        )
+    return True
 
 
 def safe_answer_agent_callback(token: str, callback_id: str, text: str) -> None:
@@ -6901,8 +7817,18 @@ def tenant_requisites_text(session: Session) -> str:
         f"ИНН банка: {settings.get('ip_recipient_bank_inn') or 'не задано'}",
         f"КПП банка: {settings.get('ip_recipient_bank_kpp') or 'не задано'}",
         "",
-        "Реквизиты для перевода по номеру телефона (доп. платёж):",
-        "89133854441 Сбербанк Эрнест К.",
+        "Реквизиты для перевода по номеру телефона (дополнительная часть аренды и коммуналка):",
+        (
+            f"{settings.get('personal_recipient_phone') or 'номер не задан'} "
+            f"{settings.get('personal_recipient_bank') or 'банк не задан'} "
+            f"{settings.get('personal_recipient_name') or 'получатель не задан'}"
+        ).strip(),
+        "",
+        "Назначение платежей:",
+        "• часть аренды «ИП» — только на расчётный счёт ИП;",
+        "• дополнительная часть аренды — переводом по номеру телефона;",
+        "• коммунальные платежи — переводом по номеру телефона;",
+        "• если переводов несколько, отправьте отдельный чек PDF по каждому.",
     ]
     return "\n".join(lines)
 
@@ -7074,8 +8000,11 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
         )
         return
 
-    if not is_owner and linked_lease and text and handle_tenant_ai_message(session, chat_id, linked_lease, text):
-        return
+    if not is_owner and linked_lease and text:
+        if handle_tenant_payment_text(session, linked_lease, chat_id, text):
+            return
+        if handle_tenant_ai_message(session, chat_id, linked_lease, text):
+            return
 
     if not is_owner:
         send_telegram_text(
@@ -7202,7 +8131,8 @@ def process_telegram_update_background(payload: dict[str, Any], received_at: flo
                 session.commit()
             dedupe_finished = time_module.perf_counter()
             if callback:
-                handle_agent_callback_query(session, callback)
+                if not handle_payment_situation_callback_query(session, callback):
+                    handle_agent_callback_query(session, callback)
             else:
                 handle_telegram_message(session, message)
             handler_finished = time_module.perf_counter()
@@ -7765,6 +8695,8 @@ def delete_lease(lease_id: int, session: Session = Depends(get_session)) -> dict
     tenant = lease.tenant
     for state in session.scalars(select(AgentTenantState).where(AgentTenantState.lease_id == lease.id)).all():
         session.delete(state)
+    for situation in session.scalars(select(PaymentSituation).where(PaymentSituation.lease_id == lease.id)).all():
+        session.delete(situation)
     for memory in session.scalars(select(AgentMemory).where(AgentMemory.lease_id == lease.id)).all():
         session.delete(memory)
     for proposal in session.scalars(select(AgentActionProposal).where(AgentActionProposal.lease_id == lease.id)).all():
@@ -8948,14 +9880,21 @@ def issue_utility_bill(bill_id: int, session: Session = Depends(get_session)) ->
         if not preview["linked"]:
             skipped_unlinked += 1
             continue
+        primary_line = session.get(UtilityBillLine, preview["line_ids"][0]) if preview["line_ids"] else None
+        situation = (
+            payment_situation(session, "utility", primary_line.id, int(primary_line.lease_id))
+            if primary_line and primary_line.lease_id
+            else None
+        )
         send_tenant_message(
             session,
             lease,
             "message_utility_bill",
-            line=session.get(UtilityBillLine, preview["line_ids"][0]) if preview["line_ids"] else None,
+            line=primary_line,
             note="utility-issue",
             utility_lines_override=[line for line_id in preview["all_line_ids"] if (line := session.get(UtilityBillLine, line_id))],
             utility_due_date_override=due,
+            keyboard=tenant_situation_keyboard(situation) if situation else None,
         )
         sent += 1
     session.commit()

@@ -241,7 +241,7 @@
         </section>
         <div class="card muted-box">
           <strong>Плейсхолдеры</strong>
-          <p class="muted">{tenant_name}, {apartment}, {object}, {ip_due}, {personal_due}, {total_due}, {debt}, {rent_due_date}, {rent_period}, {utility_total}, {utility_due_date}, {period}, {utility_service}, {rent_debt_months}, {rent_debt_months_details}, {utility_debt_details}, {all_debts_breakdown}, {all_debt_total}, {custom_text}, {amount}, {channel}, {receipt_status}, {receipt_summary}</p>
+          <p class="muted">{tenant_name}, {apartment}, {object}, {ip_due}, {personal_due}, {total_due}, {debt}, {rent_due_date}, {rent_period}, {utility_total}, {utility_due_date}, {period}, {utility_service}, {rent_debt_months}, {rent_debt_months_details}, {utility_debt_details}, {all_debts_breakdown}, {all_debt_total}, {ip_recipient_name_text}, {ip_recipient_account_text}, {personal_recipient_phone_text}, {personal_recipient_bank_text}, {custom_text}, {amount}, {channel}, {receipt_status}, {receipt_summary}</p>
         </div>
         <div id="messageTargets" class="table-wrap"></div>
         <div id="messagePreviewPanel" class="stack"></div>
@@ -298,14 +298,23 @@
           <span>Тексты основных сообщений и уведомлений для жильцов.</span>
         </div>
         <form id="messageTemplatesForm" class="form-grid">
+          <label class="wide">Аренда: за 3 дня
+            <textarea name="message_rent_upcoming" id="messageRentUpcomingInput" rows="6"></textarea>
+          </label>
           <label class="wide">Аренда: сегодня срок
-            <textarea name="message_rent_due" id="messageRentDueInput" rows="3"></textarea>
+            <textarea name="message_rent_due" id="messageRentDueInput" rows="7"></textarea>
           </label>
           <label class="wide">Аренда: просрочка
-            <textarea name="message_rent_overdue" id="messageRentOverdueInput" rows="3"></textarea>
+            <textarea name="message_rent_overdue" id="messageRentOverdueInput" rows="7"></textarea>
+          </label>
+          <label class="wide">Аренда: запрос статуса
+            <textarea name="message_rent_status_request" id="messageRentStatusRequestInput" rows="7"></textarea>
           </label>
           <label class="wide">Коммуналка
-            <textarea name="message_utility_bill" id="messageUtilityBillInput" rows="3"></textarea>
+            <textarea name="message_utility_bill" id="messageUtilityBillInput" rows="8"></textarea>
+          </label>
+          <label class="wide">Коммуналка: просрочка
+            <textarea name="message_utility_overdue" id="messageUtilityOverdueInput" rows="7"></textarea>
           </label>
           <label class="wide">Все долги
             <textarea name="message_all_debts" id="messageAllDebtsInput" rows="8"></textarea>

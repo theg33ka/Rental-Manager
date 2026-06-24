@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
-from rental_manager.models import Expense, Lease, ManualDebt, MessageLog, PaymentReceipt, RentCharge, UtilityBillLine
+from rental_manager.models import Expense, Lease, ManualDebt, MessageLog, PaymentReceipt, PaymentSituation, RentCharge, UtilityBillLine
 from rental_manager.services.billing import update_rent_charge_status, update_utility_line_status
 
 
@@ -89,6 +89,20 @@ def tenant_context_text(session: Session, lease: Lease, settings: dict[str, Any]
     for log in logs:
         message_lines.append(f"- {log.created_at:%d.%m.%Y}: {log.template_key or 'сообщение'}, статус {_status_text(log.status)}")
 
+    situation_lines = []
+    situations = session.scalars(
+        select(PaymentSituation)
+        .where(PaymentSituation.lease_id == lease.id)
+        .order_by(PaymentSituation.updated_at.desc(), PaymentSituation.id.desc())
+        .limit(8)
+    ).all()
+    for situation in situations:
+        situation_lines.append(
+            f"- situation_id={situation.id}; тип={situation.kind}; status={situation.status}; "
+            f"mode={situation.mode}; уведомлений={situation.notification_count}; "
+            f"ожидаемая дата={situation.promise_date.isoformat() if situation.promise_date else 'нет'}"
+        )
+
     total_rent = money_text(float(lease.ip_amount or 0) + float(lease.personal_amount or 0))
     return "\n".join(
         [
@@ -119,6 +133,9 @@ def tenant_context_text(session: Session, lease: Lease, settings: dict[str, Any]
             "",
             "Последние сообщения:",
             "\n".join(message_lines) if message_lines else "- сообщений ещё не было",
+            "",
+            "Платёжные ситуации:",
+            "\n".join(situation_lines) if situation_lines else "- отдельные ситуации ещё не созданы",
         ]
     )
 
