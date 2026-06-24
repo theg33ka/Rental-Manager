@@ -124,7 +124,7 @@ from rental_manager.services.telegram_bot import (
 )
 
 
-APP_BUILD_MARKER = "agent-memory-actions-2026-06-24"
+APP_BUILD_MARKER = "telegram-latency-tracing-2026-06-24"
 
 
 app = FastAPI(title="Rental Manager", version="0.1.0")
@@ -1305,10 +1305,27 @@ def lease_by_chat_id(session: Session, chat_id: int | str | None) -> Lease | Non
         return None
     chat_ref = str(chat_id)
     links = get_tenant_links(session)
-    for lease in session.scalars(select(Lease).where(Lease.active.is_(True))).all():
-        if links.get(str(lease.tenant_id)) == chat_ref:
-            return lease
-    return None
+    tenant_id = None
+    for raw_tenant_id, linked_chat in links.items():
+        if linked_chat != chat_ref:
+            continue
+        try:
+            tenant_id = int(raw_tenant_id)
+        except (TypeError, ValueError):
+            continue
+        break
+    if tenant_id is None:
+        return None
+    return session.scalar(
+        select(Lease)
+        .options(
+            joinedload(Lease.apartment).joinedload(Apartment.object),
+            joinedload(Lease.tenant),
+        )
+        .where(Lease.tenant_id == tenant_id, Lease.active.is_(True))
+        .order_by(Lease.start_date.desc(), Lease.id.desc())
+        .limit(1)
+    )
 
 
 def maybe_link_tenant_chat(session: Session, message: dict[str, Any]) -> Lease | None:
@@ -2937,6 +2954,91 @@ def build_dashboard(session: Session) -> dict[str, Any]:
         "provider_debts": provider_debts,
         "suspicious_receipts": [serialize_payment_receipt(receipt, session) for receipt in suspicious_receipts],
     }
+
+
+def build_status_dashboard_fast(session: Session, today: date | None = None) -> dict[str, Any]:
+    today = today or date.today()
+    cutoff = configured_notification_cutoff_date(session)
+    ignored_ids = ignored_lease_ids(session)
+
+    active_filters = [Lease.active.is_(True), Apartment.active.is_(True)]
+    if ignored_ids:
+        active_filters.append(Lease.id.not_in(ignored_ids))
+
+    rent_base = (
+        select(func.count(RentCharge.id))
+        .select_from(RentCharge)
+        .join(Lease, RentCharge.lease_id == Lease.id)
+        .join(Apartment, Lease.apartment_id == Apartment.id)
+        .where(*active_filters)
+    )
+    utility_base = (
+        select(func.count(UtilityBillLine.id))
+        .select_from(UtilityBillLine)
+        .join(Lease, UtilityBillLine.lease_id == Lease.id)
+        .join(Apartment, UtilityBillLine.apartment_id == Apartment.id)
+        .where(*active_filters)
+    )
+    if cutoff:
+        rent_base = rent_base.where(RentCharge.due_date >= cutoff)
+        utility_base = utility_base.where(
+            or_(UtilityBillLine.due_date.is_(None), UtilityBillLine.due_date >= cutoff)
+        )
+
+    latest_reading = (
+        select(
+            Meter.service_id.label("service_id"),
+            func.max(MeterReading.reading_date).label("last_date"),
+        )
+        .select_from(Meter)
+        .outerjoin(MeterReading, MeterReading.meter_id == Meter.id)
+        .where(Meter.active.is_(True))
+        .group_by(Meter.service_id)
+        .subquery()
+    )
+    stale_threshold = today - timedelta(days=30)
+    stale_readings_count = int(
+        session.scalar(
+            select(func.count(UtilityService.id))
+            .select_from(UtilityService)
+            .outerjoin(latest_reading, latest_reading.c.service_id == UtilityService.id)
+            .where(
+                UtilityService.active.is_(True),
+                or_(latest_reading.c.last_date.is_(None), latest_reading.c.last_date <= stale_threshold),
+            )
+        )
+        or 0
+    )
+
+    accepted = accepted_monthly_report_keys(session)
+    open_report_count = sum(
+        1
+        for entry in iter_dashboard_report_entries(today)
+        if monthly_report_key(entry["year"], entry["month"], entry["kind"]) not in accepted
+    )
+    counts = {
+        "monthly_reports": open_report_count,
+        "rent_overdue": int(session.scalar(rent_base.where(RentCharge.status == "overdue")) or 0),
+        "rent_partial": int(session.scalar(rent_base.where(RentCharge.status == "partial")) or 0),
+        "utility_overdue": int(session.scalar(utility_base.where(UtilityBillLine.status == "overdue")) or 0),
+        "utility_issued": int(
+            session.scalar(utility_base.where(UtilityBillLine.status.in_(["issued", "overdue", "partial"]))) or 0
+        ),
+        "stale_readings": stale_readings_count,
+        "pending_personal_expenses": int(
+            session.scalar(
+                select(func.count(Expense.id)).where(
+                    Expense.source_funds == "personal",
+                    Expense.compensation_status != "compensated",
+                )
+            )
+            or 0
+        ),
+        "suspicious_receipts": int(
+            session.scalar(select(func.count(PaymentReceipt.id)).where(PaymentReceipt.status == "suspicious")) or 0
+        ),
+    }
+    return {key: [None] * value for key, value in counts.items()}
 
 
 def money_text(value: float) -> str:
@@ -5055,6 +5157,7 @@ def handle_tenant_receipt_message(session: Session, message: dict[str, Any], lin
 
 
 def send_telegram_text(session: Session, chat_id: int | str, text: str, keyboard: dict[str, Any] | None = None) -> dict[str, Any]:
+    started = time_module.perf_counter()
     token = telegram_token(session)
     runtime_log("TELEGRAM", f"send attempt chat_id={chat_id} token_configured={bool(token)} text_len={len(text or '')}")
     if not token:
@@ -5063,10 +5166,12 @@ def send_telegram_text(session: Session, chat_id: int | str, text: str, keyboard
     try:
         result = send_message(token, chat_id, text, reply_markup=keyboard)
         message_id = ((result.get("result") or {}) if isinstance(result, dict) else {}).get("message_id")
-        runtime_log("TELEGRAM", f"send ok chat_id={chat_id} message_id={message_id}")
+        elapsed_ms = int((time_module.perf_counter() - started) * 1000)
+        runtime_log("TELEGRAM", f"send ok chat_id={chat_id} message_id={message_id} duration_ms={elapsed_ms}")
         return result
     except TelegramApiError as exc:
-        runtime_log("TELEGRAM", f"send failed chat_id={chat_id} error={exc}")
+        elapsed_ms = int((time_module.perf_counter() - started) * 1000)
+        runtime_log("TELEGRAM", f"send failed chat_id={chat_id} duration_ms={elapsed_ms} error={exc}")
         raise HTTPException(400, str(exc)) from exc
 
 
@@ -6158,6 +6263,7 @@ def telegram_help_text() -> str:
         [
             "🤖 Команды owner-бота:",
             "Обычный текст — разговор с агентом; команды ниже обрабатываются механически.",
+            "/ping - проверить скорость ответа",
             "/start - приветствие",
             "/id - показать chat id",
             "/status - 📊 статус пульта",
@@ -6171,28 +6277,42 @@ def telegram_help_text() -> str:
 
 
 def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
+    started = time_module.perf_counter()
     chat = message.get("chat") or {}
     sender = message.get("from") or {}
     chat_id = chat.get("id")
     if not chat_id:
         return
 
-    linked_lease = maybe_link_tenant_chat(session, message)
     text = (message.get("text") or "").strip()
     command, _args = parse_command(text)
-    base_url = app_base_url(session)
-    reports = build_monthly_reports(session)
     owner_id = telegram_owner_chat_id(session)
-    is_owner = owner_message_allowed(session, message)
+    is_owner = bool(owner_id) and str(owner_id) in {
+        str(chat.get("id") or ""),
+        str(sender.get("id") or ""),
+    }
+    linked_lease = None if is_owner else maybe_link_tenant_chat(session, message)
+    preparation_ms = int((time_module.perf_counter() - started) * 1000)
     runtime_log(
         "TELEGRAM",
         (
             f"message chat_id={chat_id} from_id={sender.get('id')} chat_type={chat.get('type') or '-'} "
             f"command={command or '-'} text_len={len(text)} "
             f"is_owner={is_owner} owner_configured={bool(owner_id)} "
-            f"linked_lease_id={getattr(linked_lease, 'id', None)}"
+            f"linked_lease_id={getattr(linked_lease, 'id', None)} preparation_ms={preparation_ms}"
         ),
     )
+
+    if command == "/ping":
+        elapsed_ms = int((time_module.perf_counter() - started) * 1000)
+        send_telegram_text(session, chat_id, f"🏓 Pong. Подготовка ответа на сервере: {elapsed_ms} мс.")
+        return
+
+    if command == "/id":
+        send_telegram_text(session, chat_id, f"Ваш chat id: {chat_id}")
+        return
+
+    base_url = app_base_url(session)
 
     if message.get("contact") and not is_owner:
         if linked_lease:
@@ -6206,10 +6326,7 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
             send_telegram_text(session, chat_id, "Не нашёл активного жильца с таким телефоном в базе.")
         return
 
-    if command in {"/start", "/id"}:
-        if command == "/id":
-            send_telegram_text(session, chat_id, f"Ваш chat id: {chat_id}")
-            return
+    if command == "/start":
         if is_owner:
             send_telegram_text(
                 session,
@@ -6299,9 +6416,21 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
         return
 
     if command == "/status":
-        send_telegram_text(session, chat_id, build_status_message(build_dashboard(session)), app_keyboard(base_url))
+        status_started = time_module.perf_counter()
+        status_dashboard = build_status_dashboard_fast(session)
+        runtime_log(
+            "TELEGRAM",
+            f"status snapshot chat_id={chat_id} duration_ms={int((time_module.perf_counter() - status_started) * 1000)}",
+        )
+        send_telegram_text(session, chat_id, build_status_message(status_dashboard), app_keyboard(base_url))
         return
     if command == "/reports":
+        reports_started = time_module.perf_counter()
+        reports = build_monthly_reports(session)
+        runtime_log(
+            "TELEGRAM",
+            f"reports snapshot chat_id={chat_id} duration_ms={int((time_module.perf_counter() - reports_started) * 1000)}",
+        )
         send_telegram_text(session, chat_id, build_reports_message(reports), app_keyboard(base_url, reports))
         return
     if command == "/ask":
@@ -6357,8 +6486,10 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
     send_telegram_text(session, chat_id, telegram_help_text(), app_keyboard(base_url))
 
 
-def process_telegram_update_background(payload: dict[str, Any]) -> None:
+def process_telegram_update_background(payload: dict[str, Any], received_at: float | None = None) -> None:
     update_id = payload.get("update_id")
+    started = time_module.perf_counter()
+    queue_ms = int((started - received_at) * 1000) if received_at is not None else 0
     try:
         callback = payload.get("callback_query")
         message = payload.get("message") or payload.get("edited_message") or payload.get("business_message")
@@ -6366,25 +6497,41 @@ def process_telegram_update_background(payload: dict[str, Any]) -> None:
             runtime_log("TELEGRAM", f"webhook ignored update_id={update_id} reason=no_supported_update")
             return
         with SessionLocal() as session:
+            session_opened = time_module.perf_counter()
             with TELEGRAM_UPDATE_LOCK:
                 if not mark_telegram_update_seen(session, update_id):
                     session.commit()
                     runtime_log("TELEGRAM", f"webhook duplicate skipped update_id={update_id}")
                     return
                 session.commit()
+            dedupe_finished = time_module.perf_counter()
             if callback:
                 handle_agent_callback_query(session, callback)
             else:
                 handle_telegram_message(session, message)
+            handler_finished = time_module.perf_counter()
             session.commit()
+            finished = time_module.perf_counter()
+            runtime_log(
+                "TELEGRAM",
+                (
+                    f"timing update_id={update_id} queue_ms={queue_ms} "
+                    f"session_ms={int((session_opened - started) * 1000)} "
+                    f"dedupe_ms={int((dedupe_finished - session_opened) * 1000)} "
+                    f"handler_ms={int((handler_finished - dedupe_finished) * 1000)} "
+                    f"commit_ms={int((finished - handler_finished) * 1000)} "
+                    f"total_ms={int((finished - (received_at or started)) * 1000)}"
+                ),
+            )
     except Exception as exc:
-        runtime_log("TELEGRAM", f"background failed update_id={update_id} error={exc!r}")
+        elapsed_ms = int((time_module.perf_counter() - (received_at or started)) * 1000)
+        runtime_log("TELEGRAM", f"background failed update_id={update_id} total_ms={elapsed_ms} error={exc!r}")
 
 
-def queue_telegram_update(payload: dict[str, Any]) -> None:
+def queue_telegram_update(payload: dict[str, Any], received_at: float | None = None) -> None:
     thread = threading.Thread(
         target=process_telegram_update_background,
-        args=(dict(payload),),
+        args=(dict(payload), received_at),
         name=f"telegram-update-{payload.get('update_id') or 'unknown'}",
         daemon=True,
     )
@@ -6393,6 +6540,7 @@ def queue_telegram_update(payload: dict[str, Any]) -> None:
 
 @app.post("/api/integrations/telegram/webhook")
 async def telegram_webhook(request: Request, payload: dict[str, Any]) -> dict[str, bool]:
+    received_at = time_module.perf_counter()
     update_types = ",".join(sorted(key for key in payload if key != "update_id")) or "-"
     runtime_log("TELEGRAM", f"webhook update_id={payload.get('update_id')} types={update_types}")
     secret = str(os.environ.get("TELEGRAM_WEBHOOK_SECRET") or "").strip()
@@ -6401,7 +6549,7 @@ async def telegram_webhook(request: Request, payload: dict[str, Any]) -> dict[st
         if provided != secret:
             runtime_log("TELEGRAM", f"webhook rejected update_id={payload.get('update_id')} reason=bad_secret")
             raise HTTPException(403, "Неверный Telegram secret token")
-    queue_telegram_update(payload)
+    queue_telegram_update(payload, received_at)
     return {"ok": True}
 
 
@@ -6422,6 +6570,11 @@ def ensure_runtime_telegram_webhook(session: Session) -> None:
         runtime_log("TELEGRAM", f"runtime webhook refresh ok={bool(result.get('ok'))}")
     except TelegramApiError as exc:
         runtime_log("TELEGRAM", f"runtime webhook refresh skipped error={exc}")
+    try:
+        commands_result = telegram_api_request(token, "setMyCommands", {"commands": owner_commands()})
+        runtime_log("TELEGRAM", f"runtime commands refresh ok={bool(commands_result.get('ok'))}")
+    except TelegramApiError as exc:
+        runtime_log("TELEGRAM", f"runtime commands refresh skipped error={exc}")
 
 
 @app.post("/api/integrations/telegram/set-webhook")
