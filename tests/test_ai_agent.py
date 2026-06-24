@@ -189,6 +189,36 @@ class YandexOpenAIClientTests(unittest.TestCase):
         self.assertEqual(result.completion_tokens, 2)
 
 
+class HermesClientTests(unittest.TestCase):
+    def test_chat_completions_sends_stable_session_header(self) -> None:
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"model":"hermes-agent","choices":[{"message":{"content":"ok"}}]}'
+
+        with patch("rental_manager.services.hermes_client.urllib.request.urlopen", return_value=Response()) as mocked_urlopen:
+            result = HermesClient(
+                "http://127.0.0.1:8642",
+                "test-hermes-key",
+                timeout_seconds=60,
+            ).chat_completions(
+                model="hermes-agent",
+                messages=[{"role": "user", "content": "test"}],
+                session_id="rental-manager-owner-42",
+            )
+
+        request = mocked_urlopen.call_args.args[0]
+        headers = {key.lower(): value for key, value in request.header_items()}
+        self.assertEqual(headers["x-hermes-session-id"], "rental-manager-owner-42")
+        self.assertEqual(mocked_urlopen.call_args.kwargs["timeout"], 60)
+        self.assertEqual(result.content, "ok")
+
+
 class TelegramApiRequestTests(unittest.TestCase):
     def test_retries_transient_network_errors(self) -> None:
         class Response:

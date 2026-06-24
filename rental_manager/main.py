@@ -6162,6 +6162,8 @@ def invoke_ai_completion(
         )
         return None
     for provider in configured_providers:
+        provider_started = time_module.perf_counter()
+        runtime_model = model
         try:
             runtime = build_provider_runtime(
                 provider,
@@ -6169,6 +6171,7 @@ def invoke_ai_completion(
                 hermes_base_url=get_setting_value(session, "hermes_api_base_url"),
                 hermes_api_key=get_setting_value(session, "hermes_api_key"),
             )
+            runtime_model = runtime.model
             runtime_log(
                 "AI",
                 f"call provider={provider.value} role={actor_role} model={runtime.model}",
@@ -6178,12 +6181,23 @@ def invoke_ai_completion(
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                session_id=f"rental-manager-{actor_role}-{conversation.id}",
+            )
+            runtime_log(
+                "AI",
+                (
+                    f"call ok provider={provider.value} role={actor_role} model={runtime.model} "
+                    f"duration_ms={int((time_module.perf_counter() - provider_started) * 1000)}"
+                ),
             )
             break
         except (AiProviderConfigError, HermesClientError) as exc:
             runtime_log(
                 "AI",
-                f"call failed provider={provider.value} role={actor_role} model={model} error={exc}",
+                (
+                    f"call failed provider={provider.value} role={actor_role} model={runtime_model} "
+                    f"duration_ms={int((time_module.perf_counter() - provider_started) * 1000)} error={exc}"
+                ),
             )
             session.add(
                 AiActionLog(
