@@ -226,6 +226,7 @@ class AgentActionProposal(Base):
     payload_json: Mapped[str] = mapped_column(Text, default="{}")
     preview_text: Mapped[str] = mapped_column(Text, default="")
     result_text: Mapped[str] = mapped_column(Text, default="")
+    error_text: Mapped[str] = mapped_column(Text, default="")
     requested_by: Mapped[str] = mapped_column(String(40), default="agent")
     owner_chat_id: Mapped[str] = mapped_column(String(80), default="")
     owner_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
