@@ -95,6 +95,18 @@ OWNER_OPERATION_SPECS: dict[str, dict[str, Any]] = {
         "optional": [],
         "steps": ["проверить актуальные долги и расписания", "отправить положенные напоминания", "вернуть сводку отправок и ошибок"],
     },
+    "defer_payment_situation": {
+        "label": "перенести ожидаемую дату оплаты",
+        "required": ["situation_id", "promise_date"],
+        "optional": ["reason", "notify_tenant"],
+        "steps": ["повторно проверить платёжную ситуацию", "поставить автоматические напоминания на паузу до указанной даты", "при необходимости уведомить жильца"],
+    },
+    "set_payment_situation_mode": {
+        "label": "изменить режим платёжной ситуации",
+        "required": ["situation_id", "mode"],
+        "optional": [],
+        "steps": ["повторно проверить платёжную ситуацию", "установить обычный или ручной режим уведомлений"],
+    },
     "generate_rent_charges": {
         "label": "сформировать арендные начисления",
         "required": [],
@@ -257,6 +269,7 @@ ARGUMENT_LABELS = {
     "debt_id": "ручной долг",
     "receipt_id": "платёж",
     "expense_id": "расход",
+    "situation_id": "платёжная ситуация",
     "text": "текст сообщения",
     "message": "текст рассылки",
     "amount": "сумма",
@@ -267,6 +280,7 @@ ARGUMENT_LABELS = {
     "period_start": "начало периода",
     "period_end": "конец периода",
     "due_date": "срок оплаты",
+    "promise_date": "новая дата ожидания",
 }
 
 

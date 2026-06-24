@@ -1007,7 +1007,7 @@ class UtilityBillingTests(DatabaseTestCase):
         self.assertIn("Март:", breakdown)
         self.assertIn("ИП не оплачено", breakdown)
         self.assertIn("Остаток", breakdown)
-        self.assertIn("Отправьте чеки в этот чат в виде документа", text)
+        self.assertIn("отправьте соответствующий чек в этот чат в виде документа PDF", text)
 
     def test_utility_message_lists_detailed_lines(self) -> None:
         with self.seed() as session:
@@ -1077,7 +1077,7 @@ class UtilityBillingTests(DatabaseTestCase):
         self.assertIn("газ за период 01.03.2026 -> 31.03.2026", text)
         self.assertIn("вода за период 01.03.2026 -> 31.03.2026", text)
         self.assertIn("Всего:", text)
-        self.assertIn("Сбербанк", text)
+        self.assertIn("Коммуналка оплачивается переводом по номеру", text)
 
     def test_utility_message_uses_tenant_segment_period(self) -> None:
         with self.seed() as session:

@@ -368,8 +368,8 @@ function applySettings(settings = {}) {
     telegram_owner_chat_id: "",
     notifications_enabled: false,
     notification_cutoff_date: "",
-    automation_rent_due_cadence: "twice_daily",
-    automation_rent_overdue_cadence: "twice_daily",
+    automation_rent_due_cadence: "daily_evening",
+    automation_rent_overdue_cadence: "daily_evening",
     automation_utility_cadence: "daily_evening",
     ai_enabled: false,
     ai_tenant_free_text_enabled: true,
@@ -427,8 +427,8 @@ function applySettings(settings = {}) {
   if (aiBudget) aiBudget.value = state.settings.ai_monthly_budget_rub || "1000";
   if (notificationsEnabled) notificationsEnabled.checked = Boolean(state.settings.notifications_enabled);
   if (notificationCutoffDate) notificationCutoffDate.value = state.settings.notification_cutoff_date || appToday();
-  if (automationRentDue) automationRentDue.value = state.settings.automation_rent_due_cadence || "twice_daily";
-  if (automationRentOverdue) automationRentOverdue.value = state.settings.automation_rent_overdue_cadence || "twice_daily";
+  if (automationRentDue) automationRentDue.value = state.settings.automation_rent_due_cadence || "daily_evening";
+  if (automationRentOverdue) automationRentOverdue.value = state.settings.automation_rent_overdue_cadence || "daily_evening";
   if (automationUtility) automationUtility.value = state.settings.automation_utility_cadence || "daily_evening";
   if (token) token.placeholder = state.settings.telegram_bot_token_configured ? "Токен сохранён, пусто = не менять" : "Вставь bot token";
   if (secret) secret.placeholder = state.settings.telegram_webhook_secret_configured ? "Secret сохранён, пусто = не менять" : "Вставь webhook secret";
@@ -442,9 +442,12 @@ function applySettings(settings = {}) {
   if (personalRecipientPhone) personalRecipientPhone.value = state.settings.personal_recipient_phone || "";
   if (personalRecipientBank) personalRecipientBank.value = state.settings.personal_recipient_bank || "";
   const templateFields = {
+    "#messageRentUpcomingInput": "message_rent_upcoming",
     "#messageRentDueInput": "message_rent_due",
     "#messageRentOverdueInput": "message_rent_overdue",
+    "#messageRentStatusRequestInput": "message_rent_status_request",
     "#messageUtilityBillInput": "message_utility_bill",
+    "#messageUtilityOverdueInput": "message_utility_overdue",
     "#messageAllDebtsInput": "message_all_debts",
     "#messageReceiptReceivedInput": "message_receipt_received",
     "#messageReceiptReviewInput": "message_receipt_review",

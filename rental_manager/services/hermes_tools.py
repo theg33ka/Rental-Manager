@@ -16,6 +16,7 @@ from rental_manager.models import (
     ManualDebt,
     Meter,
     PaymentReceipt,
+    PaymentSituation,
     RentalObject,
     Tenant,
     UtilityBill,
@@ -267,6 +268,11 @@ def build_owner_read_tools_context(
         .order_by(UtilityBillLine.due_date.desc(), UtilityBillLine.id.desc())
         .limit(40)
     ).all()
+    payment_situations = session.scalars(
+        select(PaymentSituation)
+        .order_by(PaymentSituation.updated_at.desc(), PaymentSituation.id.desc())
+        .limit(80)
+    ).all()
     snapshot = {
         "available_read_tools": READ_TOOL_NAMES,
         "available_propose_tools": PROPOSE_TOOL_NAMES,
@@ -380,6 +386,21 @@ def build_owner_read_tools_context(
                 "compensation_status": item.compensation_status,
             }
             for item in expenses
+        ],
+        "payment_situations": [
+            {
+                "situation_id": item.id,
+                "lease_id": item.lease_id,
+                "kind": item.kind,
+                "reference_id": item.reference_id,
+                "status": item.status,
+                "mode": item.mode,
+                "notification_count": item.notification_count,
+                "tenant_response_count": item.tenant_response_count,
+                "promise_date": item.promise_date.isoformat() if item.promise_date else None,
+                "paused_until": item.paused_until.isoformat() if item.paused_until else None,
+            }
+            for item in payment_situations
         ],
         "safety": (
             "Read data may be returned immediately. Every owner_operation only creates a pending proposal. "
