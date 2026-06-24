@@ -139,7 +139,7 @@ from rental_manager.services.telegram_bot import (
 )
 
 
-APP_BUILD_MARKER = "smart-payment-notifications-2026-06-24"
+APP_BUILD_MARKER = "smart-payment-notifications-hermes-context-2026-06-24"
 
 
 app = FastAPI(title="Rental Manager", version="0.1.0")

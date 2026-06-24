@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import yaml
+from hermes_cli.tools_config import _get_platform_tools
 
 
 def load_gateway_module():
@@ -41,9 +42,14 @@ class HermesGatewayConfigTests(unittest.TestCase):
         self.assertEqual(config["model"]["default_headers"]["OpenAI-Project"], "folder-123")
         self.assertEqual(config["providers"]["yandex"]["key_env"], "YANDEX_API_KEY")
         self.assertEqual(config["providers"]["yandex"]["default_model"], "gpt://folder-123/yandexgpt-lite/latest")
+        self.assertEqual(config["model"]["context_length"], 64_000)
         self.assertEqual(config["toolsets"], [])
-        self.assertEqual(config["platform_toolsets"]["cli"], ["no_mcp"])
+        self.assertEqual(config["platform_toolsets"]["cli"], [])
+        self.assertEqual(config["platform_toolsets"]["api_server"], [])
+        self.assertEqual(config["compression"]["threshold"], 0.35)
+        self.assertEqual(config["compression"]["protect_last_n"], 6)
         self.assertEqual(config["agent"]["api_max_retries"], 1)
+        self.assertEqual(_get_platform_tools(config, "api_server"), set())
 
     def test_yandex_provider_wins_when_deepseek_env_is_also_present(self) -> None:
         module = load_gateway_module()
