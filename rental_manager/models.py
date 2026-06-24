@@ -195,6 +195,92 @@ class AiActionLog(Base):
     lease: Mapped[Lease | None] = relationship()
 
 
+class AgentMemory(Base):
+    __tablename__ = "agent_memories"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scope_type: Mapped[str] = mapped_column(String(40), default="owner")
+    scope_id: Mapped[str] = mapped_column(String(80), default="")
+    conversation_id: Mapped[int | None] = mapped_column(ForeignKey("ai_conversations.id"), nullable=True)
+    lease_id: Mapped[int | None] = mapped_column(ForeignKey("leases.id"), nullable=True)
+    kind: Mapped[str] = mapped_column(String(40), default="fact")
+    content: Mapped[str] = mapped_column(Text, default="")
+    importance: Mapped[int] = mapped_column(Integer, default=1)
+    source: Mapped[str] = mapped_column(String(40), default="agent")
+    status: Mapped[str] = mapped_column(String(40), default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
+
+    conversation: Mapped[AiConversation | None] = relationship()
+    lease: Mapped[Lease | None] = relationship()
+
+
+class AgentActionProposal(Base):
+    __tablename__ = "agent_action_proposals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    conversation_id: Mapped[int | None] = mapped_column(ForeignKey("ai_conversations.id"), nullable=True)
+    lease_id: Mapped[int | None] = mapped_column(ForeignKey("leases.id"), nullable=True)
+    action_type: Mapped[str] = mapped_column(String(80), default="")
+    status: Mapped[str] = mapped_column(String(40), default="pending")
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    preview_text: Mapped[str] = mapped_column(Text, default="")
+    result_text: Mapped[str] = mapped_column(Text, default="")
+    requested_by: Mapped[str] = mapped_column(String(40), default="agent")
+    owner_chat_id: Mapped[str] = mapped_column(String(80), default="")
+    owner_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    conversation: Mapped[AiConversation | None] = relationship()
+    lease: Mapped[Lease | None] = relationship()
+
+
+class AgentTenantState(Base):
+    __tablename__ = "agent_tenant_states"
+    __table_args__ = (UniqueConstraint("lease_id", name="uq_agent_tenant_state_lease"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    lease_id: Mapped[int] = mapped_column(ForeignKey("leases.id"))
+    status: Mapped[str] = mapped_column(String(40), default="normal")
+    escalation_level: Mapped[int] = mapped_column(Integer, default=0)
+    consecutive_excuses: Mapped[int] = mapped_column(Integer, default=0)
+    promise_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    promise_text: Mapped[str] = mapped_column(Text, default="")
+    next_contact_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    last_tenant_message_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_agent_message_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_owner_update_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
+
+    lease: Mapped[Lease] = relationship()
+
+
+class AgentTask(Base):
+    __tablename__ = "agent_tasks"
+    __table_args__ = (UniqueConstraint("issue_key", name="uq_agent_task_issue_key"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    issue_key: Mapped[str] = mapped_column(String(160))
+    lease_id: Mapped[int | None] = mapped_column(ForeignKey("leases.id"), nullable=True)
+    category: Mapped[str] = mapped_column(String(60), default="general")
+    severity: Mapped[str] = mapped_column(String(20), default="medium")
+    status: Mapped[str] = mapped_column(String(40), default="open")
+    title: Mapped[str] = mapped_column(String(240), default="")
+    details: Mapped[str] = mapped_column(Text, default="")
+    due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    last_notified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    notification_count: Mapped[int] = mapped_column(Integer, default=0)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    lease: Mapped[Lease | None] = relationship()
+
+
 class AiUsageDaily(Base):
     __tablename__ = "ai_usage_daily"
     __table_args__ = (UniqueConstraint("usage_date", "provider", "model", name="uq_ai_usage_daily_provider_model"),)

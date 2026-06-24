@@ -86,8 +86,8 @@ def tenant_keyboard() -> dict[str, Any]:
 
 def owner_commands() -> list[dict[str, str]]:
     return [
-        {"command": "ask", "description": "Hermes: вопрос по пульту"},
-        {"command": "audit", "description": "Hermes: ревизия пульта"},
+        {"command": "ask", "description": "Вопрос агенту (можно писать и без команды)"},
+        {"command": "audit", "description": "Строгая ревизия пульта"},
         {"command": "start", "description": "Короткая справка по owner-командам"},
         {"command": "id", "description": "Показать текущий chat id"},
         {"command": "status", "description": "Сводка по пульту и долгам"},
@@ -133,6 +133,25 @@ def send_message(token: str, chat_id: int | str, text: str, reply_markup: dict[s
     if reply_markup:
         payload["reply_markup"] = reply_markup
     return telegram_api_request(token, "sendMessage", payload)
+
+
+def answer_callback_query(token: str, callback_query_id: str, text: str = "") -> dict[str, Any]:
+    payload: dict[str, Any] = {"callback_query_id": callback_query_id}
+    if text:
+        payload["text"] = text[:180]
+    return telegram_api_request(token, "answerCallbackQuery", payload)
+
+
+def clear_inline_keyboard(token: str, chat_id: int | str, message_id: int) -> dict[str, Any]:
+    return telegram_api_request(
+        token,
+        "editMessageReplyMarkup",
+        {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "reply_markup": {"inline_keyboard": []},
+        },
+    )
 
 
 def copy_message(

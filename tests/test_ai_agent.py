@@ -310,6 +310,7 @@ class TelegramAiRoutingTests(AiAgentDatabaseTestCase):
         self.assertEqual(mocked_api.call_args_list[0].args, ("token", "deleteWebhook", {"drop_pending_updates": True}))
         self.assertEqual(mocked_api.call_args_list[1].args[0:2], ("token", "setWebhook"))
         self.assertTrue(mocked_api.call_args_list[1].args[2]["drop_pending_updates"])
+        self.assertIn("callback_query", mocked_api.call_args_list[1].args[2]["allowed_updates"])
 
     def test_set_webhook_continues_when_delete_webhook_network_fails(self) -> None:
         with self.Session() as session:
