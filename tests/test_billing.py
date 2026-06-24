@@ -15,7 +15,7 @@ from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import sessionmaker
 
 from rental_manager.database import Base
-from rental_manager.main import apartment_month_state, build_all_debts_breakdown, build_dashboard, create_manual_payment, create_move_out_utility_lines, delete_utility_bill, expense_period_summary, issue_utility_bill, month_dashboard_summary, move_out, owner_charge_status_label, owner_expected_ip_for_charge, panel_role_for_pin, process_move_out_notifications, provider_reading_statuses_for_month, render_message_text, rent_report, resolve_broadcast_recipients, transfer_lease, utility_bill_for_month
+from rental_manager.main import apartment_month_state, build_all_debts_breakdown, build_dashboard, create_manual_payment, create_move_out_utility_lines, delete_utility_bill, expense_period_summary, issue_utility_bill, month_dashboard_summary, move_out, owner_charge_status_label, owner_expected_ip_for_charge, panel_role_for_pin, process_move_out_notifications, provider_reading_statuses_for_month, render_message_text, rent_report, resolve_broadcast_recipients, transfer_lease, update_payment_receipt, utility_bill_for_month
 from rental_manager.main import apply_database_import_payload, current_database_snapshot, inspect_database_import_payload, parse_database_import_bytes
 from rental_manager.models import AppSetting, Apartment, Expense, Lease, MessageLog, Meter, MeterReading, PaymentReceipt, RentalObject, RentCharge, Tenant, UtilityBill, UtilityBillLine, UtilityService, Tariff
 from rental_manager.services.billing import (
@@ -1151,6 +1151,81 @@ class UtilityBillingTests(DatabaseTestCase):
             session.add(MeterReading(meter_id=meter.id, reading_date=date(2026, 4, 1), value=start_value))
             session.add(MeterReading(meter_id=meter.id, reading_date=date(2026, 5, 1), value=end_value))
         session.flush()
+
+
+class PaymentReceiptReviewTests(DatabaseTestCase):
+    def test_suspicious_receipt_can_be_assigned_and_accepted(self) -> None:
+        with self.Session() as session:
+            rental_object = RentalObject(name="Дом проверки", short_code="ДП")
+            apartment = Apartment(name="ДП1", sort_order=1, odn_share_percent=100, active=True, object=rental_object)
+            tenant = Tenant(full_name="Проверяемый жилец")
+            lease = Lease(
+                apartment=apartment,
+                tenant=tenant,
+                start_date=date(2026, 6, 1),
+                payment_day=15,
+                ip_amount=20000,
+                personal_amount=0,
+            )
+            charge = RentCharge(
+                lease=lease,
+                period_start=date(2026, 6, 15),
+                period_end=date(2026, 7, 14),
+                due_date=date(2026, 6, 15),
+                ip_due=20000,
+                personal_due=0,
+                status="overdue",
+            )
+            receipt = PaymentReceipt(
+                lease_id=None,
+                apartment_id=apartment.id,
+                amount=20000,
+                channel="unknown",
+                paid_at=datetime(2026, 6, 16, 12, 0),
+                source="telegram",
+                status="suspicious",
+                notes="нужна ручная проверка",
+            )
+            session.add_all([rental_object, apartment, tenant, lease, charge, receipt])
+            session.commit()
+
+            result = update_payment_receipt(
+                receipt.id,
+                {
+                    "target_kind": "rent",
+                    "rent_charge_id": charge.id,
+                    "channel": "ip",
+                    "status": "accepted",
+                    "notes": "проверено владельцем",
+                },
+                session,
+            )
+            session.refresh(charge)
+            session.refresh(receipt)
+
+        self.assertEqual(result["status"], "accepted")
+        self.assertEqual(receipt.status, "accepted")
+        self.assertEqual(receipt.rent_charge_id, charge.id)
+        self.assertEqual(receipt.channel, "ip")
+        self.assertEqual(charge.ip_paid, 20000)
+        self.assertEqual(charge.status, "paid")
+
+    def test_suspicious_receipt_cannot_be_accepted_without_target(self) -> None:
+        with self.Session() as session:
+            receipt = PaymentReceipt(
+                amount=1000,
+                channel="unknown",
+                paid_at=datetime(2026, 6, 16, 12, 0),
+                source="telegram",
+                status="suspicious",
+            )
+            session.add(receipt)
+            session.commit()
+
+            with self.assertRaises(HTTPException) as error:
+                update_payment_receipt(receipt.id, {"status": "accepted"}, session)
+
+        self.assertEqual(error.exception.status_code, 400)
 
 
 class DashboardCutoffTests(DatabaseTestCase):
