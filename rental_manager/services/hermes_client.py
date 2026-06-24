@@ -41,6 +41,7 @@ class HermesClient:
         messages: list[dict[str, str]],
         temperature: float = 0.2,
         max_tokens: int = 700,
+        session_id: str = "",
     ) -> HermesResult:
         if not self.base_url:
             raise HermesClientError("Hermes API URL is empty")
@@ -52,7 +53,10 @@ class HermesClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
-        response = self._post_json("/v1/chat/completions", payload)
+        extra_headers = {}
+        if self.provider_name == "hermes" and session_id.strip():
+            extra_headers["X-Hermes-Session-Id"] = session_id.strip()[:240]
+        response = self._post_json("/v1/chat/completions", payload, extra_headers=extra_headers)
         choices = response.get("choices") or []
         if not choices:
             raise HermesClientError("Hermes returned no choices")
@@ -68,12 +72,20 @@ class HermesClient:
             provider=self.provider_name,
         )
 
-    def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _post_json(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers = {"Content-Type": "application/json; charset=utf-8"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
             headers["X-API-Key"] = self.api_key
+        if extra_headers:
+            headers.update(extra_headers)
         request = urllib.request.Request(
             f"{self.base_url}{path}",
             data=data,
@@ -104,7 +116,13 @@ class YandexOpenAIClient(HermesClient):
         super().__init__(base_url, api_key, timeout_seconds, provider_name)
         self.folder_id = (folder_id or "").strip()
 
-    def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _post_json(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         if not self.api_key:
             raise HermesClientError("Yandex API key is empty")
 

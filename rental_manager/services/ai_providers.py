@@ -47,6 +47,24 @@ def _env_bool(source: Mapping[str, str], name: str, default: bool) -> bool:
     return raw.lower() not in {"0", "false", "no", "off"}
 
 
+def _env_int(
+    source: Mapping[str, str],
+    name: str,
+    default: int,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    raw = _env(source, name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise AiProviderConfigError(f"{name} must be an integer") from exc
+    return min(maximum, max(minimum, value))
+
+
 def parse_provider(value: str, *, setting_name: str) -> AiProvider:
     normalized = (value or "").strip().lower().replace("-", "_")
     try:
@@ -142,7 +160,18 @@ def build_provider_runtime(
         api_key = _env(source, "HERMES_API_KEY") or hermes_api_key
         if not base_url:
             raise AiProviderConfigError("HERMES_API_BASE_URL is empty")
-        client = HermesClient(base_url, api_key, provider_name=provider.value)
+        client = HermesClient(
+            base_url,
+            api_key,
+            timeout_seconds=_env_int(
+                source,
+                "HERMES_REQUEST_TIMEOUT_SECONDS",
+                60,
+                minimum=10,
+                maximum=300,
+            ),
+            provider_name=provider.value,
+        )
     elif provider == AiProvider.YANDEX:
         base_url = _env(source, "YANDEX_AI_BASE_URL", YANDEX_BASE_URL)
         api_key = _env(source, "YANDEX_AI_API_KEY") or _env(source, "YANDEX_API_KEY")
