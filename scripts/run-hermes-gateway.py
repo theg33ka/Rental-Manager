@@ -92,6 +92,11 @@ def _configure_yandex(config: dict[str, Any]) -> tuple[str, str, str] | None:
             "default": model,
             "base_url": base_url,
             "api_mode": "chat_completions",
+            # Hermes 0.17 refuses values below 64K, while Yandex currently
+            # enforces a 32K input limit. The conservative compression policy
+            # below and an empty API-server tool surface keep the real request
+            # safely below Yandex's limit.
+            "context_length": 64_000,
             "max_tokens": 1200,
             "default_headers": {
                 "Authorization": f"Api-Key ${{{api_key_env}}}",
@@ -256,15 +261,32 @@ def prepare_hermes_provider_config() -> tuple[str, str, str] | None:
         print("[HERMES] no configured inference provider found; using existing Hermes config", flush=True)
         return None
 
-    # Rental Manager sends all domain data in the prompt context. Hermes tools
-    # are intentionally disabled here to avoid browser/Node bootstrapping in the
-    # Amvera container and to keep the agent read-only.
+    # Rental Manager sends all domain data in the prompt context and executes
+    # confirmed operations itself. The API-server agent therefore needs no
+    # Hermes tools. An explicit empty list matters: an absent platform entry
+    # loads the 18-tool default and adds roughly 42 KB of schemas to every
+    # Yandex request.
     config["toolsets"] = []
     platform_toolsets = config.setdefault("platform_toolsets", {})
     if not isinstance(platform_toolsets, dict):
         platform_toolsets = {}
         config["platform_toolsets"] = platform_toolsets
-    platform_toolsets["cli"] = ["no_mcp"]
+    platform_toolsets["cli"] = []
+    platform_toolsets["api_server"] = []
+
+    compression = config.setdefault("compression", {})
+    if not isinstance(compression, dict):
+        compression = {}
+        config["compression"] = compression
+    compression.update(
+        {
+            "enabled": True,
+            "threshold": 0.35,
+            "target_ratio": 0.12,
+            "protect_last_n": 6,
+            "protect_first_n": 1,
+        }
+    )
 
     agent = config.setdefault("agent", {})
     if not isinstance(agent, dict):
