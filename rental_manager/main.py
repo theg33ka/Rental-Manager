@@ -124,7 +124,7 @@ from rental_manager.services.telegram_bot import (
 )
 
 
-APP_BUILD_MARKER = "telegram-latency-tracing-2026-06-24"
+APP_BUILD_MARKER = "agent-grounded-owner-replies-2026-06-24"
 
 
 app = FastAPI(title="Rental Manager", version="0.1.0")
@@ -298,6 +298,7 @@ def startup() -> None:
             seed_if_empty(session)
         ensure_runtime_defaults(session)
         generate_rent_charges(session)
+        backfill_owner_style_preferences(session)
         notify_available_monthly_reports(session)
         session.commit()
         ensure_runtime_telegram_webhook(session)
@@ -5385,6 +5386,107 @@ def store_agent_memories(
         )
 
 
+def upsert_owner_preference(session: Session, content: str, importance: int = 3) -> AgentMemory:
+    normalized = re.sub(r"\s+", " ", content or "").strip()[:500]
+    existing = session.scalar(
+        select(AgentMemory)
+        .where(
+            AgentMemory.scope_type == "owner",
+            AgentMemory.scope_id == "owner",
+            AgentMemory.kind == "preference",
+            func.lower(AgentMemory.content) == normalized.lower(),
+            AgentMemory.status == "active",
+        )
+        .limit(1)
+    )
+    if existing:
+        existing.importance = max(int(existing.importance or 1), importance)
+        existing.updated_at = utc_now()
+        return existing
+    memory = AgentMemory(
+        scope_type="owner",
+        scope_id="owner",
+        kind="preference",
+        content=normalized,
+        importance=importance,
+        source="owner_explicit",
+    )
+    session.add(memory)
+    session.flush()
+    return memory
+
+
+def capture_owner_style_preferences(session: Session, text: str) -> list[str]:
+    lowered = (text or "").lower()
+    captured: list[str] = []
+    if re.search(r"(не\s+(?:надо|нужно|используй|пиши|обращайся)|без).{0,50}(им[её]н|фамил)", lowered):
+        captured.append("В сообщениях жильцам не обращаться по имени или фамилии; начинать нейтрально: «Здравствуйте.»")
+    if "фамильяр" in lowered or re.search(r"не\s+надо.{0,40}(сюсюк|на\s+ты|по-дружеск)", lowered):
+        captured.append("Избегать фамильярного тона; писать жильцам нейтрально, уважительно и по-деловому.")
+    for preference in captured:
+        upsert_owner_preference(session, preference)
+    return captured
+
+
+def backfill_owner_style_preferences(session: Session, limit: int = 50) -> int:
+    messages = session.scalars(
+        select(AiMessage)
+        .join(AiConversation, AiMessage.conversation_id == AiConversation.id)
+        .where(AiConversation.role == "owner", AiMessage.role == "user")
+        .order_by(AiMessage.created_at.desc(), AiMessage.id.desc())
+        .limit(limit)
+    ).all()
+    captured: set[str] = set()
+    for message in messages:
+        captured.update(capture_owner_style_preferences(session, message.text or ""))
+    return len(captured)
+
+
+def owner_request_is_debt_details(text: str) -> bool:
+    lowered = (text or "").lower()
+    debt_topic = bool(re.search(r"\b(долг|должен|должны|задолж|просроч|коммунал)", lowered))
+    detail_request = bool(re.search(r"\b(кто|сколько|какие|покажи|подроб|список|распиши)", lowered))
+    return debt_topic and detail_request
+
+
+def owner_request_allows_actions(text: str, *, audit_deep: bool = False) -> bool:
+    if audit_deep:
+        return True
+    lowered = (text or "").lower()
+    if owner_request_is_debt_details(lowered):
+        return True
+    explicit_action = re.search(
+        r"\b(отправ|напиш|создай|оформ|выдай|установ|перенес|добав|начисл|подготов|сделай|выполни|запусти|предложи)\w*",
+        lowered,
+    )
+    recommendation = re.search(r"\b(что\s+делать|как\s+решить|предложи\s+решени|кого\s+пнуть)\b", lowered)
+    return bool(explicit_action or recommendation)
+
+
+def tenant_message_without_name(lease: Lease, text: str) -> str:
+    value = (text or "").strip()
+    if not value:
+        return value
+    full_name = re.sub(r"\s+", " ", lease.tenant.full_name or "").strip()
+    variants = [full_name]
+    if full_name:
+        variants.extend(part for part in full_name.split() if len(part) > 1)
+    variants = sorted({item for item in variants if item}, key=len, reverse=True)
+    for name in variants:
+        escaped = re.escape(name)
+        patterns = [
+            rf"^\s*уважаем(?:ый|ая)\s+{escaped}\s*[,!.:-]*\s*",
+            rf"^\s*здравствуйте\s*,?\s*{escaped}\s*[,!.:-]*\s*",
+            rf"^\s*добрый\s+(?:день|вечер)\s*,?\s*{escaped}\s*[,!.:-]*\s*",
+            rf"^\s*{escaped}\s*[,!.:-]+\s*",
+        ]
+        for pattern in patterns:
+            if re.search(pattern, value, flags=re.IGNORECASE):
+                value = re.sub(pattern, "", value, count=1, flags=re.IGNORECASE).lstrip()
+                return "Здравствуйте." + (f" {value[:1].upper()}{value[1:]}" if value else "")
+    return value
+
+
 def increment_ai_usage_row(usage: AiUsageDaily, result: HermesResult, cost_rub: float) -> None:
     prompt_tokens = int(result.prompt_tokens or 0)
     completion_tokens = int(result.completion_tokens or 0)
@@ -5660,13 +5762,22 @@ def normalize_agent_action(
         until = parse_agent_date(payload.get("deferral_until"), "дата отсрочки")
         if until <= date.today() or until > date.today() + timedelta(days=180):
             raise HTTPException(400, "Отсрочка должна быть в пределах следующих 180 дней")
+        notify_tenant = setting_bool_value(payload.get("notify_tenant", True))
+        if notify_tenant and not lease_chat_id(session, lease):
+            raise HTTPException(
+                400,
+                f"{lease.tenant.full_name} ещё не выполнил /start, поэтому уведомление об отсрочке не дойдёт",
+            )
         normalized = {
             "lease_id": lease.id,
             "charge_id": charge.id,
             "deferral_until": until.isoformat(),
             "note": str(payload.get("note") or action.get("reason") or "").strip()[:1000],
-            "notify_tenant": setting_bool_value(payload.get("notify_tenant", True)),
-            "tenant_message": str(payload.get("tenant_message") or "").strip()[:3500],
+            "notify_tenant": notify_tenant,
+            "tenant_message": tenant_message_without_name(
+                lease,
+                str(payload.get("tenant_message") or "").strip()[:3500],
+            ),
         }
         preview = (
             f"Предлагаю выдать отсрочку\n"
@@ -5681,12 +5792,21 @@ def normalize_agent_action(
         end = parse_agent_date(payload.get("end_date"), "дата выезда")
         if end < date.today() or end < lease.start_date:
             raise HTTPException(400, "Дата выезда не может быть в прошлом или раньше начала договора")
+        notify_tenant = setting_bool_value(payload.get("notify_tenant", False))
+        if notify_tenant and not lease_chat_id(session, lease):
+            raise HTTPException(
+                400,
+                f"{lease.tenant.full_name} ещё не выполнил /start, поэтому уведомление о выезде не дойдёт",
+            )
         normalized = {
             "lease_id": lease.id,
             "end_date": end.isoformat(),
             "notes": str(payload.get("notes") or action.get("reason") or "").strip()[:1500],
-            "notify_tenant": setting_bool_value(payload.get("notify_tenant", False)),
-            "tenant_message": str(payload.get("tenant_message") or "").strip()[:3500],
+            "notify_tenant": notify_tenant,
+            "tenant_message": tenant_message_without_name(
+                lease,
+                str(payload.get("tenant_message") or "").strip()[:3500],
+            ),
         }
         preview = (
             f"Предлагаю оформить выезд\n"
@@ -5723,7 +5843,12 @@ def normalize_agent_action(
         return lease, action_type, normalized, preview
 
     if action_type == "send_tenant_message":
-        message_text = str(payload.get("text") or "").strip()
+        if not lease_chat_id(session, lease):
+            raise HTTPException(
+                400,
+                f"{lease.tenant.full_name} ещё не выполнил /start, сообщение отправить невозможно",
+            )
+        message_text = tenant_message_without_name(lease, str(payload.get("text") or "").strip())
         if not message_text:
             raise HTTPException(400, "Агент предложил пустое сообщение")
         if len(message_text) > 3500:
@@ -5742,6 +5867,29 @@ def create_agent_action_proposal(
     action: dict[str, Any],
 ) -> AgentActionProposal:
     lease, action_type, payload, preview = normalize_agent_action(session, action)
+    payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    pending = session.scalars(
+        select(AgentActionProposal)
+        .where(
+            AgentActionProposal.lease_id == lease.id,
+            AgentActionProposal.action_type == action_type,
+            AgentActionProposal.status == "pending",
+        )
+        .order_by(AgentActionProposal.id.desc())
+        .limit(20)
+    ).all()
+    for existing in pending:
+        try:
+            existing_payload = json.dumps(
+                json.loads(existing.payload_json or "{}"),
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        except json.JSONDecodeError:
+            continue
+        if existing_payload == payload_json:
+            runtime_log("AGENT", f"duplicate proposal skipped existing_id={existing.id} action={action_type}")
+            return existing
     try:
         ttl_hours = min(168, max(1, int(get_setting_value(session, "ai_action_confirmation_ttl_hours") or 48)))
     except ValueError:
@@ -5751,7 +5899,7 @@ def create_agent_action_proposal(
         lease_id=lease.id,
         action_type=action_type,
         status="pending",
-        payload_json=json.dumps(payload, ensure_ascii=False),
+        payload_json=payload_json,
         preview_text=preview,
         requested_by="agent",
         owner_chat_id=str(owner_chat_id),
@@ -5781,9 +5929,11 @@ def owner_agent_context(session: Session, chat_id: int | str, dashboard: dict[st
     ).all()
     lease_lines = ["Активные договоры и идентификаторы для возможных действий:"]
     for lease in leases[:50]:
+        chat_status = "привязан" if lease_chat_id(session, lease) else "не привязан, сначала нужен /start"
         lease_lines.append(
             f"- lease_id={lease.id}; {lease.apartment.object.name}; {lease.apartment.name}; "
-            f"{lease.tenant.full_name}; дата начала={lease.start_date.isoformat()}; залог={money_text(lease.deposit_amount)}"
+            f"{lease.tenant.full_name}; дата начала={lease.start_date.isoformat()}; "
+            f"залог={money_text(lease.deposit_amount)}; Telegram-чат: {chat_status}"
         )
         charges = session.scalars(
             select(RentCharge)
@@ -5827,6 +5977,84 @@ def owner_agent_context(session: Session, chat_id: int | str, dashboard: dict[st
             agent_memory_context(session, scope_type="owner", scope_id="owner"),
         ]
     )
+
+
+def owner_debt_details_text(session: Session, dashboard: dict[str, Any], query: str = "") -> str:
+    lowered = (query or "").lower()
+    utility_only = "коммунал" in lowered and not re.search(r"\bаренд", lowered)
+    rent_only = bool(re.search(r"\bаренд", lowered)) and "коммунал" not in lowered
+    sections: list[str] = []
+    grand_total = 0.0
+    linked_tenant_ids = {
+        int(raw_tenant_id)
+        for raw_tenant_id, chat_id in get_tenant_links(session).items()
+        if str(raw_tenant_id).isdigit() and str(chat_id).strip()
+    }
+    linked_lease_ids = {
+        lease.id
+        for lease in session.scalars(
+            select(Lease).where(Lease.active.is_(True), Lease.tenant_id.in_(linked_tenant_ids))
+        ).all()
+    }
+
+    def unique_items(keys: list[str]) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        seen: set[tuple[str, int]] = set()
+        for key in keys:
+            for item in dashboard.get(key, []):
+                item_id = int(item.get("id") or 0)
+                identity = (key.split("_", 1)[0], item_id)
+                if item_id and identity in seen:
+                    continue
+                if item_id:
+                    seen.add(identity)
+                result.append(item)
+        return result
+
+    def add_section(title: str, items: list[dict[str, Any]]) -> None:
+        nonlocal grand_total
+        lines: list[str] = []
+        subtotal = 0.0
+        for item in items:
+            debt = money(float(item.get("debt") or item.get("amount") or 0))
+            if debt <= EPS:
+                continue
+            subtotal += debt
+            place = ", ".join(
+                part for part in [item.get("object"), item.get("apartment")] if str(part or "").strip()
+            )
+            tenant = str(item.get("tenant") or "").strip()
+            due = str(item.get("due_date") or "").strip()
+            due_text = f", срок {due}" if due else ""
+            lease_id = int(item.get("lease_id") or 0)
+            delivery = (
+                "Telegram привязан"
+                if lease_id and lease_id in linked_lease_ids
+                else "Telegram не привязан: сначала нужен /start"
+            )
+            lines.append(
+                f"• {place or 'объект не указан'} — {tenant or 'жилец не указан'}: "
+                f"{money_text(debt)}{due_text}; {delivery}"
+            )
+        if not lines:
+            return
+        grand_total += subtotal
+        sections.append(f"{title} — {money_text(subtotal)}:\n" + "\n".join(lines))
+
+    if not utility_only:
+        add_section(
+            "Аренда",
+            unique_items(["rent_overdue", "rent_partial", "rent_today", "rent_deferred"]),
+        )
+    if not rent_only:
+        add_section("Коммунальные платежи", unique_items(["utility_issued"]))
+    if not utility_only and not rent_only:
+        add_section("Прочие начисления", unique_items(["manual_debts"]))
+
+    if not sections:
+        topic = "по коммунальным платежам" if utility_only else "по аренде" if rent_only else ""
+        return f"Открытых долгов {topic} сейчас не вижу.".replace("  ", " ")
+    return "\n\n".join(["Сейчас в системе:", *sections, f"Итого: {money_text(grand_total)}."])
 
 
 def update_tenant_state_from_envelope(
@@ -5972,16 +6200,33 @@ def handle_owner_ai_message(session: Session, chat_id: int | str, text: str, *, 
     user_text = text.strip()
     if not user_text:
         return False
+    captured_preferences = capture_owner_style_preferences(session, user_text)
     dashboard = build_dashboard(session)
     sync_agent_tasks(session, dashboard)
+    conversation = ai_conversation(session, chat_id, "owner", None)
+    debt_details = owner_debt_details_text(session, dashboard, user_text) if owner_request_is_debt_details(user_text) else ""
+
+    allows_actions = owner_request_allows_actions(user_text, audit_deep=audit_deep)
+    if captured_preferences and not allows_actions:
+        answer = "Принял. " + " ".join(captured_preferences)
+        log_ai_message(session, conversation, "user", user_text)
+        log_ai_message(session, conversation, "assistant", answer)
+        send_telegram_text(session, chat_id, answer, app_keyboard(app_base_url(session)))
+        return True
+
     model_key = "hermes_model_audit" if audit_deep else "hermes_model_default"
+    action_policy = (
+        "Владелец разрешил подготовить предложения действий: actions допустимы."
+        if allows_actions
+        else "Это информационный разговор. actions обязан быть пустым массивом; только ответь владельцу."
+    )
     conversation, envelope = call_agent_envelope(
         session,
         chat_id=chat_id,
         actor_role="owner",
         lease=None,
         system_prompt=OWNER_AGENT_SYSTEM_PROMPT,
-        context=owner_agent_context(session, chat_id, dashboard),
+        context=owner_agent_context(session, chat_id, dashboard) + "\n\nПолитика текущего запроса:\n" + action_policy,
         user_text=user_text,
         model=resolve_ai_model(get_setting_value(session, model_key)),
         max_tokens=1500 if audit_deep else 1100,
@@ -5996,10 +6241,13 @@ def handle_owner_ai_message(session: Session, chat_id: int | str, text: str, *, 
     send_telegram_text(
         session,
         chat_id,
-        envelope.reply or "Подготовил предложения действий. Проверь карточки ниже.",
-        app_keyboard(app_base_url(session), dashboard.get("monthly_reports")),
+        debt_details or envelope.reply or "Подготовил предложения действий. Проверь карточки ниже.",
+        app_keyboard(app_base_url(session)),
     )
-    for action in envelope.actions:
+    actions = envelope.actions if allows_actions else []
+    if envelope.actions and not allows_actions:
+        runtime_log("AGENT", f"suppressed {len(envelope.actions)} unsolicited actions chat_id={chat_id}")
+    for action in actions:
         try:
             create_agent_action_proposal(session, conversation, chat_id, action)
         except HTTPException as exc:

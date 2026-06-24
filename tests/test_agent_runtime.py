@@ -7,6 +7,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+from fastapi import HTTPException
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
@@ -14,11 +15,17 @@ from rental_manager.database import Base
 from rental_manager.main import (
     agent_memory_context,
     agent_tenant_state,
+    backfill_owner_style_preferences,
+    capture_owner_style_preferences,
     handle_agent_callback_query,
+    handle_owner_ai_message,
     handle_telegram_message,
     normalize_agent_action,
+    owner_agent_context,
+    owner_debt_details_text,
     run_tenant_rent_dialogue,
     sync_agent_tasks,
+    tenant_message_without_name,
     update_tenant_state_from_envelope,
 )
 from rental_manager.models import (
@@ -26,6 +33,7 @@ from rental_manager.models import (
     AgentMemory,
     AgentTask,
     AiConversation,
+    AiMessage,
     Apartment,
     AppSetting,
     Lease,
@@ -92,6 +100,16 @@ class AgentProtocolTests(unittest.TestCase):
         self.assertEqual(envelope.reply, "Обычный ответ")
         self.assertEqual(envelope.actions, [])
 
+    def test_tenant_message_removes_named_greeting(self) -> None:
+        lease = Lease(tenant=Tenant(full_name="Никита Холобаев"))
+
+        result = tenant_message_without_name(
+            lease,
+            "Уважаемый Никита Холобаев, напоминаем о задолженности.",
+        )
+
+        self.assertEqual(result, "Здравствуйте. Напоминаем о задолженности.")
+
 
 class AgentActionTests(AgentRuntimeTestCase):
     def test_normalize_deferral_requires_real_charge(self) -> None:
@@ -103,6 +121,7 @@ class AgentActionTests(AgentRuntimeTestCase):
                     "lease_id": lease.id,
                     "charge_id": charge.id,
                     "deferral_until": (date.today() + timedelta(days=5)).isoformat(),
+                    "notify_tenant": False,
                 },
             }
 
@@ -187,6 +206,21 @@ class AgentActionTests(AgentRuntimeTestCase):
             self.assertEqual(proposal.status, "pending")
             mocked_answer.assert_called_once()
 
+    def test_unlinked_tenant_message_proposal_is_rejected(self) -> None:
+        with self.Session() as session:
+            lease, _charge = self.create_lease(session)
+
+            with self.assertRaises(HTTPException) as error:
+                normalize_agent_action(
+                    session,
+                    {
+                        "type": "send_tenant_message",
+                        "payload": {"lease_id": lease.id, "text": "Здравствуйте. Оплатите долг."},
+                    },
+                )
+
+        self.assertIn("/start", str(error.exception.detail))
+
 
 class AgentMemoryAndDialogueTests(AgentRuntimeTestCase):
     def test_memory_context_is_scoped_to_lease(self) -> None:
@@ -250,6 +284,71 @@ class AgentMemoryAndDialogueTests(AgentRuntimeTestCase):
         self.assertIsNotNone(task)
         self.assertEqual(task.status, "resolved")
 
+    def test_owner_style_preference_is_saved_deterministically(self) -> None:
+        with self.Session() as session:
+            captured = capture_owner_style_preferences(
+                session,
+                "Не надо использовать имена и фамильярничать с жильцами.",
+            )
+            memories = session.scalars(select(AgentMemory)).all()
+
+        self.assertEqual(len(captured), 2)
+        self.assertEqual(len(memories), 2)
+        self.assertTrue(all(memory.kind == "preference" for memory in memories))
+
+    def test_owner_style_preference_is_backfilled_from_chat_history(self) -> None:
+        with self.Session() as session:
+            conversation = AiConversation(chat_id="999", role="owner")
+            session.add(conversation)
+            session.flush()
+            session.add(
+                AiMessage(
+                    conversation_id=conversation.id,
+                    role="user",
+                    text="Не надо использовать имена жильцов.",
+                )
+            )
+            session.flush()
+
+            count = backfill_owner_style_preferences(session)
+            memory = session.scalar(select(AgentMemory).where(AgentMemory.kind == "preference"))
+
+        self.assertEqual(count, 1)
+        self.assertIsNotNone(memory)
+        self.assertIn("не обращаться по имени", memory.content)
+
+    def test_owner_context_marks_unlinked_telegram_chat(self) -> None:
+        with self.Session() as session:
+            lease, _charge = self.create_lease(session)
+
+            context = owner_agent_context(session, 999, {})
+
+        self.assertIn(f"lease_id={lease.id}", context)
+        self.assertIn("Telegram-чат: не привязан, сначала нужен /start", context)
+
+    def test_debt_details_report_delivery_status(self) -> None:
+        with self.Session() as session:
+            lease, charge = self.create_lease(session)
+            dashboard = {
+                "utility_issued": [
+                    {
+                        "id": 1,
+                        "lease_id": lease.id,
+                        "object": lease.apartment.object.name,
+                        "apartment": lease.apartment.name,
+                        "tenant": lease.tenant.full_name,
+                        "debt": 4500,
+                        "due_date": charge.due_date.isoformat(),
+                    }
+                ]
+            }
+
+            answer = owner_debt_details_text(session, dashboard, "Кто и сколько должен по коммуналке?")
+
+        self.assertIn(lease.tenant.full_name, answer)
+        self.assertIn("4 500,00 ₽", answer)
+        self.assertIn("Telegram не привязан: сначала нужен /start", answer)
+
 
 class OwnerChatRoutingTests(AgentRuntimeTestCase):
     def test_plain_owner_text_goes_to_agent(self) -> None:
@@ -266,6 +365,44 @@ class OwnerChatRoutingTests(AgentRuntimeTestCase):
                 )
 
         mocked_agent.assert_called_once_with(session, 999, "Кого сегодня надо пнуть?")
+
+    def test_debt_question_never_sends_empty_answer_before_proposals(self) -> None:
+        with self.Session() as session:
+            lease, charge = self.create_lease(session)
+            conversation = AiConversation(chat_id="999", role="owner")
+            session.add(conversation)
+            session.flush()
+            dashboard = {
+                "utility_issued": [
+                    {
+                        "id": 10,
+                        "lease_id": lease.id,
+                        "object": lease.apartment.object.name,
+                        "apartment": lease.apartment.name,
+                        "tenant": lease.tenant.full_name,
+                        "debt": 3200,
+                        "due_date": charge.due_date.isoformat(),
+                    }
+                ]
+            }
+            envelope = AgentEnvelope(
+                reply="",
+                actions=[{"type": "send_tenant_message", "payload": {"lease_id": lease.id, "text": "Напоминание"}}],
+            )
+
+            with patch("rental_manager.main.build_dashboard", return_value=dashboard), patch(
+                "rental_manager.main.sync_agent_tasks"
+            ), patch("rental_manager.main.owner_agent_context", return_value="context"), patch(
+                "rental_manager.main.call_agent_envelope", return_value=(conversation, envelope)
+            ), patch("rental_manager.main.store_agent_memories"), patch(
+                "rental_manager.main.send_telegram_text"
+            ) as mocked_send, patch("rental_manager.main.create_agent_action_proposal") as mocked_proposal:
+                handle_owner_ai_message(session, 999, "Кто и сколько должен по коммуналке?")
+
+        sent_text = mocked_send.call_args.args[2]
+        self.assertIn("3 200,00 ₽", sent_text)
+        self.assertIn("Telegram не привязан", sent_text)
+        mocked_proposal.assert_called_once()
 
 
 if __name__ == "__main__":
