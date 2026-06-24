@@ -2,8 +2,16 @@ from __future__ import annotations
 
 import unittest
 from datetime import date
+from unittest.mock import MagicMock
 
-from rental_manager.main import iter_generated_report_months, month_range, parse_tiers, report_status_label, resolve_deferral_until
+from rental_manager.main import (
+    iter_generated_report_months,
+    month_range,
+    parse_tiers,
+    reminder_sent_today,
+    report_status_label,
+    resolve_deferral_until,
+)
 
 
 class MainHelperTests(unittest.TestCase):
@@ -69,6 +77,17 @@ class MainHelperTests(unittest.TestCase):
 
     def test_generated_report_months_start_with_january_2026(self) -> None:
         self.assertEqual(iter_generated_report_months(date(2026, 4, 23)), [(2026, 1), (2026, 2), (2026, 3)])
+
+    def test_reminder_sent_today_binds_a_date_instead_of_a_string(self) -> None:
+        session = MagicMock()
+        session.scalar.return_value = None
+        today = date(2026, 6, 24)
+
+        self.assertFalse(reminder_sent_today(session, "agent_rent_followup", today=today))
+
+        query = session.scalar.call_args.args[0]
+        self.assertIn(today, query.compile().params.values())
+        self.assertNotIn(today.isoformat(), query.compile().params.values())
 
 
 if __name__ == "__main__":

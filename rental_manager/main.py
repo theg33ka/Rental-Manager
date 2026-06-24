@@ -4060,7 +4060,7 @@ def reminder_sent_today(
     today = today or date.today()
     query = select(MessageLog.id).where(
         MessageLog.template_key == template_key,
-        func.date(MessageLog.created_at) == today.isoformat(),
+        func.date(MessageLog.created_at) == today,
     )
     if rent_charge_id is not None:
         query = query.where(MessageLog.rent_charge_id == rent_charge_id)
