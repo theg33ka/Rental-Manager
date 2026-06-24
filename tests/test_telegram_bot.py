@@ -45,8 +45,13 @@ class TelegramBotHelpersTests(unittest.TestCase):
         self.assertIn("январь 2026", text)
         self.assertIn("февраль 2026", text)
 
-    def test_app_keyboard_contains_open_app_button(self) -> None:
+    def test_app_keyboard_does_not_add_open_app_button_by_default(self) -> None:
         keyboard = app_keyboard("https://example.com", [])
+
+        self.assertIsNone(keyboard)
+
+    def test_app_keyboard_adds_open_app_button_only_when_requested(self) -> None:
+        keyboard = app_keyboard("https://example.com", [], include_app=True)
 
         self.assertEqual(keyboard["inline_keyboard"][0][0]["text"], "🚪 Открыть пульт")
         self.assertEqual(keyboard["inline_keyboard"][0][0]["url"], "https://example.com")

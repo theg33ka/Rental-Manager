@@ -23,6 +23,8 @@ from rental_manager.main import (
     normalize_agent_action,
     owner_agent_context,
     owner_debt_details_text,
+    owner_request_allows_actions,
+    owner_request_explicitly_requests_action,
     run_tenant_rent_dialogue,
     sync_agent_tasks,
     tenant_message_without_name,
@@ -93,6 +95,32 @@ class AgentProtocolTests(unittest.TestCase):
         self.assertEqual(envelope.reply, "Подготовил.")
         self.assertEqual(envelope.actions[0]["type"], "defer_rent")
         self.assertEqual(envelope.memories[0]["importance"], 3)
+
+    def test_parses_owner_operation(self) -> None:
+        envelope = parse_agent_envelope(
+            json.dumps(
+                {
+                    "reply": "Подготовил.",
+                    "actions": [
+                        {
+                            "type": "owner_operation",
+                            "payload": {
+                                "operation": "create_expense",
+                                "arguments": {
+                                    "expense_date": "2026-06-24",
+                                    "category": "ремонт",
+                                    "amount": 1500,
+                                },
+                            },
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(envelope.actions[0]["type"], "owner_operation")
+        self.assertEqual(envelope.actions[0]["payload"]["operation"], "create_expense")
 
     def test_plain_text_remains_safe_reply_without_actions(self) -> None:
         envelope = parse_agent_envelope("Обычный ответ")
@@ -220,6 +248,59 @@ class AgentActionTests(AgentRuntimeTestCase):
                 )
 
         self.assertIn("/start", str(error.exception.detail))
+
+    def test_normalize_owner_operation_builds_detailed_preview(self) -> None:
+        with self.Session() as session:
+            lease, _charge = self.create_lease(session)
+
+            resolved_lease, action_type, payload, preview = normalize_agent_action(
+                session,
+                {
+                    "type": "owner_operation",
+                    "payload": {
+                        "operation": "set_lease_ignored",
+                        "arguments": {"lease_id": lease.id, "ignored": True},
+                    },
+                },
+            )
+
+        self.assertEqual(resolved_lease.id, lease.id)
+        self.assertEqual(action_type, "set_lease_ignored")
+        self.assertTrue(payload["ignored"])
+        self.assertIn("Порядок выполнения:", preview)
+        self.assertIn("До подтверждения данные не изменятся.", preview)
+
+    def test_owner_callback_executes_generic_web_operation(self) -> None:
+        with self.Session() as session:
+            lease, _charge = self.create_lease(session)
+            session.add(AppSetting(key="telegram_owner_chat_id", value="999"))
+            proposal = AgentActionProposal(
+                lease_id=lease.id,
+                action_type="set_lease_ignored",
+                status="pending",
+                payload_json=json.dumps({"lease_id": lease.id, "ignored": True}),
+                preview_text="Предлагаю исключить договор из учёта",
+                owner_chat_id="999",
+                expires_at=utc_now() + timedelta(hours=1),
+            )
+            session.add(proposal)
+            session.flush()
+
+            with patch("rental_manager.main.telegram_token", return_value="token"), patch(
+                "rental_manager.main.safe_answer_agent_callback"
+            ), patch("rental_manager.main.send_telegram_text"), patch("rental_manager.main.clear_inline_keyboard"):
+                handle_agent_callback_query(
+                    session,
+                    {
+                        "id": "callback-generic",
+                        "data": f"agent:confirm:{proposal.id}",
+                        "from": {"id": 999},
+                        "message": {"message_id": 12, "chat": {"id": 999}},
+                    },
+                )
+
+            self.assertEqual(proposal.status, "executed")
+            self.assertIn("IGNORE_LEASE_CONTROL", lease.notes)
 
 
 class AgentMemoryAndDialogueTests(AgentRuntimeTestCase):
@@ -351,6 +432,12 @@ class AgentMemoryAndDialogueTests(AgentRuntimeTestCase):
 
 
 class OwnerChatRoutingTests(AgentRuntimeTestCase):
+    def test_owner_request_recognizes_plain_give_deferral_wording(self) -> None:
+        text = "Дай отсрочку по коммуналке на 5 дней и уведомь жильца"
+
+        self.assertTrue(owner_request_allows_actions(text))
+        self.assertTrue(owner_request_explicitly_requests_action(text))
+
     def test_plain_owner_text_goes_to_agent(self) -> None:
         with self.Session() as session:
             session.add(AppSetting(key="telegram_owner_chat_id", value="999"))
@@ -403,6 +490,52 @@ class OwnerChatRoutingTests(AgentRuntimeTestCase):
         self.assertIn("3 200,00 ₽", sent_text)
         self.assertIn("Telegram не привязан", sent_text)
         mocked_proposal.assert_called_once()
+
+    def test_text_yes_never_confirms_pending_action(self) -> None:
+        with self.Session() as session:
+            session.add(AppSetting(key="telegram_owner_chat_id", value="999"))
+            proposal = AgentActionProposal(
+                action_type="run_reminders",
+                status="pending",
+                payload_json="{}",
+                preview_text="Запустить напоминания",
+                owner_chat_id="999",
+            )
+            session.add(proposal)
+            session.flush()
+
+            with patch("rental_manager.main.handle_owner_ai_message") as mocked_agent, patch(
+                "rental_manager.main.send_telegram_text"
+            ) as mocked_send:
+                handle_telegram_message(
+                    session,
+                    {"chat": {"id": 999}, "from": {"id": 999}, "text": "да"},
+                )
+
+        mocked_agent.assert_not_called()
+        self.assertIn("Подтверждение текстом не выполняет действия", mocked_send.call_args.args[2])
+        self.assertEqual(proposal.status, "pending")
+
+    def test_explicit_action_without_backend_proposal_is_reported_as_not_done(self) -> None:
+        with self.Session() as session:
+            conversation = AiConversation(chat_id="999", role="owner")
+            session.add(conversation)
+            session.flush()
+            envelope = AgentEnvelope(reply="Я всё выполнил.", actions=[])
+
+            with patch("rental_manager.main.build_dashboard", return_value={}), patch(
+                "rental_manager.main.sync_agent_tasks"
+            ), patch("rental_manager.main.owner_agent_context", return_value="context"), patch(
+                "rental_manager.main.call_agent_envelope", return_value=(conversation, envelope)
+            ), patch("rental_manager.main.store_agent_memories"), patch(
+                "rental_manager.main.send_telegram_text"
+            ) as mocked_send:
+                handle_owner_ai_message(session, 999, "Запусти напоминания")
+
+        sent_text = mocked_send.call_args.args[2]
+        self.assertIn("Действие не подготовлено", sent_text)
+        self.assertIn("Ничего не изменено", sent_text)
+        self.assertNotIn("Я всё выполнил", sent_text)
 
 
 if __name__ == "__main__":
