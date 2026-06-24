@@ -64,17 +64,21 @@ def _resolve_yandex_model(model: str, folder_id: str) -> str:
 
 
 def _configure_yandex(config: dict[str, Any]) -> tuple[str, str, str] | None:
-    if not _env("YANDEX_API_KEY"):
+    api_key_env = "YANDEX_AI_API_KEY" if _env("YANDEX_AI_API_KEY") else "YANDEX_API_KEY"
+    if not _env(api_key_env):
         return None
 
     folder_id = _yandex_folder_id()
-    base_url = _env("OPENAI_BASE_URL", YANDEX_BASE_URL).rstrip("/")
-    model = _resolve_yandex_model(_env("HERMES_MODEL_DEFAULT", "yandexgpt-lite"), folder_id)
+    base_url = _env("YANDEX_AI_BASE_URL", YANDEX_BASE_URL).rstrip("/")
+    model = _resolve_yandex_model(
+        _env("YANDEX_AI_MODEL") or _env("HERMES_MODEL_DEFAULT", "yandexgpt-lite"),
+        folder_id,
+    )
 
     if folder_id and not _env("OPENAI_PROJECT"):
         os.environ["OPENAI_PROJECT"] = folder_id
     if not _env("OPENAI_API_KEY"):
-        os.environ["OPENAI_API_KEY"] = _env("YANDEX_API_KEY")
+        os.environ["OPENAI_API_KEY"] = _env(api_key_env)
     os.environ.setdefault("OPENAI_BASE_URL", base_url)
     os.environ["HERMES_INFERENCE_PROVIDER"] = "yandex"
 
@@ -90,7 +94,7 @@ def _configure_yandex(config: dict[str, Any]) -> tuple[str, str, str] | None:
             "api_mode": "chat_completions",
             "max_tokens": 1200,
             "default_headers": {
-                "Authorization": f"Api-Key {_env('YANDEX_API_KEY')}",
+                "Authorization": f"Api-Key ${{{api_key_env}}}",
                 **({"OpenAI-Project": folder_id} if folder_id else {}),
             },
         }
@@ -103,7 +107,7 @@ def _configure_yandex(config: dict[str, Any]) -> tuple[str, str, str] | None:
     providers["yandex"] = {
         "name": "Yandex AI Studio",
         "api": base_url,
-        "key_env": "YANDEX_API_KEY",
+        "key_env": api_key_env,
         "default_model": model,
         "transport": "chat_completions",
         "api_mode": "chat_completions",
@@ -115,8 +119,8 @@ def _configure_deepseek(config: dict[str, Any]) -> tuple[str, str, str] | None:
     if not _env("DEEPSEEK_API_KEY"):
         return None
 
-    base_url = _env("OPENAI_BASE_URL", DEEPSEEK_BASE_URL).rstrip("/")
-    model = _env("HERMES_MODEL_DEFAULT", "deepseek-v4-flash")
+    base_url = _env("DEEPSEEK_BASE_URL", DEEPSEEK_BASE_URL).rstrip("/")
+    model = _env("DEEPSEEK_MODEL") or _env("HERMES_MODEL_DEFAULT", "deepseek-chat")
     if not _env("OPENAI_API_KEY"):
         os.environ["OPENAI_API_KEY"] = _env("DEEPSEEK_API_KEY")
     os.environ.setdefault("OPENAI_BASE_URL", base_url)
@@ -151,12 +155,105 @@ def _configure_deepseek(config: dict[str, Any]) -> tuple[str, str, str] | None:
     return ("deepseek", model, base_url)
 
 
+def _configure_openai_compatible(config: dict[str, Any]) -> tuple[str, str, str] | None:
+    base_url = _env("OPENAI_COMPATIBLE_BASE_URL")
+    model = _env("OPENAI_COMPATIBLE_MODEL")
+    if not base_url or not model:
+        return None
+    key_env = "OPENAI_COMPATIBLE_API_KEY"
+    api_key = _env(key_env)
+    if api_key and not _env("OPENAI_API_KEY"):
+        os.environ["OPENAI_API_KEY"] = api_key
+    os.environ["OPENAI_BASE_URL"] = base_url.rstrip("/")
+    os.environ["HERMES_INFERENCE_PROVIDER"] = "openai_compatible"
+
+    model_config = config.setdefault("model", {})
+    model_config.update(
+        {
+            "provider": "openai_compatible",
+            "default": model,
+            "base_url": base_url.rstrip("/"),
+            "api_mode": "chat_completions",
+            "max_tokens": 1200,
+        }
+    )
+    providers = config.setdefault("providers", {})
+    providers["openai_compatible"] = {
+        "name": "OpenAI-compatible API",
+        "api": base_url.rstrip("/"),
+        "key_env": key_env,
+        "default_model": model,
+        "transport": "chat_completions",
+        "api_mode": "chat_completions",
+    }
+    return ("openai_compatible", model, base_url.rstrip("/"))
+
+
+def _configure_amvera_llm(config: dict[str, Any]) -> tuple[str, str, str] | None:
+    base_url = _env("AMVERA_LLM_BASE_URL")
+    model = _env("AMVERA_LLM_MODEL")
+    if not base_url or not model:
+        return None
+    key_env = "AMVERA_LLM_API_KEY"
+    api_key = _env(key_env)
+    if api_key and not _env("OPENAI_API_KEY"):
+        os.environ["OPENAI_API_KEY"] = api_key
+    os.environ["OPENAI_BASE_URL"] = base_url.rstrip("/")
+    os.environ["HERMES_INFERENCE_PROVIDER"] = "amvera_llm"
+
+    model_config = config.setdefault("model", {})
+    model_config.update(
+        {
+            "provider": "amvera_llm",
+            "default": model,
+            "base_url": base_url.rstrip("/"),
+            "api_mode": "chat_completions",
+            "max_tokens": 1200,
+        }
+    )
+    providers = config.setdefault("providers", {})
+    providers["amvera_llm"] = {
+        "name": "Amvera LLM Inference",
+        "api": base_url.rstrip("/"),
+        "key_env": key_env,
+        "default_model": model,
+        "transport": "chat_completions",
+        "api_mode": "chat_completions",
+    }
+    return ("amvera_llm", model, base_url.rstrip("/"))
+
+
+PROVIDER_BUILDERS = {
+    "yandex": _configure_yandex,
+    "deepseek": _configure_deepseek,
+    "openai_compatible": _configure_openai_compatible,
+    "amvera_llm": _configure_amvera_llm,
+}
+
+
 def prepare_hermes_provider_config() -> tuple[str, str, str] | None:
     config_path = _hermes_home() / "config.yaml"
     config = _load_yaml(config_path)
-    selected = _configure_yandex(config) or _configure_deepseek(config)
+    requested = _env("HERMES_INFERENCE_PROVIDER").lower().replace("-", "_")
+    if requested:
+        builder = PROVIDER_BUILDERS.get(requested)
+        if builder is None:
+            allowed = ", ".join(PROVIDER_BUILDERS)
+            raise RuntimeError(f"Unsupported HERMES_INFERENCE_PROVIDER={requested}; allowed: {allowed}")
+        selected = builder(config)
+        if not selected:
+            raise RuntimeError(f"Hermes inference provider {requested} is selected but its URL/key/model is incomplete")
+    else:
+        # Preserve the legacy priority when no explicit upstream provider is
+        # configured. New deployments should set HERMES_INFERENCE_PROVIDER.
+        selected = (
+            _configure_yandex(config)
+            or _configure_deepseek(config)
+            or _configure_openai_compatible(config)
+            or _configure_amvera_llm(config)
+        )
     if not selected:
-        print("[HERMES] no Yandex or DeepSeek key found; using existing Hermes provider config", flush=True)
+        print("[HERMES] no configured inference provider found; using existing Hermes config", flush=True)
         return None
 
     # Rental Manager sends all domain data in the prompt context. Hermes tools

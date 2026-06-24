@@ -70,6 +70,13 @@ from rental_manager.services.ai_policy import (
     tenant_question_needs_owner,
 )
 from rental_manager.services.agent_protocol import AgentEnvelope, action_confirmation_keyboard, parse_agent_envelope
+from rental_manager.services.ai_providers import (
+    AiProvider,
+    AiProviderConfigError,
+    build_provider_runtime,
+    primary_provider,
+    provider_chain,
+)
 from rental_manager.services.billing import (
     IGNORE_LEASE_MARK,
     RENT_GENERATION_START,
@@ -87,7 +94,8 @@ from rental_manager.services.billing import (
     update_rent_charge_status,
     update_utility_line_status,
 )
-from rental_manager.services.hermes_client import HermesClient, HermesClientError, HermesResult, YandexOpenAIClient
+from rental_manager.services.hermes_client import HermesClient, HermesClientError, HermesResult
+from rental_manager.services.hermes_tools import build_owner_read_tools_context
 from rental_manager.services.payment_allocation import (
     EPS,
     build_rent_plan,
@@ -124,7 +132,7 @@ from rental_manager.services.telegram_bot import (
 )
 
 
-APP_BUILD_MARKER = "agent-grounded-owner-replies-2026-06-24"
+APP_BUILD_MARKER = "hermes-provider-tools-2026-06-24"
 
 
 app = FastAPI(title="Rental Manager", version="0.1.0")
@@ -283,10 +291,14 @@ MONTH_NAMES = [
 
 @app.on_event("startup")
 def startup() -> None:
+    try:
+        providers = ",".join(provider.value for provider in provider_chain())
+    except AiProviderConfigError as exc:
+        providers = f"invalid:{exc}"
     runtime_log(
         "BOOT",
         "app_marker="
-        f"{APP_BUILD_MARKER} ai_direct_yandex={str(yandex_direct_ai_enabled()).lower()} "
+        f"{APP_BUILD_MARKER} ai_providers={providers} "
         f"yandex_key_configured={str(bool(os.environ.get('YANDEX_API_KEY', '').strip())).lower()}",
     )
     init_db()
@@ -334,6 +346,9 @@ SCHEMA_ADDITIONS = {
         ("provider_reading_due_day", "INTEGER NOT NULL DEFAULT 20"),
         ("provider_due_day", "INTEGER NOT NULL DEFAULT 24"),
         ("resident_due_days", "INTEGER NOT NULL DEFAULT 7"),
+    ],
+    "agent_action_proposals": [
+        ("error_text", "TEXT NOT NULL DEFAULT ''"),
     ],
 }
 
@@ -973,6 +988,18 @@ def telegram_owner_chat_id(session: Session) -> str:
     return get_setting_value(session, "telegram_owner_chat_id").strip()
 
 
+def telegram_owner_ids(session: Session) -> set[str]:
+    configured = {
+        item.strip()
+        for item in os.environ.get("OWNER_TELEGRAM_IDS", "").replace(";", ",").split(",")
+        if item.strip()
+    }
+    owner_id = telegram_owner_chat_id(session)
+    if owner_id:
+        configured.add(owner_id)
+    return configured
+
+
 def app_base_url(session: Session) -> str:
     return get_setting_value(session, "app_base_url").strip().rstrip("/")
 
@@ -998,8 +1025,7 @@ def save_app_base_url_if_changed(session: Session, value: Any) -> str:
 
 
 def owner_chat_allowed(session: Session, chat_id: int | str) -> bool:
-    owner_id = telegram_owner_chat_id(session)
-    return bool(owner_id) and str(chat_id) == owner_id
+    return str(chat_id) in telegram_owner_ids(session)
 
 
 def owner_message_allowed(session: Session, message: dict[str, Any]) -> bool:
@@ -4458,7 +4484,7 @@ def run_owner_supervisor_digest(
         chat_id=owner_id,
         actor_role="owner",
         lease=None,
-        system_prompt=OWNER_AGENT_SYSTEM_PROMPT + "\n" + SUPERVISOR_SYSTEM_PROMPT,
+        system_prompt=configured_owner_agent_system_prompt() + "\n" + SUPERVISOR_SYSTEM_PROMPT,
         context=context,
         user_text="Проведи сегодняшнюю строгую ревизию. Предложи безопасные действия только там, где данных достаточно.",
         model=resolve_ai_model(get_setting_value(session, "hermes_model_default")),
@@ -5499,34 +5525,35 @@ def increment_ai_usage_row(usage: AiUsageDaily, result: HermesResult, cost_rub: 
 
 def add_ai_usage(session: Session, result: HermesResult, cost_rub: float, today: date | None = None) -> None:
     usage_date = today or date.today()
+    provider = (result.provider or "hermes").strip()
     usage = session.scalar(
         select(AiUsageDaily).where(
             AiUsageDaily.usage_date == usage_date,
-            AiUsageDaily.provider == "hermes",
+            AiUsageDaily.provider == provider,
             AiUsageDaily.model == result.model,
         )
     )
     if not usage:
-        usage = AiUsageDaily(usage_date=usage_date, provider="hermes", model=result.model)
+        usage = AiUsageDaily(usage_date=usage_date, provider=provider, model=result.model)
         session.add(usage)
     increment_ai_usage_row(usage, result, cost_rub)
 
 
 def yandex_direct_ai_enabled() -> bool:
-    if not os.environ.get("YANDEX_API_KEY", "").strip():
+    try:
+        return primary_provider() == AiProvider.YANDEX
+    except AiProviderConfigError:
         return False
-    value = os.environ.get("AI_DIRECT_YANDEX", "1").strip().lower()
-    return value not in {"0", "false", "no", "off"}
 
 
 def hermes_client_for_settings(session: Session) -> HermesClient:
-    if yandex_direct_ai_enabled():
-        return YandexOpenAIClient(
-            os.environ.get("OPENAI_BASE_URL", "https://ai.api.cloud.yandex.net/v1"),
-            os.environ.get("YANDEX_API_KEY", ""),
-            yandex_folder_id(),
-        )
-    return HermesClient(get_setting_value(session, "hermes_api_base_url"), get_setting_value(session, "hermes_api_key"))
+    provider = primary_provider()
+    return build_provider_runtime(
+        provider,
+        requested_model=get_setting_value(session, "hermes_model_default"),
+        hermes_base_url=get_setting_value(session, "hermes_api_base_url"),
+        hermes_api_key=get_setting_value(session, "hermes_api_key"),
+    ).client
 
 
 def invoke_ai_completion(
@@ -5540,15 +5567,11 @@ def invoke_ai_completion(
     max_tokens: int,
     temperature: float = 0.2,
 ) -> HermesResult | None:
+    result = None
     try:
-        result = hermes_client_for_settings(session).chat_completions(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-    except HermesClientError as exc:
-        print(f"[AI] call failed role={actor_role} model={model} error={exc}", flush=True)
+        configured_providers = provider_chain()
+    except AiProviderConfigError as exc:
+        runtime_log("AI", f"provider configuration failed error={exc}")
         session.add(
             AiActionLog(
                 conversation_id=conversation.id,
@@ -5556,9 +5579,49 @@ def invoke_ai_completion(
                 actor_role=actor_role,
                 action_type="agent_call",
                 status="failed",
-                note=str(exc),
+                note=str(exc)[:2000],
             )
         )
+        return None
+    for provider in configured_providers:
+        try:
+            runtime = build_provider_runtime(
+                provider,
+                requested_model=model,
+                hermes_base_url=get_setting_value(session, "hermes_api_base_url"),
+                hermes_api_key=get_setting_value(session, "hermes_api_key"),
+            )
+            runtime_log(
+                "AI",
+                f"call provider={provider.value} role={actor_role} model={runtime.model}",
+            )
+            result = runtime.client.chat_completions(
+                model=runtime.model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            break
+        except (AiProviderConfigError, HermesClientError) as exc:
+            runtime_log(
+                "AI",
+                f"call failed provider={provider.value} role={actor_role} model={model} error={exc}",
+            )
+            session.add(
+                AiActionLog(
+                    conversation_id=conversation.id,
+                    lease_id=lease.id if lease else None,
+                    actor_role=actor_role,
+                    action_type="agent_call",
+                    status="failed",
+                    payload_json=json.dumps(
+                        {"provider": provider.value, "requested_model": model},
+                        ensure_ascii=False,
+                    ),
+                    note=str(exc)[:2000],
+                )
+            )
+    if result is None:
         return None
 
     prompt_tokens = result.prompt_tokens or estimate_tokens("\n".join(item["content"] for item in messages))
@@ -5569,10 +5632,29 @@ def invoke_ai_completion(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         raw=result.raw,
+        provider=result.provider,
     )
     cost = ai_estimated_cost_rub(normalized.model, normalized.prompt_tokens, normalized.completion_tokens)
     add_ai_usage(session, normalized, cost)
     return normalized
+
+
+def configured_owner_agent_system_prompt() -> str:
+    configured_path = os.environ.get("HERMES_SYSTEM_PROMPT_PATH", "").strip()
+    if not configured_path:
+        return OWNER_AGENT_SYSTEM_PROMPT
+    prompt_path = Path(configured_path)
+    if not prompt_path.is_absolute():
+        prompt_path = ROOT_DIR / prompt_path
+    try:
+        prompt = prompt_path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        runtime_log("AI", f"system prompt path unavailable path={prompt_path} error={exc}")
+        return OWNER_AGENT_SYSTEM_PROMPT
+    if not prompt:
+        runtime_log("AI", f"system prompt path is empty path={prompt_path}")
+        return OWNER_AGENT_SYSTEM_PROMPT
+    return prompt[:20_000]
 
 
 def call_hermes_ai(
@@ -5907,6 +5989,17 @@ def create_agent_action_proposal(
     )
     session.add(proposal)
     session.flush()
+    session.add(
+        AiActionLog(
+            conversation_id=conversation.id,
+            lease_id=lease.id,
+            actor_role="agent",
+            action_type=action_type,
+            status="pending",
+            payload_json=payload_json,
+            note=preview[:2000],
+        )
+    )
     response = send_telegram_text(
         session,
         owner_chat_id,
@@ -5971,6 +6064,7 @@ def owner_agent_context(session: Session, chat_id: int | str, dashboard: dict[st
     return "\n\n".join(
         [
             owner_context_text(session, dashboard),
+            build_owner_read_tools_context(session, dashboard, chat_id),
             "\n".join(lease_lines),
             task_text,
             f"Предложений действий, ожидающих подтверждения: {pending_count}",
@@ -6225,7 +6319,7 @@ def handle_owner_ai_message(session: Session, chat_id: int | str, text: str, *, 
         chat_id=chat_id,
         actor_role="owner",
         lease=None,
-        system_prompt=OWNER_AGENT_SYSTEM_PROMPT,
+        system_prompt=configured_owner_agent_system_prompt(),
         context=owner_agent_context(session, chat_id, dashboard) + "\n\nПолитика текущего запроса:\n" + action_policy,
         user_text=user_text,
         model=resolve_ai_model(get_setting_value(session, model_key)),
@@ -6372,7 +6466,7 @@ def handle_agent_callback_query(session: Session, callback: dict[str, Any]) -> N
     if not callback_id or not chat_id or not token:
         return
 
-    if str(sender.get("id") or "") != str(telegram_owner_chat_id(session) or ""):
+    if not owner_chat_allowed(session, sender.get("id") or ""):
         safe_answer_agent_callback(token, callback_id, "Подтверждать действия может только владелец.")
         return
 
@@ -6394,7 +6488,22 @@ def handle_agent_callback_query(session: Session, callback: dict[str, Any]) -> N
         return
     if proposal.expires_at and proposal.expires_at < utc_now():
         proposal.status = "expired"
+        proposal.error_text = "Истёк срок подтверждения"
+        session.add(
+            AiActionLog(
+                conversation_id=proposal.conversation_id,
+                lease_id=proposal.lease_id,
+                actor_role="system",
+                action_type=proposal.action_type,
+                status="expired",
+                payload_json=proposal.payload_json,
+                note=proposal.error_text,
+            )
+        )
         safe_answer_agent_callback(token, callback_id, "Срок подтверждения истёк.")
+        return
+    if proposal.owner_chat_id and str(chat_id) != proposal.owner_chat_id:
+        safe_answer_agent_callback(token, callback_id, "Подтверждение доступно только в исходном owner chat.")
         return
 
     if decision == "reject":
@@ -6414,14 +6523,26 @@ def handle_agent_callback_query(session: Session, callback: dict[str, Any]) -> N
         safe_answer_agent_callback(token, callback_id, "Отклонено. Данные не менялись.")
         send_telegram_text(session, chat_id, f"Отклонено: {proposal.preview_text.splitlines()[0]}.")
     else:
-        proposal.status = "executing"
+        proposal.status = "approved"
         proposal.confirmed_at = utc_now()
+        session.add(
+            AiActionLog(
+                conversation_id=proposal.conversation_id,
+                lease_id=proposal.lease_id,
+                actor_role="owner",
+                action_type=proposal.action_type,
+                status="approved",
+                payload_json=proposal.payload_json,
+                note="owner approved agent proposal",
+            )
+        )
         session.flush()
         try:
             result_text = execute_agent_action(session, proposal)
         except HTTPException as exc:
             proposal.status = "failed"
             proposal.result_text = str(exc.detail)
+            proposal.error_text = str(exc.detail)
             session.add(
                 AiActionLog(
                     conversation_id=proposal.conversation_id,
@@ -6439,6 +6560,7 @@ def handle_agent_callback_query(session: Session, callback: dict[str, Any]) -> N
             proposal.status = "executed"
             proposal.executed_at = utc_now()
             proposal.result_text = result_text
+            proposal.error_text = ""
             session.add(
                 AiActionLog(
                     conversation_id=proposal.conversation_id,
@@ -6535,10 +6657,7 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
     text = (message.get("text") or "").strip()
     command, _args = parse_command(text)
     owner_id = telegram_owner_chat_id(session)
-    is_owner = bool(owner_id) and str(owner_id) in {
-        str(chat.get("id") or ""),
-        str(sender.get("id") or ""),
-    }
+    is_owner = owner_message_allowed(session, message)
     linked_lease = None if is_owner else maybe_link_tenant_chat(session, message)
     preparation_ms = int((time_module.perf_counter() - started) * 1000)
     runtime_log(

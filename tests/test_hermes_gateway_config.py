@@ -37,7 +37,7 @@ class HermesGatewayConfigTests(unittest.TestCase):
         self.assertEqual(selected, ("yandex", "gpt://folder-123/yandexgpt-lite/latest", "https://ai.api.cloud.yandex.net/v1"))
         self.assertEqual(config["model"]["provider"], "yandex")
         self.assertEqual(config["model"]["default"], "gpt://folder-123/yandexgpt-lite/latest")
-        self.assertEqual(config["model"]["default_headers"]["Authorization"], "Api-Key test-yandex-key")
+        self.assertEqual(config["model"]["default_headers"]["Authorization"], "Api-Key ${YANDEX_API_KEY}")
         self.assertEqual(config["model"]["default_headers"]["OpenAI-Project"], "folder-123")
         self.assertEqual(config["providers"]["yandex"]["key_env"], "YANDEX_API_KEY")
         self.assertEqual(config["providers"]["yandex"]["default_model"], "gpt://folder-123/yandexgpt-lite/latest")
@@ -78,6 +78,38 @@ class HermesGatewayConfigTests(unittest.TestCase):
         self.assertEqual(selected, ("deepseek", "deepseek-v4-flash", "https://api.deepseek.com"))
         self.assertEqual(config["model"]["provider"], "deepseek")
         self.assertEqual(config["providers"]["deepseek"]["key_env"], "DEEPSEEK_API_KEY")
+
+    def test_explicit_openai_compatible_provider_is_supported(self) -> None:
+        module = load_gateway_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "HERMES_HOME": tmp,
+                "HERMES_INFERENCE_PROVIDER": "openai_compatible",
+                "OPENAI_COMPATIBLE_BASE_URL": "https://llm.example.test/v1",
+                "OPENAI_COMPATIBLE_API_KEY": "test-key",
+                "OPENAI_COMPATIBLE_MODEL": "example-model",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                selected = module.prepare_hermes_provider_config()
+                config = yaml.safe_load((Path(tmp) / "config.yaml").read_text(encoding="utf-8"))
+
+        self.assertEqual(selected, ("openai_compatible", "example-model", "https://llm.example.test/v1"))
+        self.assertEqual(config["model"]["provider"], "openai_compatible")
+        self.assertEqual(config["providers"]["openai_compatible"]["key_env"], "OPENAI_COMPATIBLE_API_KEY")
+
+    def test_explicit_provider_fails_fast_when_configuration_is_incomplete(self) -> None:
+        module = load_gateway_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(
+                os.environ,
+                {
+                    "HERMES_HOME": tmp,
+                    "HERMES_INFERENCE_PROVIDER": "amvera_llm",
+                },
+                clear=True,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "incomplete"):
+                    module.prepare_hermes_provider_config()
 
 
 if __name__ == "__main__":

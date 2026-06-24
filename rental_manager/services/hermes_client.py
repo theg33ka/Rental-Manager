@@ -18,13 +18,21 @@ class HermesResult:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     raw: dict[str, Any] | None = None
+    provider: str = "hermes"
 
 
 class HermesClient:
-    def __init__(self, base_url: str, api_key: str = "", timeout_seconds: int = 20) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str = "",
+        timeout_seconds: int = 20,
+        provider_name: str = "hermes",
+    ) -> None:
         self.base_url = (base_url or "").strip().rstrip("/")
         self.api_key = (api_key or "").strip()
         self.timeout_seconds = timeout_seconds
+        self.provider_name = (provider_name or "hermes").strip()
 
     def chat_completions(
         self,
@@ -57,6 +65,7 @@ class HermesClient:
             prompt_tokens=int(usage.get("prompt_tokens") or 0),
             completion_tokens=int(usage.get("completion_tokens") or 0),
             raw=response,
+            provider=self.provider_name,
         )
 
     def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -90,8 +99,9 @@ class YandexOpenAIClient(HermesClient):
         api_key: str,
         folder_id: str = "",
         timeout_seconds: int = 20,
+        provider_name: str = "yandex",
     ) -> None:
-        super().__init__(base_url, api_key, timeout_seconds)
+        super().__init__(base_url, api_key, timeout_seconds, provider_name)
         self.folder_id = (folder_id or "").strip()
 
     def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
