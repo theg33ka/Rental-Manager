@@ -86,6 +86,7 @@ def tenant_keyboard() -> dict[str, Any]:
 
 def owner_commands() -> list[dict[str, str]]:
     return [
+        {"command": "ping", "description": "Проверить скорость ответа бота"},
         {"command": "ask", "description": "Вопрос агенту (можно писать и без команды)"},
         {"command": "audit", "description": "Строгая ревизия пульта"},
         {"command": "start", "description": "Короткая справка по owner-командам"},

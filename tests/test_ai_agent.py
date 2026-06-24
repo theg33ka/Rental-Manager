@@ -335,11 +335,45 @@ class TelegramAiRoutingTests(AiAgentDatabaseTestCase):
         with self.Session() as session:
             session.add(AppSetting(key="telegram_owner_chat_id", value="999"))
             session.flush()
-            with patch("rental_manager.main.handle_owner_ai_message") as mocked_ai, patch("rental_manager.main.send_telegram_text") as mocked_send:
+            with patch("rental_manager.main.handle_owner_ai_message") as mocked_ai, patch(
+                "rental_manager.main.build_dashboard"
+            ) as mocked_full_dashboard, patch(
+                "rental_manager.main.build_monthly_reports"
+            ) as mocked_reports, patch(
+                "rental_manager.main.send_telegram_text"
+            ) as mocked_send:
                 handle_telegram_message(session, {"chat": {"id": 999}, "from": {"id": 999}, "text": "/status"})
 
         mocked_ai.assert_not_called()
+        mocked_full_dashboard.assert_not_called()
+        mocked_reports.assert_not_called()
         mocked_send.assert_called()
+
+    def test_id_command_skips_tenant_lookup_and_reports(self) -> None:
+        with self.Session() as session:
+            session.add(AppSetting(key="telegram_owner_chat_id", value="999"))
+            session.flush()
+            with patch("rental_manager.main.maybe_link_tenant_chat") as mocked_link, patch(
+                "rental_manager.main.build_monthly_reports"
+            ) as mocked_reports, patch("rental_manager.main.send_telegram_text") as mocked_send:
+                handle_telegram_message(session, {"chat": {"id": 999}, "from": {"id": 999}, "text": "/id"})
+
+        mocked_link.assert_not_called()
+        mocked_reports.assert_not_called()
+        mocked_send.assert_called_once_with(session, 999, "Ваш chat id: 999")
+
+    def test_ping_command_skips_expensive_snapshots(self) -> None:
+        with self.Session() as session:
+            session.add(AppSetting(key="telegram_owner_chat_id", value="999"))
+            session.flush()
+            with patch("rental_manager.main.build_dashboard") as mocked_dashboard, patch(
+                "rental_manager.main.build_monthly_reports"
+            ) as mocked_reports, patch("rental_manager.main.send_telegram_text") as mocked_send:
+                handle_telegram_message(session, {"chat": {"id": 999}, "from": {"id": 999}, "text": "/ping"})
+
+        mocked_dashboard.assert_not_called()
+        mocked_reports.assert_not_called()
+        self.assertIn("Pong", mocked_send.call_args.args[2])
 
     def test_owner_command_can_be_authorized_by_sender_id(self) -> None:
         with self.Session() as session:
