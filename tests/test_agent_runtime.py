@@ -16,7 +16,9 @@ from rental_manager.main import (
     agent_memory_context,
     agent_tenant_state,
     backfill_owner_style_preferences,
+    build_dashboard,
     capture_owner_style_preferences,
+    execute_agent_action,
     handle_agent_callback_query,
     handle_owner_ai_message,
     handle_telegram_message,
@@ -39,6 +41,7 @@ from rental_manager.models import (
     Apartment,
     AppSetting,
     Lease,
+    PaymentSituation,
     RentalObject,
     RentCharge,
     Tenant,
@@ -203,6 +206,19 @@ class AgentActionTests(AgentRuntimeTestCase):
 
             self.assertEqual(proposal.status, "executed")
             self.assertEqual(charge.deferral_until, until)
+            situation = session.scalar(
+                select(PaymentSituation).where(
+                    PaymentSituation.kind == "rent",
+                    PaymentSituation.reference_id == charge.id,
+                )
+            )
+            dashboard = build_dashboard(session)
+
+            self.assertIsNotNone(situation)
+            self.assertEqual(situation.status, "promised")
+            self.assertEqual(situation.promise_date, until)
+            self.assertEqual(dashboard["rent_overdue"], [])
+            self.assertEqual(dashboard["rent_deferred"][0]["id"], charge.id)
 
     def test_non_owner_cannot_confirm(self) -> None:
         with self.Session() as session:
@@ -248,6 +264,55 @@ class AgentActionTests(AgentRuntimeTestCase):
                 )
 
         self.assertIn("/start", str(error.exception.detail))
+
+    def test_message_cannot_claim_deferral_without_data_operation(self) -> None:
+        with self.Session() as session:
+            lease, _charge = self.create_lease(session)
+            session.add(
+                AppSetting(
+                    key="telegram_tenant_links",
+                    value=json.dumps({str(lease.tenant_id): "501"}),
+                )
+            )
+            session.flush()
+
+            with self.assertRaises(HTTPException) as error:
+                normalize_agent_action(
+                    session,
+                    {
+                        "type": "send_tenant_message",
+                        "payload": {
+                            "lease_id": lease.id,
+                            "text": "Здравствуйте. Информируем вас об отсрочке платежа по аренде на 14 дней.",
+                        },
+                    },
+                )
+
+        self.assertIn("отдельная отправка сообщения не меняет данные", str(error.exception.detail))
+
+    def test_existing_message_proposal_cannot_bypass_deferral_guard(self) -> None:
+        with self.Session() as session:
+            lease, _charge = self.create_lease(session)
+            proposal = AgentActionProposal(
+                lease_id=lease.id,
+                action_type="send_tenant_message",
+                status="approved",
+                payload_json=json.dumps(
+                    {
+                        "lease_id": lease.id,
+                        "text": "Здравствуйте. Владелец подтвердил отсрочку оплаты.",
+                    },
+                    ensure_ascii=False,
+                ),
+                preview_text="Предлагаю отправить сообщение",
+            )
+            session.add(proposal)
+            session.flush()
+
+            with self.assertRaises(HTTPException) as error:
+                execute_agent_action(session, proposal)
+
+        self.assertIn("Сначала подготовьте соответствующую операцию", str(error.exception.detail))
 
     def test_normalize_owner_operation_builds_detailed_preview(self) -> None:
         with self.Session() as session:
