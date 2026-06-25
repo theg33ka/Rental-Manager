@@ -2956,7 +2956,6 @@ def build_dashboard(session: Session) -> dict[str, Any]:
         for charge in charges
         if charge.status == "deferred"
         and charge.deferral_until
-        and charge.deferral_until <= today + timedelta(days=2)
         and rent_debt(charge) > 0
         and debt_visible_by_cutoff(charge.due_date, cutoff)
     ]
@@ -6491,6 +6490,45 @@ def owner_operation_target(
     return None, ""
 
 
+def tenant_message_unverified_change(text: str) -> str:
+    lowered = re.sub(r"\s+", " ", (text or "").strip().lower())
+    if not lowered:
+        return ""
+
+    if re.search(r"\bотсроч", lowered):
+        safe_deferral_context = (
+            re.search(r"\b(?:запрос|просьб|вопрос)\w*.{0,60}\bотсроч", lowered)
+            or re.search(r"\b(?:рассмотр|обсуд|уточн|возможност)\w*.{0,60}\bотсроч", lowered)
+            or re.search(r"\bотсроч\w*.{0,40}\bне\s+(?:предоставлен|подтвержден|одобрен|оформлен)", lowered)
+        )
+        if not safe_deferral_context:
+            return "отсрочка"
+
+    mutation_patterns = (
+        ("списание или закрытие долга", r"\b(?:долг|задолженн)\w*.{0,50}\b(?:списан|удал[её]н|закрыт|аннулирован)"),
+        ("зачёт платежа", r"\b(?:плат[её]ж|оплат)\w*.{0,50}\b(?:зачт[её]н|подтвержд[её]н|провед[её]н)"),
+        ("изменение договора", r"\bдоговор\w*.{0,50}\b(?:измен[её]н|продл[её]н|расторгнут|закрыт)"),
+        ("оформление выезда", r"\bвыезд\w*.{0,50}\b(?:оформлен|подтвержд[её]н|зафиксирован)"),
+        ("возврат залога", r"\bзалог\w*.{0,50}\b(?:возвращ[её]н|перечислен|выплачен)"),
+        ("предоставление скидки", r"\bскидк\w*.{0,50}\b(?:предоставлен|одобрен|примен[её]н)"),
+    )
+    for label, pattern in mutation_patterns:
+        if re.search(pattern, lowered):
+            return label
+    return ""
+
+
+def reject_tenant_message_claiming_unverified_change(text: str) -> None:
+    change = tenant_message_unverified_change(text)
+    if not change:
+        return
+    raise HTTPException(
+        400,
+        f"Сообщение заявляет, что уже выполнено изменение «{change}», но отдельная отправка сообщения не меняет данные. "
+        "Сначала подготовьте соответствующую операцию с данными; backend уведомит жильца только после её подтверждения и успешного сохранения.",
+    )
+
+
 def normalize_agent_action(
     session: Session,
     action: dict[str, Any],
@@ -6661,6 +6699,7 @@ def normalize_agent_action(
             raise HTTPException(400, "Агент предложил пустое сообщение")
         if len(message_text) > 3500:
             raise HTTPException(400, "Сообщение жильцу длиннее 3500 символов")
+        reject_tenant_message_claiming_unverified_change(message_text)
         normalized = {"lease_id": lease.id, "text": message_text}
         preview = f"Предлагаю отправить сообщение\nЖилец: {place}\n\n{message_text}"
         return lease, action_type, normalized, preview
@@ -7290,6 +7329,10 @@ def execute_agent_action(session: Session, proposal: AgentActionProposal) -> str
         charge.deferral_until = until
         charge.deferral_note = str(payload.get("note") or "").strip()
         update_rent_charge_status(charge)
+        situation = payment_situation(session, "rent", charge.id, lease.id)
+        situation.promise_date = until
+        situation.paused_until = until
+        situation.status = "promised"
         if setting_bool_value(payload.get("notify_tenant")):
             message_text = str(payload.get("tenant_message") or "").strip() or (
                 f"Владелец подтвердил отсрочку оплаты до {until:%d.%m.%Y}. "
@@ -7355,11 +7398,13 @@ def execute_agent_action(session: Session, proposal: AgentActionProposal) -> str
         lease = session.get(Lease, int(payload.get("lease_id") or proposal.lease_id or 0))
         if not lease:
             raise HTTPException(404, "Договор для действия не найден")
+        message_text = str(payload.get("text") or "").strip()
+        reject_tenant_message_claiming_unverified_change(message_text)
         result = send_tenant_message(
             session,
             lease,
             "custom",
-            custom_text=str(payload.get("text") or ""),
+            custom_text=message_text,
             note=f"agent-action:{proposal.id}",
         )
         return f"Сообщение отправлено жильцу {result['tenant']}."
@@ -9406,6 +9451,10 @@ def defer_rent_charge(charge_id: int, payload: dict[str, Any], session: Session 
         raise HTTPException(400, str(exc)) from exc
     charge.deferral_note = payload.get("deferral_note") or ""
     update_rent_charge_status(charge)
+    situation = payment_situation(session, "rent", charge.id, charge.lease_id)
+    situation.promise_date = charge.deferral_until
+    situation.paused_until = charge.deferral_until
+    situation.status = "promised"
     session.commit()
     return serialize_rent_charge(charge, session)
 
