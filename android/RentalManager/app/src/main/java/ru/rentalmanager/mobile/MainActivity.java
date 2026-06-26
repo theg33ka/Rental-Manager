@@ -30,6 +30,7 @@ import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
@@ -75,6 +76,8 @@ public class MainActivity extends Activity {
     private LinearLayout bottomBar;
     private TextView screenTitle;
     private TextView screenSubtitle;
+    private TextView loadingTitleView;
+    private TextView loadingDetailView;
     private JSONObject bootstrap;
     private JSONArray rentCharges = new JSONArray();
     private JSONArray utilityBills = new JSONArray();
@@ -267,11 +270,15 @@ public class MainActivity extends Activity {
         lastConnectionCheckAt = now;
         new Thread(() -> {
             try {
-                JSONObject status = api.getJson("/api/auth/status");
-                if (status.optBoolean("authenticated")) {
-                    runOnUiThread(() -> setConnectionStatus(true, "данные доступны"));
-                } else {
+                api.getJson("/api/app-state?sections=bootstrap");
+                runOnUiThread(() -> setConnectionStatus(true, "данные доступны"));
+            } catch (ApiClient.ApiException ex) {
+                if (ex.statusCode == 401 || ex.statusCode == 403) {
                     runOnUiThread(() -> setConnectionStatus(false, "нужен PIN"));
+                } else if (ex.statusCode <= 0) {
+                    runOnUiThread(() -> setConnectionStatus(false, "не API"));
+                } else {
+                    runOnUiThread(() -> setConnectionStatus(false, "ошибка " + ex.statusCode));
                 }
             } catch (Exception ex) {
                 runOnUiThread(() -> setConnectionStatus(false, "связи нет"));
@@ -362,7 +369,7 @@ public class MainActivity extends Activity {
     }
 
     private void refreshCurrentTab(boolean visible) {
-        if (visible && !currentTabReady()) showLoadingCard();
+        if (visible) showLoadingCard();
         runApi("Обновляю данные", visible, () -> {
             loadAppState();
             return null;
@@ -370,28 +377,57 @@ public class MainActivity extends Activity {
     }
 
     private void loadAppState() throws Exception {
-        JSONObject payload = api.getJson("/api/app-state");
-        bootstrap = payload.optJSONObject("bootstrap");
-        if (bootstrap == null) bootstrap = new JSONObject();
-        rentCharges = payload.optJSONArray("rent_charges");
-        if (rentCharges == null) rentCharges = new JSONArray();
-        utilityBills = payload.optJSONArray("utility_bills");
-        if (utilityBills == null) utilityBills = new JSONArray();
-        utilityTimeline = payload.optJSONArray("utility_timeline");
-        if (utilityTimeline == null) utilityTimeline = new JSONArray();
-        expenses = payload.optJSONArray("expenses");
-        if (expenses == null) expenses = new JSONArray();
-        tariffs = payload.optJSONArray("tariffs");
-        if (tariffs == null) tariffs = new JSONArray();
-        messageTargets = payload.optJSONArray("message_targets");
-        if (messageTargets == null) messageTargets = new JSONArray();
-        suspiciousReceipts = payload.optJSONArray("suspicious_receipts");
-        if (suspiciousReceipts == null) suspiciousReceipts = new JSONArray();
+        updateLoadingCard("Собираю дашборд", "Проверяю PIN, настройки и основные карточки.");
+        applyAppState(api.getJson("/api/app-state?sections=bootstrap"));
+        updateLoadingCard("Подтягиваю расчёты", "Аренда, коммуналка, расходы и тарифы.");
+        applyAppState(api.getJson("/api/app-state?sections=rent_charges,utility_bills,expenses,tariffs"));
+        updateLoadingCard("Догружаю тяжёлые хвосты", "Таймлайн, рассылки и подозрительные чеки.");
+        try {
+            applyAppState(api.getJson("/api/app-state?sections=utility_timeline,message_targets,suspicious_receipts"));
+        } catch (Exception ex) {
+            runOnUiThread(() -> toast("Часть данных не загрузилась: " + (ex.getMessage() == null ? "ошибка" : ex.getMessage())));
+        }
         long now = System.currentTimeMillis();
         bootstrapLoadedAt = now;
         paymentsLoadedAt = now;
         servicesLoadedAt = now;
         moreLoadedAt = now;
+    }
+
+    private void applyAppState(JSONObject payload) {
+        if (payload == null) return;
+        if (payload.has("bootstrap")) {
+            bootstrap = payload.optJSONObject("bootstrap");
+            if (bootstrap == null) bootstrap = new JSONObject();
+        }
+        if (payload.has("rent_charges")) {
+            rentCharges = payload.optJSONArray("rent_charges");
+            if (rentCharges == null) rentCharges = new JSONArray();
+        }
+        if (payload.has("utility_bills")) {
+            utilityBills = payload.optJSONArray("utility_bills");
+            if (utilityBills == null) utilityBills = new JSONArray();
+        }
+        if (payload.has("utility_timeline")) {
+            utilityTimeline = payload.optJSONArray("utility_timeline");
+            if (utilityTimeline == null) utilityTimeline = new JSONArray();
+        }
+        if (payload.has("expenses")) {
+            expenses = payload.optJSONArray("expenses");
+            if (expenses == null) expenses = new JSONArray();
+        }
+        if (payload.has("tariffs")) {
+            tariffs = payload.optJSONArray("tariffs");
+            if (tariffs == null) tariffs = new JSONArray();
+        }
+        if (payload.has("message_targets")) {
+            messageTargets = payload.optJSONArray("message_targets");
+            if (messageTargets == null) messageTargets = new JSONArray();
+        }
+        if (payload.has("suspicious_receipts")) {
+            suspiciousReceipts = payload.optJSONArray("suspicious_receipts");
+            if (suspiciousReceipts == null) suspiciousReceipts = new JSONArray();
+        }
     }
 
     private void loadBootstrap() throws Exception {
@@ -445,9 +481,26 @@ public class MainActivity extends Activity {
     private void showLoadingCard() {
         content.removeAllViews();
         LinearLayout card = card();
-        card.addView(label("Загружаю", 22, text, true));
-        card.addView(label("Получаю свежие данные с сервера.", 14, muted, false));
+        loadingTitleView = label("Загружаю", 22, text, true);
+        loadingDetailView = label("Получаю свежие данные с сервера.", 14, muted, false);
+        ProgressBar progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        progress.setIndeterminate(true);
+        card.addView(loadingTitleView);
+        card.addView(loadingDetailView);
+        card.addView(progress, new LinearLayout.LayoutParams(-1, dp(10)));
         content.addView(card);
+    }
+
+    private void updateLoadingCard(String title, String detail) {
+        Runnable update = () -> {
+            if (loadingTitleView != null) loadingTitleView.setText(title);
+            if (loadingDetailView != null) loadingDetailView.setText(detail);
+        };
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            update.run();
+        } else {
+            runOnUiThread(update);
+        }
     }
 
     private void showAppMenuDialog() {

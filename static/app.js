@@ -18,10 +18,32 @@ const state = {
   manualAllocation: null,
   manualDebt: null,
   quickReadingArmedUntil: 0,
+  performance: null,
+  loadFailures: [],
 };
 
 const ownerTabs = ["dashboard", "tenants", "rent", "meters", "utilities", "tariffs", "expenses", "reports", "messages", "automation", "settings"];
 const guestTabs = ["dashboard", "reports"];
+const appStateLoadGroups = [
+  {
+    sections: ["bootstrap"],
+    percent: 28,
+    title: "Собираю дашборд",
+    detail: "Проверяю PIN, настройки и основные карточки.",
+  },
+  {
+    sections: ["rent_charges", "utility_bills", "expenses", "tariffs"],
+    percent: 68,
+    title: "Подтягиваю расчёты",
+    detail: "Аренда, коммуналка, расходы и тарифы идут одним спокойным пакетом.",
+  },
+  {
+    sections: ["utility_timeline", "message_targets", "suspicious_receipts"],
+    percent: 92,
+    title: "Догружаю тяжёлые хвосты",
+    detail: "Таймлайн, рассылки и чеки. Если тут тормозит, мониторинг покажет виновника.",
+  },
+];
 
 function authRole() {
   return state.auth?.role || null;
@@ -111,6 +133,7 @@ function on(selector, eventName, handler) {
 }
 
 function showAuthOverlay() {
+  hideLoadingOverlay();
   document.body.classList.add("auth-locked");
   const overlay = qs("#authOverlay");
   if (overlay) overlay.hidden = false;
@@ -121,6 +144,27 @@ function showAuthOverlay() {
 function hideAuthOverlay() {
   document.body.classList.remove("auth-locked");
   const overlay = qs("#authOverlay");
+  if (overlay) overlay.hidden = true;
+}
+
+function setLoadingStep(percent, title, detail = "") {
+  const overlay = qs("#loadingOverlay");
+  const bar = qs("#loadingProgressBar");
+  const percentNode = qs("#loadingProgressPercent");
+  const titleNode = qs("#loadingTitle");
+  const detailNode = qs("#loadingDetail");
+  const safePercent = Math.max(0, Math.min(100, Math.round(percent || 0)));
+  if (overlay) overlay.hidden = false;
+  document.body.classList.add("app-loading");
+  if (bar) bar.style.width = `${safePercent}%`;
+  if (percentNode) percentNode.textContent = `${safePercent}%`;
+  if (titleNode) titleNode.textContent = title || "Загружаю";
+  if (detailNode) detailNode.textContent = detail || "Сервер шуршит базой, сейчас покажу результат.";
+}
+
+function hideLoadingOverlay() {
+  document.body.classList.remove("app-loading");
+  const overlay = qs("#loadingOverlay");
   if (overlay) overlay.hidden = true;
 }
 
@@ -484,30 +528,177 @@ function renderTelegramStatus() {
   `;
 }
 
+function formatPerfMs(value) {
+  const number = Number(value || 0);
+  return number >= 1000 ? `${(number / 1000).toFixed(1)} c` : `${Math.round(number)} мс`;
+}
+
+function formatPerfDate(value) {
+  if (!value) return "";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return String(value);
+  return parsed.toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+function renderPerformanceMonitor() {
+  const box = qs("#performanceBox");
+  if (!box) return;
+  const perf = state.performance;
+  if (!perf) {
+    box.innerHTML = `<p class="muted">Нажмите «Обновить мониторинг», чтобы посмотреть, кто ел серверную кашу. Автоопроса нет, чтобы мониторинг не стал новым тормозом.</p>`;
+    return;
+  }
+  const routes = (perf.routes || []).slice(0, 10).map((route) => `
+    <tr>
+      <td>${escapeHtml(route.route)}</td>
+      <td>${route.count || 0}</td>
+      <td>${formatPerfMs(route.avg_ms)}</td>
+      <td>${formatPerfMs(route.max_ms)}</td>
+      <td>${route.slow || 0}</td>
+      <td>${route.errors || 0}</td>
+    </tr>
+  `).join("");
+  const slow = (perf.slow_requests || []).slice(0, 8).map((item) => `
+    <li><strong>${formatPerfMs(item.duration_ms)}</strong> ${escapeHtml(item.route)} <span class="muted">${formatPerfDate(item.at)}</span></li>
+  `).join("");
+  const sections = (perf.section_events || []).slice(0, 8).map((item) => {
+    const detail = Object.entries(item.detail?.sections || {})
+      .map(([name, ms]) => `${escapeHtml(name)} ${formatPerfMs(ms)}`)
+      .join(", ");
+    return `<li><strong>${formatPerfMs(item.duration_ms)}</strong> ${escapeHtml(item.label)} <span class="muted">${detail}</span></li>`;
+  }).join("");
+  const background = (perf.background_events || []).slice(0, 8).map((item) => `
+    <li><strong>${escapeHtml(item.area)}</strong> ${escapeHtml(item.status)} · ${formatPerfMs(item.duration_ms)} <span class="muted">${formatPerfDate(item.at)}</span></li>
+  `).join("");
+  const agents = (perf.user_agents || []).slice(0, 6).map((item) => `
+    <li><strong>${item.count || 0}</strong> ${escapeHtml(item.user_agent)}</li>
+  `).join("");
+  const aiRows = (perf.ai_usage || []).slice(0, 10).map((row) => `
+    <tr>
+      <td>${escapeHtml(row.date)}</td>
+      <td>${escapeHtml(row.provider)}</td>
+      <td>${escapeHtml(row.model)}</td>
+      <td>${row.calls || 0}</td>
+      <td>${row.total_tokens || 0}</td>
+      <td>${money(row.cost_rub || 0)}</td>
+    </tr>
+  `).join("");
+  const ai = perf.ai_summary || {};
+  const counts = perf.data_counts || {};
+  box.innerHTML = `
+    <div class="performance-head">
+      <div>
+        <h3>Производительность</h3>
+        <p class="muted">Аптайм ${Math.round((perf.uptime_seconds || 0) / 60)} мин · медленным считается ${formatPerfMs(perf.slow_threshold_ms)}</p>
+      </div>
+      <div class="pill-row">
+        <span class="pill ${ai.enabled ? "ok" : "warn"}">AI ${ai.enabled ? "включён" : "выключен"}</span>
+        <span class="pill">AI сегодня: ${ai.today_calls || 0} выз.</span>
+        <span class="pill">расход ${money(ai.today_cost_rub || 0)}</span>
+        <span class="pill">задач агента ${ai.open_agent_tasks || 0}</span>
+      </div>
+    </div>
+    <div class="pill-row">
+      <span class="pill">аренда ${counts.rent_charges || 0}</span>
+      <span class="pill">строки коммуналки ${counts.utility_bill_lines || 0}</span>
+      <span class="pill">чеки ${counts.payment_receipts || 0}</span>
+      <span class="pill">логи сообщений ${counts.message_logs || 0}</span>
+    </div>
+    <div class="performance-grid">
+      <div class="muted-box">
+        <h4>Endpoint'ы</h4>
+        <div class="table-wrap">${table(["Маршрут", "Запросов", "Среднее", "Пик", "Медл.", "Ош."], routes || `<tr><td colspan="6">Пока пусто</td></tr>`)}</div>
+      </div>
+      <div class="muted-box">
+        <h4>Секции загрузки</h4>
+        <ul class="compact-list">${sections || "<li>Секций ещё нет</li>"}</ul>
+      </div>
+      <div class="muted-box">
+        <h4>Медленные запросы</h4>
+        <ul class="compact-list">${slow || "<li>Медленных запросов нет</li>"}</ul>
+      </div>
+      <div class="muted-box">
+        <h4>Фон и AI</h4>
+        <ul class="compact-list">${background || "<li>Фон пока молчит</li>"}</ul>
+      </div>
+      <div class="muted-box">
+        <h4>User-Agent</h4>
+        <ul class="compact-list">${agents || "<li>Запросов ещё нет</li>"}</ul>
+      </div>
+      <div class="muted-box">
+        <h4>AI за 14 дней</h4>
+        <div class="table-wrap">${table(["Дата", "Провайдер", "Модель", "Выз.", "Токены", "₽"], aiRows || `<tr><td colspan="6">Нет расхода</td></tr>`)}</div>
+      </div>
+    </div>
+  `;
+}
+
+async function loadPerformanceMonitor() {
+  const button = qs("#performanceRefreshBtn");
+  if (button) button.disabled = true;
+  try {
+    state.performance = await api("/api/performance");
+    renderPerformanceMonitor();
+    toast("Мониторинг обновлён");
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 function applyAppState(payload) {
-  state.bootstrap = payload.bootstrap || payload;
-  state.rentCharges = payload.rent_charges || [];
-  state.utilityBills = payload.utility_bills || [];
-  state.utilityTimeline = payload.utility_timeline || [];
-  state.expenses = payload.expenses || [];
-  state.tariffs = payload.tariffs || [];
-  state.messageTargets = payload.message_targets || [];
-  state.suspiciousReceipts = payload.suspicious_receipts || [];
+  if (!payload || typeof payload !== "object") return;
+  if ("bootstrap" in payload) state.bootstrap = payload.bootstrap || {};
+  else if ("today" in payload || "dashboard" in payload) state.bootstrap = payload;
+  if ("rent_charges" in payload) state.rentCharges = payload.rent_charges || [];
+  if ("utility_bills" in payload) state.utilityBills = payload.utility_bills || [];
+  if ("utility_timeline" in payload) state.utilityTimeline = payload.utility_timeline || [];
+  if ("expenses" in payload) state.expenses = payload.expenses || [];
+  if ("tariffs" in payload) state.tariffs = payload.tariffs || [];
+  if ("message_targets" in payload) state.messageTargets = payload.message_targets || [];
+  if ("suspicious_receipts" in payload) state.suspiciousReceipts = payload.suspicious_receipts || [];
+}
+
+async function loadAppStateSections(group) {
+  setLoadingStep(group.percent, group.title, group.detail);
+  const sectionParam = encodeURIComponent(group.sections.join(","));
+  const payload = await api(`/api/app-state?sections=${sectionParam}`);
+  applyAppState(payload);
+  return payload;
 }
 
 async function loadAll() {
-  const payload = await api("/api/app-state");
-  applyAppState(payload);
-  state.auth = { authenticated: true, role: state.bootstrap.auth?.role || authRole() || "owner" };
-  applySettings(state.bootstrap.settings);
-  applyAccessUi();
-  if (isGuest()) {
+  state.loadFailures = [];
+  setLoadingStep(6, "Подключаюсь к серверу", "Проверяю, отвечает ли пульт, а не просто делает вид.");
+  try {
+    await loadAppStateSections(appStateLoadGroups[0]);
+    state.auth = { authenticated: true, role: state.bootstrap?.auth?.role || authRole() || "owner" };
+    applySettings(state.bootstrap?.settings);
+    applyAccessUi();
+    if (isGuest()) {
+      hydrateForms();
+      renderGuestView();
+      setLoadingStep(100, "Готово", "Гостевой обзор загружен.");
+      window.setTimeout(hideLoadingOverlay, 180);
+      return;
+    }
+    for (const group of appStateLoadGroups.slice(1)) {
+      try {
+        await loadAppStateSections(group);
+      } catch (error) {
+        state.loadFailures.push(`${group.title}: ${error.message}`);
+      }
+    }
     hydrateForms();
-    renderGuestView();
-    return;
+    renderAll();
+    setLoadingStep(100, "Готово", state.loadFailures.length ? "Часть данных не доехала, но пульт уже можно смотреть." : "Данные на месте.");
+    window.setTimeout(hideLoadingOverlay, 220);
+    if (state.loadFailures.length) {
+      toast(`Не всё загрузилось: ${state.loadFailures[0]}`);
+    }
+  } catch (error) {
+    hideLoadingOverlay();
+    throw error;
   }
-  hydrateForms();
-  renderAll();
 }
 
 async function refreshBootstrap() {
@@ -637,6 +828,7 @@ function renderAll() {
   renderMessagePreview();
   renderSuspiciousReceipts();
   renderAutomation();
+  renderPerformanceMonitor();
   renderManualAllocationModal();
   renderManualDebtModal();
   setReportLinks();
@@ -3136,6 +3328,7 @@ function bindEvents() {
   on("#telegramWebhookBtn", "click", connectTelegramWebhook);
   on("#telegramWebhookInfoBtn", "click", telegramWebhookInfo);
   on("#telegramTestBtn", "click", sendTelegramTest);
+  on("#performanceRefreshBtn", "click", loadPerformanceMonitor);
   on("#loadRentBtn", "click", async () => {
     await loadRent();
     renderRent();

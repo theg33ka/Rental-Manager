@@ -169,6 +169,10 @@ body.auth-locked {
   overflow: hidden;
 }
 
+body.app-loading {
+  overflow: hidden;
+}
+
 .topbar {
   display: flex;
   align-items: center;
@@ -319,7 +323,10 @@ main {
 
 body.auth-locked main,
 body.auth-locked nav,
-body.auth-locked .topbar {
+body.auth-locked .topbar,
+body.app-loading main,
+body.app-loading nav,
+body.app-loading .topbar {
   filter: blur(6px) saturate(0.92);
   pointer-events: none;
   user-select: none;
@@ -359,6 +366,42 @@ body.auth-locked .topbar {
 
 .muted-box {
   padding: 14px;
+}
+
+.performance-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 16px;
+}
+
+.performance-head h3,
+.performance-grid h4 {
+  margin: 0 0 6px;
+}
+
+.performance-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.performance-grid .muted-box {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+
+.compact-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.compact-list li {
+  word-break: break-word;
 }
 
 .quick-readings {
@@ -932,6 +975,75 @@ td.actions .button {
 #toast.show {
   opacity: 1;
   transform: translateY(0);
+}
+
+.loading-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 28;
+  display: none;
+  place-items: center;
+  padding: 24px;
+  background: linear-gradient(145deg, rgba(245, 242, 236, 0.96), rgba(230, 237, 232, 0.96));
+}
+
+.loading-overlay:not([hidden]) {
+  display: grid;
+}
+
+.loading-card {
+  width: min(520px, calc(100vw - 32px));
+  display: grid;
+  gap: 14px;
+  padding: 28px;
+  border: 1px solid rgba(37, 109, 90, 0.24);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 18px 44px rgba(25, 33, 29, 0.16);
+  overflow: hidden;
+  position: relative;
+}
+
+.loading-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 4px;
+  background: linear-gradient(90deg, var(--primary), var(--accent), var(--blue));
+}
+
+.loading-card h2,
+.loading-card p {
+  margin: 0;
+}
+
+.loading-progress {
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--pill-bg);
+}
+
+.loading-progress span {
+  display: block;
+  width: 6%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--primary), var(--accent));
+  transition: width 0.28s ease;
+}
+
+.loading-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.loading-progress-meta strong {
+  color: var(--ink);
 }
 
 .attention-card.rent-critical {

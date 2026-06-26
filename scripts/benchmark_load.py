@@ -202,8 +202,13 @@ def main() -> None:
             "/api/bootstrap",
             "/api/messages/targets",
         ]
+        sectioned_app_state_paths = [
+            "/api/app-state?sections=bootstrap",
+            "/api/app-state?sections=rent_charges,utility_bills,expenses,tariffs",
+            "/api/app-state?sections=utility_timeline,message_targets,suspicious_receipts",
+        ]
 
-        def create_draft(use_app_state: bool) -> int:
+        def create_draft(refresh_mode: str) -> int:
             nonlocal draft_offset
             start, end = month_range(draft_offset)
             draft_offset += 1
@@ -217,8 +222,10 @@ def main() -> None:
                 },
             )
             created_bill_ids.append(int(json.loads(body.decode("utf-8"))["id"]))
-            if use_app_state:
+            if refresh_mode == "app_state":
                 return size + hit_paths(client, ["/api/app-state"])
+            if refresh_mode == "sectioned":
+                return size + hit_paths(client, sectioned_app_state_paths)
             return size + hit_paths(client, legacy_web_paths)
 
         def cleanup_drafts() -> None:
@@ -231,12 +238,16 @@ def main() -> None:
 
         results = [
             measure("first_screen_app_state", lambda: hit_paths(client, ["/", "/static/app.js", "/api/auth/status", "/api/app-state"]), args.repeats),
+            measure("first_screen_sectioned", lambda: hit_paths(client, ["/", "/static/app.js", "/api/auth/status", *sectioned_app_state_paths]), args.repeats),
             measure("web_app_state", lambda: hit_paths(client, ["/api/app-state"]), args.repeats),
+            measure("web_sectioned_app_state", lambda: hit_paths(client, sectioned_app_state_paths), args.repeats),
             measure("web_legacy_load_all", lambda: hit_paths(client, legacy_web_paths), args.repeats),
             measure("mobile_app_state", lambda: hit_paths(client, ["/api/app-state"]), args.repeats),
+            measure("mobile_sectioned_app_state", lambda: hit_paths(client, sectioned_app_state_paths), args.repeats),
             measure("mobile_legacy_tab_switches", lambda: hit_paths(client, legacy_mobile_paths), args.repeats),
-            measure("create_draft_fast_flow", lambda: create_draft(True), max(3, min(args.repeats, 6)), cleanup_drafts),
-            measure("create_draft_legacy_flow", lambda: create_draft(False), max(3, min(args.repeats, 6)), cleanup_drafts),
+            measure("create_draft_app_state_flow", lambda: create_draft("app_state"), max(3, min(args.repeats, 6)), cleanup_drafts),
+            measure("create_draft_sectioned_flow", lambda: create_draft("sectioned"), max(3, min(args.repeats, 6)), cleanup_drafts),
+            measure("create_draft_legacy_flow", lambda: create_draft("legacy"), max(3, min(args.repeats, 6)), cleanup_drafts),
         ]
         if args.json:
             print(json.dumps(results, ensure_ascii=False, indent=2))

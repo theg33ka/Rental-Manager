@@ -17,6 +17,7 @@ from sqlalchemy.orm import sessionmaker
 from rental_manager.database import Base
 from rental_manager.main import apartment_month_state, build_all_debts_breakdown, build_dashboard, create_manual_payment, create_move_out_utility_lines, delete_utility_bill, expense_period_summary, issue_utility_bill, month_dashboard_summary, move_out, owner_charge_status_label, owner_expected_ip_for_charge, panel_role_for_pin, process_move_out_notifications, provider_reading_statuses_for_month, render_message_text, rent_report, resolve_broadcast_recipients, transfer_lease, update_payment_receipt, utility_bill_for_month
 from rental_manager.main import apply_database_import_payload, current_database_snapshot, inspect_database_import_payload, parse_database_import_bytes
+from rental_manager.main import api_performance, app_state, record_perf_request
 from rental_manager.models import AppSetting, Apartment, Expense, Lease, MessageLog, Meter, MeterReading, PaymentReceipt, RentalObject, RentCharge, Tenant, UtilityBill, UtilityBillLine, UtilityService, Tariff
 from rental_manager.services.billing import (
     IGNORE_LEASE_MARK,
@@ -51,6 +52,14 @@ class DatabaseTestCase(unittest.TestCase):
         session = self.Session()
         seed_if_empty(session)
         return session
+
+
+class DummyRequest:
+    headers: dict[str, str] = {}
+    cookies: dict[str, str] = {}
+
+    def __init__(self, role: str = "owner") -> None:
+        self.state = type("State", (), {"panel_role": role})()
 
 
 class DatabaseImportExportTests(DatabaseTestCase):
@@ -88,6 +97,36 @@ class DatabaseImportExportTests(DatabaseTestCase):
         self.assertEqual(result["counts"]["leases"], 1)
         self.assertIsNotNone(restored_lease)
         self.assertEqual(restored_setting.value, "123")
+
+
+class AppStatePerformanceTests(DatabaseTestCase):
+    def test_app_state_can_return_selected_sections_only(self) -> None:
+        with self.seed() as session:
+            request = DummyRequest("owner")
+
+            bootstrap_only = app_state(request, sections="bootstrap", session=session)
+            self.assertEqual(set(bootstrap_only), {"bootstrap"})
+            self.assertIn("dashboard", bootstrap_only["bootstrap"])
+
+            selected = app_state(request, sections="rent_charges,tariffs", session=session)
+            self.assertEqual(set(selected), {"rent_charges", "tariffs"})
+            self.assertIsInstance(selected["rent_charges"], list)
+            self.assertIsInstance(selected["tariffs"], list)
+
+    def test_performance_snapshot_exposes_request_and_ai_summary(self) -> None:
+        record_perf_request(
+            method="GET",
+            path="/api/app-state",
+            status_code=200,
+            duration_ms=42,
+            user_agent="unit-test",
+        )
+        with self.seed() as session:
+            snapshot = api_performance(session)
+
+        self.assertIn("routes", snapshot)
+        self.assertIn("ai_summary", snapshot)
+        self.assertTrue(any(item["route"] == "GET /api/app-state" for item in snapshot["routes"]))
 
     def test_parse_database_import_bytes_rejects_wrong_payload(self) -> None:
         with self.assertRaises(HTTPException):
