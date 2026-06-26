@@ -6,7 +6,22 @@
     <title>Rental Manager</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
-  <body class="auth-locked">
+  <body class="auth-locked app-loading">
+    <div id="loadingOverlay" class="loading-overlay" role="status" aria-live="polite">
+      <div class="loading-card">
+        <p class="eyebrow">Rental Manager</p>
+        <h2 id="loadingTitle">Подключаюсь к серверу</h2>
+        <p id="loadingDetail" class="muted">Проверяю, отвечает ли пульт, а не просто делает вид.</p>
+        <div class="loading-progress" aria-hidden="true">
+          <span id="loadingProgressBar"></span>
+        </div>
+        <div class="loading-progress-meta">
+          <span>Загрузка данных</span>
+          <strong id="loadingProgressPercent">6%</strong>
+        </div>
+      </div>
+    </div>
+
     <header class="topbar">
       <div>
         <p class="eyebrow">Rental Manager</p>
@@ -471,6 +486,16 @@
           </div>
           <div id="databaseImportStatusBox" class="card muted-box"></div>
         </section>
+        <section class="card stack">
+          <div class="section-title">
+            <h3>Внутренний мониторинг</h3>
+            <span>Смотрим медленные места без постоянного автоопроса. А зачем будить сервер просто так?</span>
+          </div>
+          <div class="settings-actions">
+            <button id="performanceRefreshBtn" type="button" class="primary">Обновить мониторинг</button>
+          </div>
+          <div id="performanceBox" class="muted-box"></div>
+        </section>
         <div id="telegramStatusBox" class="card muted-box"></div>
       </section>
     </main>
@@ -504,7 +529,7 @@
     <div id="manualAllocationModal" class="modal-shell" hidden></div>
     <div id="manualDebtModal" class="modal-shell" hidden></div>
     <div id="toast" role="status" aria-live="polite"></div>
-    <script src="/static/app.js?v=2026-05-21-2"></script>
+    <script src="/static/app.js?v=2026-06-26-perf"></script>
   </body>
 </html>
 

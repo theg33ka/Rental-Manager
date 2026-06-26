@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import calendar
+from collections import deque
 import hashlib
 import json
 import os
@@ -139,7 +140,7 @@ from rental_manager.services.telegram_bot import (
 )
 
 
-APP_BUILD_MARKER = "smart-payment-notifications-hermes-context-2026-06-24"
+APP_BUILD_MARKER = "performance-monitoring-section-load-2026-06-26"
 
 
 app = FastAPI(title="Rental Manager", version="0.1.0")
@@ -147,8 +148,143 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.mount("/static", StaticFiles(directory=ROOT_DIR / "static"), name="static")
 
 
+PERF_STARTED_AT = time_module.time()
+PERF_SLOW_REQUEST_MS = int(os.environ.get("RENTAL_MANAGER_PERF_SLOW_MS", "1500") or 1500)
+PERF_LOCK = threading.Lock()
+PERF_RECENT_REQUESTS: deque[dict[str, Any]] = deque(maxlen=180)
+PERF_SLOW_REQUESTS: deque[dict[str, Any]] = deque(maxlen=90)
+PERF_SECTION_EVENTS: deque[dict[str, Any]] = deque(maxlen=120)
+PERF_BACKGROUND_EVENTS: deque[dict[str, Any]] = deque(maxlen=120)
+PERF_REQUEST_AGGREGATES: dict[str, dict[str, Any]] = {}
+PERF_USER_AGENTS: dict[str, dict[str, Any]] = {}
+
+
 def runtime_log(area: str, message: str) -> None:
     print(f"[{area}] {message}", flush=True)
+
+
+def normalized_perf_path(path: str) -> str:
+    if path.startswith("/static/"):
+        return "/static/*"
+    return re.sub(r"/\d+(?=/|$)", "/:id", path)
+
+
+def compact_user_agent(value: str) -> str:
+    value = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not value:
+        return "-"
+    return value[:160]
+
+
+def record_perf_request(
+    *,
+    method: str,
+    path: str,
+    status_code: int,
+    duration_ms: int,
+    user_agent: str,
+) -> None:
+    if path.startswith("/static/") or path == "/favicon.ico":
+        return
+    route = f"{method.upper()} {normalized_perf_path(path)}"
+    now = utc_now().isoformat()
+    agent = compact_user_agent(user_agent)
+    event = {
+        "at": now,
+        "route": route,
+        "path": path[:180],
+        "status": int(status_code or 0),
+        "duration_ms": int(duration_ms),
+        "user_agent": agent,
+    }
+    with PERF_LOCK:
+        PERF_RECENT_REQUESTS.appendleft(event)
+        if duration_ms >= PERF_SLOW_REQUEST_MS or status_code >= 500:
+            PERF_SLOW_REQUESTS.appendleft(event)
+        aggregate = PERF_REQUEST_AGGREGATES.setdefault(
+            route,
+            {
+                "route": route,
+                "count": 0,
+                "total_ms": 0,
+                "max_ms": 0,
+                "slow": 0,
+                "errors": 0,
+                "last_ms": 0,
+                "last_at": now,
+            },
+        )
+        aggregate["count"] += 1
+        aggregate["total_ms"] += duration_ms
+        aggregate["max_ms"] = max(int(aggregate["max_ms"]), duration_ms)
+        aggregate["slow"] += 1 if duration_ms >= PERF_SLOW_REQUEST_MS else 0
+        aggregate["errors"] += 1 if status_code >= 500 else 0
+        aggregate["last_ms"] = duration_ms
+        aggregate["last_at"] = now
+        agent_stats = PERF_USER_AGENTS.setdefault(
+            agent,
+            {"user_agent": agent, "count": 0, "total_ms": 0, "last_at": now},
+        )
+        agent_stats["count"] += 1
+        agent_stats["total_ms"] += duration_ms
+        agent_stats["last_at"] = now
+
+
+def record_perf_section(area: str, label: str, duration_ms: int, detail: dict[str, Any] | None = None) -> None:
+    event = {
+        "at": utc_now().isoformat(),
+        "area": area,
+        "label": label,
+        "duration_ms": int(duration_ms),
+        "detail": detail or {},
+    }
+    with PERF_LOCK:
+        PERF_SECTION_EVENTS.appendleft(event)
+
+
+def record_background_event(area: str, duration_ms: int, status: str = "ok", detail: dict[str, Any] | None = None) -> None:
+    event = {
+        "at": utc_now().isoformat(),
+        "area": area,
+        "status": status,
+        "duration_ms": int(duration_ms),
+        "detail": detail or {},
+    }
+    with PERF_LOCK:
+        PERF_BACKGROUND_EVENTS.appendleft(event)
+
+
+def performance_snapshot() -> dict[str, Any]:
+    with PERF_LOCK:
+        routes = []
+        for item in PERF_REQUEST_AGGREGATES.values():
+            count = max(1, int(item["count"]))
+            routes.append(
+                {
+                    **item,
+                    "avg_ms": round(float(item["total_ms"]) / count, 1),
+                }
+            )
+        agents = []
+        for item in PERF_USER_AGENTS.values():
+            count = max(1, int(item["count"]))
+            agents.append(
+                {
+                    **item,
+                    "avg_ms": round(float(item["total_ms"]) / count, 1),
+                }
+            )
+        return {
+            "started_at": datetime.fromtimestamp(PERF_STARTED_AT, tz=timezone.utc).isoformat(),
+            "uptime_seconds": int(time_module.time() - PERF_STARTED_AT),
+            "slow_threshold_ms": PERF_SLOW_REQUEST_MS,
+            "routes": sorted(routes, key=lambda item: (item["total_ms"], item["max_ms"]), reverse=True)[:30],
+            "user_agents": sorted(agents, key=lambda item: item["count"], reverse=True)[:20],
+            "recent_requests": list(PERF_RECENT_REQUESTS)[:60],
+            "slow_requests": list(PERF_SLOW_REQUESTS)[:40],
+            "section_events": list(PERF_SECTION_EVENTS)[:40],
+            "background_events": list(PERF_BACKGROUND_EVENTS)[:40],
+        }
 
 
 DEFAULT_SETTINGS = {
@@ -346,6 +482,8 @@ MONTH_NAMES = [
 
 @app.on_event("startup")
 def startup() -> None:
+    started = time_module.perf_counter()
+    status = "ok"
     try:
         providers = ",".join(provider.value for provider in provider_chain())
     except AiProviderConfigError as exc:
@@ -370,20 +508,38 @@ def startup() -> None:
         session.commit()
         ensure_runtime_telegram_webhook(session)
     start_reminder_worker()
+    record_background_event(
+        "startup",
+        int((time_module.perf_counter() - started) * 1000),
+        status=status,
+        detail={"providers": providers},
+    )
 
 
 def reminder_worker_loop() -> None:
     # Первый сон нужен, чтобы редеплой не отправлял пачку сообщений в ту же секунду.
     time_module.sleep(60)
     while True:
+        started = time_module.perf_counter()
+        summary: dict[str, Any] = {}
+        status = "ok"
         try:
             with SessionLocal() as session:
                 generate_rent_charges(session)
-                run_due_reminders(session)
+                summary = run_due_reminders(session)
                 notify_available_monthly_reports(session)
                 session.commit()
         except Exception as exc:
+            status = "failed"
             print(f"[REMINDERS] background worker failed: {exc}")
+            summary = {"error": str(exc)[:300]}
+        finally:
+            record_background_event(
+                "reminder_worker",
+                int((time_module.perf_counter() - started) * 1000),
+                status=status,
+                detail=summary,
+            )
         time_module.sleep(REMINDER_WORKER_INTERVAL_SECONDS)
 
 
@@ -530,6 +686,27 @@ def guest_api_allowed(method: str, path: str) -> bool:
     if path in PANEL_ALLOWED_GUEST_TAB_PATHS:
         return True
     return path.startswith("/api/reports/")
+
+
+@app.middleware("http")
+async def performance_monitor_middleware(request: Request, call_next):
+    started = time_module.perf_counter()
+    response = None
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        response.headers["X-Rental-Perf-Ms"] = str(int((time_module.perf_counter() - started) * 1000))
+        return response
+    finally:
+        duration_ms = int((time_module.perf_counter() - started) * 1000)
+        record_perf_request(
+            method=request.method,
+            path=request.url.path,
+            status_code=status_code,
+            duration_ms=duration_ms,
+            user_agent=request.headers.get("user-agent", ""),
+        )
 
 
 @app.middleware("http")
@@ -2210,35 +2387,142 @@ def bootstrap(request: Request, session: Session = Depends(get_session)) -> dict
     return build_bootstrap_payload(request, session)
 
 
+APP_STATE_SECTION_ORDER = (
+    "bootstrap",
+    "rent_charges",
+    "utility_bills",
+    "expenses",
+    "tariffs",
+    "utility_timeline",
+    "message_targets",
+    "suspicious_receipts",
+)
+APP_STATE_SECTION_SET = set(APP_STATE_SECTION_ORDER)
+
+
+def parse_app_state_sections(value: str | None) -> list[str]:
+    if not value:
+        return list(APP_STATE_SECTION_ORDER)
+    selected: list[str] = []
+    for raw_item in re.split(r"[,;\s]+", value):
+        item = raw_item.strip()
+        if not item:
+            continue
+        if item == "all":
+            return list(APP_STATE_SECTION_ORDER)
+        if item not in APP_STATE_SECTION_SET:
+            raise HTTPException(400, f"Неизвестная секция app-state: {item}")
+        if item not in selected:
+            selected.append(item)
+    return selected or ["bootstrap"]
+
+
 @app.get("/api/app-state")
-def app_state(request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
-    bootstrap_payload = build_bootstrap_payload(request, session)
-    if bootstrap_payload.get("auth", {}).get("role") != "owner":
-        return {
-            "bootstrap": bootstrap_payload,
-            "rent_charges": [],
-            "utility_bills": [],
-            "utility_timeline": [],
-            "expenses": [],
-            "tariffs": [],
-            "message_targets": [],
-            "suspicious_receipts": [],
-        }
-    return {
-        "bootstrap": bootstrap_payload,
-        "rent_charges": rent_charges_payload(session=session, include_payments=False, include_reminder=False, generate_missing=False),
-        "utility_bills": utility_bills_payload(session, include_line_payments=False, include_line_reminders=False),
-        "utility_timeline": utility_timeline_payload(session),
-        "expenses": expenses_payload(session),
-        "tariffs": tariffs_payload(session),
-        "message_targets": message_targets_payload(session),
-        "suspicious_receipts": suspicious_receipts_payload(session),
+def app_state(
+    request: Request,
+    sections: str | None = None,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    selected = parse_app_state_sections(sections)
+    payload: dict[str, Any] = {}
+    timings: dict[str, int] = {}
+    started = time_module.perf_counter()
+    role = getattr(request.state, "panel_role", None) or panel_role_from_request(request, session)
+
+    def load_section(key: str, loader) -> None:
+        section_started = time_module.perf_counter()
+        payload[key] = loader()
+        timings[key] = int((time_module.perf_counter() - section_started) * 1000)
+
+    if role != "owner":
+        for key in selected:
+            if key == "bootstrap":
+                load_section("bootstrap", lambda: build_bootstrap_payload(request, session))
+            else:
+                payload[key] = []
+                timings[key] = 0
+        record_perf_section(
+            "app-state",
+            ",".join(selected),
+            int((time_module.perf_counter() - started) * 1000),
+            {"role": role or "anonymous", "sections": timings},
+        )
+        return payload
+
+    loaders = {
+        "bootstrap": lambda: build_bootstrap_payload(request, session),
+        "rent_charges": lambda: rent_charges_payload(
+            session=session,
+            include_payments=False,
+            include_reminder=False,
+            generate_missing=False,
+        ),
+        "utility_bills": lambda: utility_bills_payload(
+            session,
+            include_line_payments=False,
+            include_line_reminders=False,
+        ),
+        "expenses": lambda: expenses_payload(session),
+        "tariffs": lambda: tariffs_payload(session),
+        "utility_timeline": lambda: utility_timeline_payload(session),
+        "message_targets": lambda: message_targets_payload(session),
+        "suspicious_receipts": lambda: suspicious_receipts_payload(session),
     }
+    for key in selected:
+        load_section(key, loaders[key])
+    record_perf_section(
+        "app-state",
+        ",".join(selected),
+        int((time_module.perf_counter() - started) * 1000),
+        {"role": role or "anonymous", "sections": timings},
+    )
+    return payload
 
 
 @app.get("/api/settings")
 def api_get_settings(session: Session = Depends(get_session)) -> dict[str, str | bool]:
     return get_settings(session)
+
+
+@app.get("/api/performance")
+def api_performance(session: Session = Depends(get_session)) -> dict[str, Any]:
+    snapshot = performance_snapshot()
+    usage_since = date.today() - timedelta(days=13)
+    usage_rows = session.scalars(
+        select(AiUsageDaily)
+        .where(AiUsageDaily.usage_date >= usage_since)
+        .order_by(AiUsageDaily.usage_date.desc(), AiUsageDaily.provider, AiUsageDaily.model)
+    ).all()
+    today_usage = [row for row in usage_rows if row.usage_date == date.today()]
+    snapshot["ai_usage"] = [
+        {
+            "date": row.usage_date.isoformat(),
+            "provider": row.provider,
+            "model": row.model,
+            "calls": int(row.calls or 0),
+            "total_tokens": int(row.total_tokens or 0),
+            "cost_rub": money(float(row.cost_rub or 0)),
+        }
+        for row in usage_rows
+    ]
+    snapshot["ai_summary"] = {
+        "enabled": setting_bool_value(get_setting_value(session, "ai_enabled")),
+        "tenant_free_text_enabled": setting_bool_value(get_setting_value(session, "ai_tenant_free_text_enabled")),
+        "supervisor_enabled": setting_bool_value(get_setting_value(session, "ai_supervisor_enabled")),
+        "today_calls": sum(int(row.calls or 0) for row in today_usage),
+        "today_cost_rub": money(sum(float(row.cost_rub or 0) for row in today_usage)),
+        "open_agent_tasks": int(session.scalar(select(func.count(AgentTask.id)).where(AgentTask.status == "open")) or 0),
+        "pending_action_proposals": int(
+            session.scalar(select(func.count(AgentActionProposal.id)).where(AgentActionProposal.status == "pending")) or 0
+        ),
+    }
+    snapshot["data_counts"] = {
+        "rent_charges": int(session.scalar(select(func.count(RentCharge.id))) or 0),
+        "utility_bill_lines": int(session.scalar(select(func.count(UtilityBillLine.id))) or 0),
+        "payment_receipts": int(session.scalar(select(func.count(PaymentReceipt.id))) or 0),
+        "message_logs": int(session.scalar(select(func.count(MessageLog.id))) or 0),
+    }
+    return snapshot
 
 
 @app.post("/api/settings")
@@ -6182,21 +6466,35 @@ def invoke_ai_completion(
                 max_tokens=max_tokens,
                 session_id=f"rental-manager-{actor_role}-{conversation.id}",
             )
+            duration_ms = int((time_module.perf_counter() - provider_started) * 1000)
             runtime_log(
                 "AI",
                 (
                     f"call ok provider={provider.value} role={actor_role} model={runtime.model} "
-                    f"duration_ms={int((time_module.perf_counter() - provider_started) * 1000)}"
+                    f"duration_ms={duration_ms}"
                 ),
+            )
+            record_background_event(
+                "ai_call",
+                duration_ms,
+                status="ok",
+                detail={"provider": provider.value, "role": actor_role, "model": runtime.model},
             )
             break
         except (AiProviderConfigError, HermesClientError) as exc:
+            duration_ms = int((time_module.perf_counter() - provider_started) * 1000)
             runtime_log(
                 "AI",
                 (
                     f"call failed provider={provider.value} role={actor_role} model={runtime_model} "
-                    f"duration_ms={int((time_module.perf_counter() - provider_started) * 1000)} error={exc}"
+                    f"duration_ms={duration_ms} error={exc}"
                 ),
+            )
+            record_background_event(
+                "ai_call",
+                duration_ms,
+                status="failed",
+                detail={"provider": provider.value, "role": actor_role, "model": runtime_model, "error": str(exc)[:240]},
             )
             session.add(
                 AiActionLog(
@@ -8174,10 +8472,15 @@ def process_telegram_update_background(payload: dict[str, Any], received_at: flo
     update_id = payload.get("update_id")
     started = time_module.perf_counter()
     queue_ms = int((started - received_at) * 1000) if received_at is not None else 0
+    status = "ok"
+    perf_detail: dict[str, Any] = {"update_id": update_id, "queue_ms": queue_ms}
     try:
         callback = payload.get("callback_query")
         message = payload.get("message") or payload.get("edited_message") or payload.get("business_message")
+        perf_detail["kind"] = "callback" if callback else "message" if message else "unknown"
         if not message and not callback:
+            status = "ignored"
+            perf_detail["reason"] = "no_supported_update"
             runtime_log("TELEGRAM", f"webhook ignored update_id={update_id} reason=no_supported_update")
             return
         with SessionLocal() as session:
@@ -8185,6 +8488,7 @@ def process_telegram_update_background(payload: dict[str, Any], received_at: flo
             with TELEGRAM_UPDATE_LOCK:
                 if not mark_telegram_update_seen(session, update_id):
                     session.commit()
+                    status = "duplicate"
                     runtime_log("TELEGRAM", f"webhook duplicate skipped update_id={update_id}")
                     return
                 session.commit()
@@ -8197,6 +8501,16 @@ def process_telegram_update_background(payload: dict[str, Any], received_at: flo
             handler_finished = time_module.perf_counter()
             session.commit()
             finished = time_module.perf_counter()
+            total_ms = int((finished - (received_at or started)) * 1000)
+            perf_detail.update(
+                {
+                    "session_ms": int((session_opened - started) * 1000),
+                    "dedupe_ms": int((dedupe_finished - session_opened) * 1000),
+                    "handler_ms": int((handler_finished - dedupe_finished) * 1000),
+                    "commit_ms": int((finished - handler_finished) * 1000),
+                    "total_ms": total_ms,
+                }
+            )
             runtime_log(
                 "TELEGRAM",
                 (
@@ -8205,12 +8519,21 @@ def process_telegram_update_background(payload: dict[str, Any], received_at: flo
                     f"dedupe_ms={int((dedupe_finished - session_opened) * 1000)} "
                     f"handler_ms={int((handler_finished - dedupe_finished) * 1000)} "
                     f"commit_ms={int((finished - handler_finished) * 1000)} "
-                    f"total_ms={int((finished - (received_at or started)) * 1000)}"
+                    f"total_ms={total_ms}"
                 ),
             )
     except Exception as exc:
+        status = "failed"
         elapsed_ms = int((time_module.perf_counter() - (received_at or started)) * 1000)
+        perf_detail["error"] = repr(exc)[:240]
         runtime_log("TELEGRAM", f"background failed update_id={update_id} total_ms={elapsed_ms} error={exc!r}")
+    finally:
+        record_background_event(
+            "telegram_update",
+            int((time_module.perf_counter() - (received_at or started)) * 1000),
+            status=status,
+            detail=perf_detail,
+        )
 
 
 def queue_telegram_update(payload: dict[str, Any], received_at: float | None = None) -> None:
