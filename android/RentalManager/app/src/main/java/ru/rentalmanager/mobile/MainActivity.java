@@ -29,8 +29,8 @@ import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
-import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
@@ -71,11 +71,14 @@ public class MainActivity extends Activity {
     private final int gray = Color.rgb(105, 112, 124);
 
     private ApiClient api;
+    private FrameLayout appFrame;
     private LinearLayout root;
     private LinearLayout content;
     private LinearLayout bottomBar;
     private TextView screenTitle;
     private TextView screenSubtitle;
+    private LinearLayout loadingOverlay;
+    private LoadingRingView loadingRingView;
     private TextView loadingTitleView;
     private TextView loadingDetailView;
     private JSONObject bootstrap;
@@ -160,6 +163,7 @@ public class MainActivity extends Activity {
     }
 
     private void buildShell() {
+        appFrame = new FrameLayout(this);
         root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(bg);
@@ -199,7 +203,9 @@ public class MainActivity extends Activity {
         bottomBar.setPadding(dp(8), dp(8), dp(8), dp(8));
         bottomBar.setBackgroundColor(Color.rgb(11, 15, 21));
         root.addView(bottomBar, new LinearLayout.LayoutParams(-1, dp(72)));
-        setContentView(root);
+        appFrame.addView(root, new FrameLayout.LayoutParams(-1, -1));
+        buildLoadingOverlay();
+        setContentView(appFrame);
 
         refresh.setOnClickListener(v -> loadCurrentTab(true));
         menu.setOnClickListener(v -> showAppMenuDialog());
@@ -310,6 +316,7 @@ public class MainActivity extends Activity {
     }
 
     private void showLogin() {
+        hideLoadingCard();
         screenTitle.setText("Вход");
         screenSubtitle.setText(api.baseUrl());
         content.removeAllViews();
@@ -350,15 +357,19 @@ public class MainActivity extends Activity {
     }
 
     private void renderCurrentTab() {
-        if (premiumUiEnabled()) {
-            renderPremiumCurrentTab();
-            return;
+        try {
+            if (premiumUiEnabled()) {
+                renderPremiumCurrentTab();
+                return;
+            }
+            if ("dashboard".equals(currentTab)) renderDashboard();
+            else if ("tenants".equals(currentTab)) renderTenants();
+            else if ("payments".equals(currentTab)) renderPayments();
+            else if ("services".equals(currentTab)) renderServices();
+            else renderMore();
+        } finally {
+            hideLoadingCard();
         }
-        if ("dashboard".equals(currentTab)) renderDashboard();
-        else if ("tenants".equals(currentTab)) renderTenants();
-        else if ("payments".equals(currentTab)) renderPayments();
-        else if ("services".equals(currentTab)) renderServices();
-        else renderMore();
     }
 
     private void renderPremiumCurrentTab() {
@@ -478,17 +489,75 @@ public class MainActivity extends Activity {
         moreLoadedAt = 0L;
     }
 
+    private void buildLoadingOverlay() {
+        loadingOverlay = new LinearLayout(this);
+        loadingOverlay.setOrientation(LinearLayout.VERTICAL);
+        loadingOverlay.setGravity(Gravity.CENTER);
+        loadingOverlay.setPadding(dp(28), dp(28), dp(28), dp(28));
+        loadingOverlay.setClickable(true);
+        GradientDrawable bgDrawable = new GradientDrawable(
+            GradientDrawable.Orientation.TL_BR,
+            new int[] { Color.rgb(5, 10, 10), Color.rgb(14, 23, 24), Color.rgb(5, 8, 9) }
+        );
+        loadingOverlay.setBackground(bgDrawable);
+
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setGravity(Gravity.CENTER);
+        panel.setPadding(dp(24), dp(24), dp(24), dp(24));
+        loadingRingView = new LoadingRingView(this);
+        panel.addView(loadingRingView, new LinearLayout.LayoutParams(dp(120), dp(120)));
+
+        TextView word = label("LOADING\nSCREEN", 38, Color.rgb(237, 243, 244), true);
+        word.setGravity(Gravity.CENTER);
+        word.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        word.setLineSpacing(0, 0.92f);
+        panel.addView(word, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout loadingBottom = new LinearLayout(this);
+        loadingBottom.setOrientation(LinearLayout.HORIZONTAL);
+        loadingBottom.setGravity(Gravity.CENTER);
+        TextView dots = label("• • •", 28, Color.rgb(237, 243, 244), true);
+        dots.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams dotsParams = new LinearLayout.LayoutParams(-2, -2);
+        dotsParams.setMargins(0, 0, dp(20), 0);
+        loadingBottom.addView(dots, dotsParams);
+        LinearLayout barTrack = new LinearLayout(this);
+        barTrack.setPadding(dp(4), dp(4), dp(4), dp(4));
+        GradientDrawable trackBg = round(Color.rgb(126, 232, 238), 22, dp(5), Color.argb(220, 126, 232, 238));
+        barTrack.setBackground(trackBg);
+        TextView barFill = new TextView(this);
+        GradientDrawable fillBg = round(Color.rgb(126, 232, 238), 210, dp(2), Color.TRANSPARENT);
+        barFill.setBackground(fillBg);
+        barTrack.addView(barFill, new LinearLayout.LayoutParams(dp(54), -1));
+        loadingBottom.addView(barTrack, new LinearLayout.LayoutParams(dp(112), dp(22)));
+        LinearLayout.LayoutParams bottomParams = new LinearLayout.LayoutParams(-1, -2);
+        bottomParams.setMargins(0, dp(4), 0, dp(16));
+        panel.addView(loadingBottom, bottomParams);
+
+        loadingTitleView = label("Собираю данные", 16, Color.rgb(237, 243, 244), true);
+        loadingTitleView.setGravity(Gravity.CENTER);
+        loadingDetailView = label("Проверяю сервер.", 13, Color.rgb(150, 166, 168), false);
+        loadingDetailView.setGravity(Gravity.CENTER);
+        panel.addView(loadingTitleView, new LinearLayout.LayoutParams(-1, -2));
+        panel.addView(loadingDetailView, new LinearLayout.LayoutParams(-1, -2));
+
+        loadingOverlay.addView(panel, new LinearLayout.LayoutParams(Math.min(dp(330), getResources().getDisplayMetrics().widthPixels - dp(32)), -2));
+        loadingOverlay.setVisibility(View.GONE);
+        appFrame.addView(loadingOverlay, new FrameLayout.LayoutParams(-1, -1));
+    }
+
     private void showLoadingCard() {
-        content.removeAllViews();
-        LinearLayout card = card();
-        loadingTitleView = label("Загружаю", 22, text, true);
-        loadingDetailView = label("Получаю свежие данные с сервера.", 14, muted, false);
-        ProgressBar progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-        progress.setIndeterminate(true);
-        card.addView(loadingTitleView);
-        card.addView(loadingDetailView);
-        card.addView(progress, new LinearLayout.LayoutParams(-1, dp(10)));
-        content.addView(card);
+        if (loadingOverlay != null) {
+            loadingOverlay.setVisibility(View.VISIBLE);
+            loadingOverlay.bringToFront();
+        }
+        if (loadingRingView != null) loadingRingView.start();
+    }
+
+    private void hideLoadingCard() {
+        if (loadingRingView != null) loadingRingView.stop();
+        if (loadingOverlay != null) loadingOverlay.setVisibility(View.GONE);
     }
 
     private void updateLoadingCard(String title, String detail) {
@@ -2359,6 +2428,7 @@ public class MainActivity extends Activity {
                 });
             } catch (ApiClient.ApiException ex) {
                 runOnUiThread(() -> {
+                    hideLoadingCard();
                     if (ex.statusCode == 401 || ex.statusCode == 403) {
                         setConnectionStatus(false, "нужен PIN");
                         showLogin();
@@ -2371,6 +2441,7 @@ public class MainActivity extends Activity {
                 });
             } catch (Exception ex) {
                 runOnUiThread(() -> {
+                    hideLoadingCard();
                     setConnectionStatus(false, "связи нет");
                     toast(ex.getMessage() == null ? "Ошибка" : ex.getMessage());
                 });
@@ -3046,6 +3117,64 @@ public class MainActivity extends Activity {
             this.title = title;
             this.detail = detail;
             this.color = color;
+        }
+    }
+
+    private class LoadingRingView extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final RectF rect = new RectF();
+        private float rotation = -90f;
+        private boolean running = false;
+        private final Runnable tick = new Runnable() {
+            @Override
+            public void run() {
+                if (!running) return;
+                rotation = (rotation + 8f) % 360f;
+                invalidate();
+                postDelayed(this, 16);
+            }
+        };
+
+        LoadingRingView(Context context) {
+            super(context);
+        }
+
+        void start() {
+            if (running) return;
+            running = true;
+            removeCallbacks(tick);
+            tick.run();
+        }
+
+        void stop() {
+            running = false;
+            removeCallbacks(tick);
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            int size = Math.min(getWidth(), getHeight()) - dp(20);
+            float left = (getWidth() - size) / 2f;
+            float top = (getHeight() - size) / 2f;
+            rect.set(left, top, left + size, top + size);
+
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(15));
+            paint.setStrokeCap(Paint.Cap.BUTT);
+
+            int[] colors = {
+                Color.argb(235, 126, 232, 238),
+                Color.argb(120, 237, 243, 244),
+                Color.argb(55, 126, 232, 238),
+                Color.argb(90, 237, 243, 244),
+                Color.argb(42, 126, 232, 238),
+                Color.argb(170, 126, 232, 238),
+            };
+            for (int i = 0; i < colors.length; i++) {
+                paint.setColor(colors[i]);
+                canvas.drawArc(rect, rotation + i * 58f, 34f, false, paint);
+            }
         }
     }
 
