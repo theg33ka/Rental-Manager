@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Rental Manager</string>
-    <string name="default_base_url">http://127.0.0.1:8000</string>
+    <string name="default_base_url">https://menedzer-arendy-g33ka.waw0.amvera.tech</string>
 </resources>

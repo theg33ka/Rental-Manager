@@ -138,12 +138,8 @@ public class MainActivity extends Activity {
         requestNotificationPermission();
         buildShell();
         ReminderScheduler.schedule(this);
-        if (!NotificationPrefs.hasCustomBaseUrl(this)) {
-            showHostDialog();
-        } else {
-            checkServerConnection(true);
-            checkAuthAndLoad();
-        }
+        checkServerConnection(true);
+        checkAuthAndLoad();
     }
 
     @Override
@@ -270,14 +266,13 @@ public class MainActivity extends Activity {
     }
 
     private void checkServerConnection(boolean force) {
-        if (!NotificationPrefs.hasCustomBaseUrl(this)) return;
         long now = System.currentTimeMillis();
         if (!force && now - lastConnectionCheckAt < CONNECTION_CHECK_MIN_MS) return;
         lastConnectionCheckAt = now;
         new Thread(() -> {
             try {
-                api.getJson("/api/app-state?sections=bootstrap");
-                runOnUiThread(() -> setConnectionStatus(true, "данные доступны"));
+                api.getJson("/healthz");
+                runOnUiThread(() -> setConnectionStatus(true, "сервер отвечает"));
             } catch (ApiClient.ApiException ex) {
                 if (ex.statusCode == 401 || ex.statusCode == 403) {
                     runOnUiThread(() -> setConnectionStatus(false, "нужен PIN"));
@@ -305,7 +300,7 @@ public class MainActivity extends Activity {
     }
 
     private void startReconnectLoop() {
-        if (reconnectLoopRunning || reconnectHandler == null || !NotificationPrefs.hasCustomBaseUrl(this)) return;
+        if (reconnectLoopRunning || reconnectHandler == null) return;
         reconnectLoopRunning = true;
         reconnectHandler.postDelayed(reconnectRunnable, RECONNECT_INTERVAL_MS);
     }
@@ -1319,7 +1314,7 @@ public class MainActivity extends Activity {
 
     private void ensureProgressRentData() {
         String key = selectedMonthKey();
-        if (key.equals(progressRentMonthKey) || progressRentLoading || !NotificationPrefs.hasCustomBaseUrl(this)) return;
+        if (key.equals(progressRentMonthKey) || progressRentLoading) return;
         progressRentLoading = true;
         int year = selectedMonth.get(Calendar.YEAR);
         int month = selectedMonth.get(Calendar.MONTH) + 1;
