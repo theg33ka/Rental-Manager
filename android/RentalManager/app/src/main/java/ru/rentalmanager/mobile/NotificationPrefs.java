@@ -6,6 +6,7 @@ import android.content.SharedPreferences;
 final class NotificationPrefs {
     static final String PREFS = "rental_manager_mobile";
     static final String KEY_BASE_URL = "base_url";
+    static final String DEFAULT_BASE_URL = "https://menedzer-arendy-g33ka.waw0.amvera.tech";
     static final String KEY_NOTIFICATIONS_ENABLED = "notifications_enabled";
     static final String KEY_INTERVAL_MINUTES = "interval_minutes";
     static final String KEY_QUIET_START = "quiet_start";
@@ -37,15 +38,18 @@ final class NotificationPrefs {
 
     static String baseUrl(Context context) {
         String fallback = context.getString(R.string.default_base_url);
-        return normalizeBaseUrl(prefs(context).getString(KEY_BASE_URL, fallback));
+        String normalized = normalizeBaseUrl(prefs(context).getString(KEY_BASE_URL, fallback));
+        if (isLoopbackBaseUrl(normalized)) {
+            String deployed = normalizeBaseUrl(fallback);
+            if (isLoopbackBaseUrl(deployed)) deployed = DEFAULT_BASE_URL;
+            prefs(context).edit().putString(KEY_BASE_URL, deployed).apply();
+            return deployed;
+        }
+        return normalized;
     }
 
     static void setBaseUrl(Context context, String value) {
         prefs(context).edit().putString(KEY_BASE_URL, normalizeBaseUrl(value)).apply();
-    }
-
-    static boolean hasCustomBaseUrl(Context context) {
-        return prefs(context).contains(KEY_BASE_URL);
     }
 
     static String normalizeBaseUrl(String value) {
@@ -54,12 +58,20 @@ final class NotificationPrefs {
             url = url.substring(0, url.length() - 1);
         }
         if (url.isEmpty()) {
-            return "http://127.0.0.1:8000";
+            return DEFAULT_BASE_URL;
         }
         if (!url.startsWith("http://") && !url.startsWith("https://")) {
             url = "https://" + url;
         }
         return url;
+    }
+
+    static boolean isLoopbackBaseUrl(String value) {
+        String url = value == null ? "" : value.trim().toLowerCase();
+        return url.startsWith("http://127.0.0.1")
+            || url.startsWith("https://127.0.0.1")
+            || url.startsWith("http://localhost")
+            || url.startsWith("https://localhost");
     }
 
     static boolean notificationsEnabled(Context context) {
