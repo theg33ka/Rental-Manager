@@ -10,10 +10,21 @@ from rental_manager.services.hermes_client import HermesClient, YandexOpenAIClie
 
 YANDEX_BASE_URL = "https://ai.api.cloud.yandex.net/v1"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+AMVERA_LLM_BASE_URL = "https://inference.waw0.amvera.ru"
+AMVERA_LLM_MODEL = "deepseek-V4"
 YANDEX_MODEL_ALIASES = {
     "yandexgpt-lite": "yandexgpt-lite/latest",
     "yandexgpt": "yandexgpt/latest",
     "yandexgpt-pro": "yandexgpt/latest",
+}
+AMVERA_MODEL_ALIASES = {
+    "deepseek_v4": "deepseek-V4",
+    "deepseek-v4": "deepseek-V4",
+    "deepseek v4": "deepseek-V4",
+    "deepseek_v3": "deepseek-V3",
+    "deepseek-v3": "deepseek-V3",
+    "deepseek_r1": "deepseek-R1",
+    "deepseek-r1": "deepseek-R1",
 }
 
 
@@ -80,6 +91,20 @@ def primary_provider(environ: Mapping[str, str] | None = None) -> AiProvider:
     if configured:
         return parse_provider(configured, setting_name="AI_PROVIDER")
 
+    # New deployments normally run the application through Hermes while
+    # Hermes itself talks to an upstream inference endpoint. If such upstream
+    # config exists, prefer Hermes even when legacy Yandex keys are still
+    # present for fallback. Иначе опять получим Яндекс, который «случайно»
+    # стал основным.
+    if (
+        _env(source, "HERMES_INFERENCE_PROVIDER")
+        or _env(source, "AMVERA_LLM_API_KEY")
+        or _env(source, "DEEPSEEK_API_KEY")
+        or _env(source, "OPENAI_COMPATIBLE_API_KEY")
+        or _env(source, "OPENAI_API_KEY")
+    ):
+        return AiProvider.HERMES
+
     # Backward compatibility: the project historically selected direct Yandex
     # through AI_DIRECT_YANDEX and otherwise called the local Hermes gateway.
     if _env(source, "YANDEX_AI_API_KEY") or _env(source, "YANDEX_API_KEY"):
@@ -123,6 +148,11 @@ def _yandex_model(source: Mapping[str, str], requested_model: str) -> str:
     return f"gpt://{folder_id}/{alias}" if folder_id else alias
 
 
+def _amvera_model(value: str) -> str:
+    raw = (value or AMVERA_LLM_MODEL).strip()
+    return AMVERA_MODEL_ALIASES.get(raw.lower(), raw)
+
+
 def provider_model(
     provider: AiProvider,
     requested_model: str,
@@ -132,13 +162,13 @@ def provider_model(
     if provider == AiProvider.YANDEX:
         return _yandex_model(source, requested_model)
     if provider == AiProvider.HERMES:
-        return _env(source, "HERMES_MODEL") or requested_model
+        return _env(source, "HERMES_MODEL") or "hermes-agent"
     if provider == AiProvider.DEEPSEEK:
         return _env(source, "DEEPSEEK_MODEL") or requested_model
     if provider == AiProvider.OPENAI_COMPATIBLE:
         return _env(source, "OPENAI_COMPATIBLE_MODEL") or requested_model
     if provider == AiProvider.AMVERA_LLM:
-        return _env(source, "AMVERA_LLM_MODEL") or requested_model
+        return _amvera_model(_env(source, "AMVERA_LLM_MODEL") or requested_model or AMVERA_LLM_MODEL)
     return requested_model
 
 
@@ -185,9 +215,12 @@ def build_provider_runtime(
         )
     elif provider == AiProvider.DEEPSEEK:
         base_url = _env(source, "DEEPSEEK_BASE_URL", DEEPSEEK_BASE_URL)
+        api_key = _env(source, "DEEPSEEK_API_KEY")
+        if not api_key:
+            raise AiProviderConfigError("DEEPSEEK_API_KEY is empty")
         client = HermesClient(
             base_url,
-            _env(source, "DEEPSEEK_API_KEY"),
+            api_key,
             provider_name=provider.value,
         )
     elif provider == AiProvider.OPENAI_COMPATIBLE:
@@ -200,12 +233,20 @@ def build_provider_runtime(
             provider_name=provider.value,
         )
     elif provider == AiProvider.AMVERA_LLM:
-        base_url = _env(source, "AMVERA_LLM_BASE_URL")
-        if not base_url:
-            raise AiProviderConfigError("AMVERA_LLM_BASE_URL is empty")
+        base_url = _env(source, "AMVERA_LLM_BASE_URL", AMVERA_LLM_BASE_URL)
+        api_key = _env(source, "AMVERA_LLM_API_KEY")
+        if not api_key:
+            raise AiProviderConfigError("AMVERA_LLM_API_KEY is empty")
         client = HermesClient(
             base_url,
-            _env(source, "AMVERA_LLM_API_KEY"),
+            api_key,
+            timeout_seconds=_env_int(
+                source,
+                "AMVERA_LLM_REQUEST_TIMEOUT_SECONDS",
+                60,
+                minimum=10,
+                maximum=300,
+            ),
             provider_name=provider.value,
         )
     else:

@@ -131,6 +131,26 @@ class AgentProtocolTests(unittest.TestCase):
         self.assertEqual(envelope.reply, "Обычный ответ")
         self.assertEqual(envelope.actions, [])
 
+    def test_parses_skill_memory(self) -> None:
+        envelope = parse_agent_envelope(
+            json.dumps(
+                {
+                    "reply": "Запомнил порядок.",
+                    "memory": [
+                        {
+                            "kind": "skill",
+                            "content": "Для коммунального должника сначала проверить строку счёта, затем подготовить сообщение без отправки.",
+                            "importance": 3,
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(envelope.memories[0]["kind"], "skill")
+        self.assertEqual(envelope.memories[0]["importance"], 3)
+
     def test_tenant_message_removes_named_greeting(self) -> None:
         lease = Lease(tenant=Tenant(full_name="Никита Холобаев"))
 

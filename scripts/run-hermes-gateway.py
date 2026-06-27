@@ -8,15 +8,38 @@ from typing import Any
 
 YANDEX_BASE_URL = "https://ai.api.cloud.yandex.net/v1"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+AMVERA_LLM_BASE_URL = "https://inference.waw0.amvera.ru"
+AMVERA_LLM_MODEL = "deepseek-V4"
 YANDEX_MODEL_ALIASES = {
     "yandexgpt-lite": "yandexgpt-lite/latest",
     "yandexgpt": "yandexgpt/latest",
     "yandexgpt-pro": "yandexgpt/latest",
 }
+AMVERA_MODEL_ALIASES = {
+    "deepseek_v4": "deepseek-V4",
+    "deepseek-v4": "deepseek-V4",
+    "deepseek v4": "deepseek-V4",
+    "deepseek_v3": "deepseek-V3",
+    "deepseek-v3": "deepseek-V3",
+    "deepseek_r1": "deepseek-R1",
+    "deepseek-r1": "deepseek-R1",
+}
 
 
 def _env(name: str, default: str = "") -> str:
     return (os.environ.get(name) or default).strip()
+
+
+def _openai_base_url(raw_url: str) -> str:
+    base_url = (raw_url or "").strip().rstrip("/")
+    if not base_url:
+        return ""
+    return base_url if base_url.endswith("/v1") else f"{base_url}/v1"
+
+
+def _amvera_model(model: str) -> str:
+    value = (model or AMVERA_LLM_MODEL).strip()
+    return AMVERA_MODEL_ALIASES.get(value.lower(), value)
 
 
 def _hermes_home() -> Path:
@@ -195,15 +218,15 @@ def _configure_openai_compatible(config: dict[str, Any]) -> tuple[str, str, str]
 
 
 def _configure_amvera_llm(config: dict[str, Any]) -> tuple[str, str, str] | None:
-    base_url = _env("AMVERA_LLM_BASE_URL")
-    model = _env("AMVERA_LLM_MODEL")
-    if not base_url or not model:
-        return None
     key_env = "AMVERA_LLM_API_KEY"
     api_key = _env(key_env)
+    if not api_key:
+        return None
+    base_url = _openai_base_url(_env("AMVERA_LLM_BASE_URL", AMVERA_LLM_BASE_URL))
+    model = _amvera_model(_env("AMVERA_LLM_MODEL", AMVERA_LLM_MODEL))
     if api_key and not _env("OPENAI_API_KEY"):
         os.environ["OPENAI_API_KEY"] = api_key
-    os.environ["OPENAI_BASE_URL"] = base_url.rstrip("/")
+    os.environ["OPENAI_BASE_URL"] = base_url
     os.environ["HERMES_INFERENCE_PROVIDER"] = "amvera_llm"
 
     model_config = config.setdefault("model", {})
@@ -211,7 +234,7 @@ def _configure_amvera_llm(config: dict[str, Any]) -> tuple[str, str, str] | None
         {
             "provider": "amvera_llm",
             "default": model,
-            "base_url": base_url.rstrip("/"),
+            "base_url": base_url,
             "api_mode": "chat_completions",
             "max_tokens": 1200,
         }
@@ -219,13 +242,13 @@ def _configure_amvera_llm(config: dict[str, Any]) -> tuple[str, str, str] | None
     providers = config.setdefault("providers", {})
     providers["amvera_llm"] = {
         "name": "Amvera LLM Inference",
-        "api": base_url.rstrip("/"),
+        "api": base_url,
         "key_env": key_env,
         "default_model": model,
         "transport": "chat_completions",
         "api_mode": "chat_completions",
     }
-    return ("amvera_llm", model, base_url.rstrip("/"))
+    return ("amvera_llm", model, base_url)
 
 
 PROVIDER_BUILDERS = {
@@ -249,13 +272,15 @@ def prepare_hermes_provider_config() -> tuple[str, str, str] | None:
         if not selected:
             raise RuntimeError(f"Hermes inference provider {requested} is selected but its URL/key/model is incomplete")
     else:
-        # Preserve the legacy priority when no explicit upstream provider is
-        # configured. New deployments should set HERMES_INFERENCE_PROVIDER.
+        # Prefer paid/non-Yandex upstream packages when they are configured.
+        # Yandex remains useful as fallback, but must not silently win just
+        # because the old key is still lying around. А зачем нам опять этот
+        # сюрприз?
         selected = (
-            _configure_yandex(config)
+            _configure_amvera_llm(config)
             or _configure_deepseek(config)
             or _configure_openai_compatible(config)
-            or _configure_amvera_llm(config)
+            or _configure_yandex(config)
         )
     if not selected:
         print("[HERMES] no configured inference provider found; using existing Hermes config", flush=True)
@@ -305,8 +330,6 @@ def prepare_hermes_provider_config() -> tuple[str, str, str] | None:
                 "image_gen",
                 "video_gen",
                 "x_search",
-                "memory",
-                "skills",
                 "context_engine",
             ],
         }

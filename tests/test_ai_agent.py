@@ -218,6 +218,32 @@ class HermesClientTests(unittest.TestCase):
         self.assertEqual(mocked_urlopen.call_args.kwargs["timeout"], 60)
         self.assertEqual(result.content, "ok")
 
+    def test_chat_completions_does_not_duplicate_v1_path(self) -> None:
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"model":"deepseek-ai/DeepSeek-V4-Pro","choices":[{"message":{"content":"ok"}}]}'
+
+        with patch("rental_manager.services.hermes_client.urllib.request.urlopen", return_value=Response()) as mocked_urlopen:
+            result = HermesClient(
+                "https://inference.waw0.amvera.ru/v1",
+                "test-amvera-key",
+                provider_name="amvera_llm",
+            ).chat_completions(
+                model="deepseek-V4",
+                messages=[{"role": "user", "content": "test"}],
+            )
+
+        request = mocked_urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://inference.waw0.amvera.ru/v1/chat/completions")
+        self.assertEqual(result.provider, "amvera_llm")
+        self.assertEqual(result.content, "ok")
+
 
 class TelegramApiRequestTests(unittest.TestCase):
     def test_retries_transient_network_errors(self) -> None:

@@ -27,6 +27,7 @@ Owner chat и диалоги с арендаторами уже вызывали
 Backend делает один вызов через основной провайдер. При сетевой ошибке, ошибке конфигурации или HTTP-ошибке пробует `AI_FALLBACK_PROVIDER`. Каждый неудачный вызов записывается в `ai_action_logs` без секретов.
 
 Hermes остаётся отдельным процессом поверх backend. Он не запускает локальную LLM и не получает прямой доступ к базе.
+Основной продакшен-режим сейчас: backend вызывает Hermes gateway, а Hermes ходит в Amvera LLM Inference с моделью `deepseek-V4`. Yandex оставлен только как аварийный fallback.
 
 ## Включение Hermes
 
@@ -41,10 +42,21 @@ HERMES_ENABLED=true
 HERMES_API_BASE_URL=http://127.0.0.1:8642
 HERMES_API_KEY=<случайный внутренний токен>
 HERMES_MODEL=hermes-agent
+HERMES_MODEL_DEFAULT=deepseek-V4
+HERMES_MODEL_AUDIT=deepseek-V4
 HERMES_SYSTEM_PROMPT_PATH=docs/hermes-system-prompt.md
 ```
 
-Для Hermes нужен внешний inference provider. Рекомендуемый вариант на Amvera — существующий OpenAI-compatible или Amvera LLM endpoint:
+Для Hermes нужен внешний inference provider. Рекомендуемый вариант на Amvera — Amvera LLM endpoint:
+
+```env
+HERMES_INFERENCE_PROVIDER=amvera_llm
+AMVERA_LLM_BASE_URL=https://inference.waw0.amvera.ru
+AMVERA_LLM_API_KEY=<токен из Amvera LLM>
+AMVERA_LLM_MODEL=deepseek-V4
+```
+
+OpenAI-compatible endpoint тоже поддерживается:
 
 ```env
 HERMES_INFERENCE_PROVIDER=openai_compatible
@@ -62,16 +74,7 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=deepseek-chat
 ```
 
-Для Amvera LLM:
-
-```env
-HERMES_INFERENCE_PROVIDER=amvera_llm
-AMVERA_LLM_BASE_URL=<OpenAI-compatible URL из Amvera>
-AMVERA_LLM_API_KEY=<ключ>
-AMVERA_LLM_MODEL=<модель>
-```
-
-Hermes 0.17 запускается как gateway API server. В контейнере отключены тяжёлые browser/web/image/MCP toolsets: доменные данные передаёт Rental Manager, поэтому слабый тариф не обязан внезапно изображать дата-центр.
+Hermes 0.17 запускается как gateway API server. В контейнере отключены тяжёлые browser/web/image/MCP toolsets: доменные данные передаёт Rental Manager, поэтому слабый тариф не обязан внезапно изображать дата-центр. Внутренние `memory`/`skills` не блокируются, но прикладное самообучение Rental Manager хранится в таблице `agent_memories` и передаётся агенту в контексте.
 
 ## Yandex fallback
 
@@ -147,7 +150,8 @@ Write-инструмент `propose_owner_operation` формирует пред
 Основные маркеры:
 
 - `[BOOT] ... ai_providers=hermes,yandex`;
-- `[HERMES] wrote config provider=...`;
+- `[BOOT] starting Hermes gateway ... inference_provider=amvera_llm`;
+- `[HERMES] wrote config provider=amvera_llm model=deepseek-V4 base_url=https://inference.waw0.amvera.ru/v1`;
 - `[HERMES] using cron package: ...`;
 - `[AI] call provider=...`;
 - `[AI] call failed provider=...`;
@@ -169,6 +173,7 @@ Write-инструмент `propose_owner_operation` формирует пред
 ## Ограничения MVP
 
 - Hermes получает structured snapshot, а не делает интерактивные MCP-вызовы во время одного ответа.
+- Самообучение реализовано через `memory` в JSON-ответе агента. Разрешённый тип `skill` хранит короткие безопасные playbook’и, но не даёт модели обходить подтверждения и backend-валидацию.
 - Агенту недоступны инфраструктурные и аварийные операции: импорт/полная замена
   базы, изменение секретов и настроек авторизации, управление webhook и
   административное восстановление baseline. Бизнес-операции веб-пульта доступны
