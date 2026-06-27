@@ -42,23 +42,54 @@ def _bounded_text(value: Any, limit: int) -> str:
     return text[:limit].rstrip()
 
 
-def parse_json_object(raw: str) -> dict[str, Any] | None:
+def _bounded_reply(value: Any, limit: int) -> str:
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = "\n".join(line.strip() for line in text.split("\n"))
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text[:limit].rstrip()
+
+
+def _strip_json_fence(value: str) -> str:
+    text = (value or "").strip()
+    text = re.sub(r"^\s*```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```\s*$", "", text)
+    return text.strip()
+
+
+def _looks_like_protocol_json(raw: str) -> bool:
     value = (raw or "").strip()
     if not value:
+        return False
+    lowered = value.lower()
+    return (
+        lowered.startswith("```json")
+        or lowered.startswith("{")
+        or '"reply"' in lowered
+        or '"actions"' in lowered
+        or "'reply'" in lowered
+        or "'actions'" in lowered
+    )
+
+
+def parse_json_object(raw: str) -> dict[str, Any] | None:
+    value = _strip_json_fence(raw)
+    if not value:
         return None
-    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", value, flags=re.IGNORECASE | re.DOTALL)
-    if fenced:
-        value = fenced.group(1).strip()
     try:
         parsed = json.loads(value)
     except json.JSONDecodeError:
-        start = value.find("{")
-        end = value.rfind("}")
-        if start < 0 or end <= start:
-            return None
-        try:
-            parsed = json.loads(value[start : end + 1])
-        except json.JSONDecodeError:
+        decoder = json.JSONDecoder()
+        parsed = None
+        for match in re.finditer(r"\{", value):
+            try:
+                candidate, _end = decoder.raw_decode(value[match.start() :])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict):
+                parsed = candidate
+                break
+        if parsed is None:
             return None
     return parsed if isinstance(parsed, dict) else None
 
@@ -112,8 +143,16 @@ def normalize_actions(value: Any) -> list[dict[str, Any]]:
 def parse_agent_envelope(raw: str) -> AgentEnvelope:
     parsed = parse_json_object(raw)
     if parsed is None:
-        return AgentEnvelope(reply=_bounded_text(raw, 3600))
-    reply = _bounded_text(parsed.get("reply") or parsed.get("answer"), 3600)
+        if _looks_like_protocol_json(raw):
+            return AgentEnvelope(
+                reply=(
+                    "Ответ агента пришёл в повреждённом JSON. "
+                    "Я не буду показывать сырой технический текст в чате. "
+                    "Ничего не изменено и никому ничего не отправлено."
+                )
+            )
+        return AgentEnvelope(reply=_bounded_reply(raw, 1600))
+    reply = _bounded_reply(parsed.get("reply") or parsed.get("answer"), 2400)
     intent = str(parsed.get("intent") or "general").strip().lower()
     if intent not in ALLOWED_TENANT_INTENTS:
         intent = "general"
@@ -124,7 +163,7 @@ def parse_agent_envelope(raw: str) -> AgentEnvelope:
         intent=intent,
         promise_date=_bounded_text(parsed.get("promise_date"), 20),
         needs_owner=bool(parsed.get("needs_owner")),
-        owner_summary=_bounded_text(parsed.get("owner_summary"), 1200),
+        owner_summary=_bounded_reply(parsed.get("owner_summary"), 1200),
     )
 
 

@@ -99,6 +99,28 @@ class AgentProtocolTests(unittest.TestCase):
         self.assertEqual(envelope.actions[0]["type"], "defer_rent")
         self.assertEqual(envelope.memories[0]["importance"], 3)
 
+    def test_parses_first_json_object_from_noisy_double_output(self) -> None:
+        envelope = parse_agent_envelope(
+            """```json
+            {"reply":"Ок, подготовил к подтверждению.","actions":[{"type":"owner_operation","payload":{"operation":"run_reminders","arguments":{}},"reason":"владелец попросил"}],"memory":[]}
+            ```
+            ```json
+            {"reply":"дубль, который нельзя отправлять в Telegram","actions":[]}
+            ```"""
+        )
+
+        self.assertEqual(envelope.reply, "Ок, подготовил к подтверждению.")
+        self.assertEqual(envelope.actions[0]["type"], "owner_operation")
+        self.assertEqual(envelope.actions[0]["payload"]["operation"], "run_reminders")
+
+    def test_malformed_protocol_json_is_not_sent_raw(self) -> None:
+        envelope = parse_agent_envelope('```json\n{"reply":"Ок","actions":[{"type":"owner_operation"')
+
+        self.assertIn("повреждённом JSON", envelope.reply)
+        self.assertNotIn("```", envelope.reply)
+        self.assertNotIn('"actions"', envelope.reply)
+        self.assertEqual(envelope.actions, [])
+
     def test_parses_owner_operation(self) -> None:
         envelope = parse_agent_envelope(
             json.dumps(
@@ -618,9 +640,46 @@ class OwnerChatRoutingTests(AgentRuntimeTestCase):
                 handle_owner_ai_message(session, 999, "Запусти напоминания")
 
         sent_text = mocked_send.call_args.args[2]
-        self.assertIn("Действие не подготовлено", sent_text)
+        self.assertIn("Кнопки подтверждения не созданы", sent_text)
         self.assertIn("Ничего не изменено", sent_text)
         self.assertNotIn("Я всё выполнил", sent_text)
+
+    def test_action_failure_suggests_supported_manual_debt_path(self) -> None:
+        with self.Session() as session:
+            conversation = AiConversation(chat_id="999", role="owner")
+            session.add(conversation)
+            session.flush()
+            envelope = AgentEnvelope(
+                reply="Подготовил.",
+                actions=[
+                    {
+                        "type": "owner_operation",
+                        "payload": {
+                            "operation": "create_manual_debt",
+                            "arguments": {
+                                "title": "Долг за старую аренду",
+                                "amount": 20000,
+                                "due_date": date.today().isoformat(),
+                            },
+                        },
+                    }
+                ],
+            )
+
+            with patch("rental_manager.main.build_dashboard", return_value={}), patch(
+                "rental_manager.main.sync_agent_tasks"
+            ), patch("rental_manager.main.owner_agent_context", return_value="context"), patch(
+                "rental_manager.main.call_agent_envelope", return_value=(conversation, envelope)
+            ), patch("rental_manager.main.store_agent_memories"), patch(
+                "rental_manager.main.send_telegram_text"
+            ) as mocked_send:
+                handle_owner_ai_message(session, 999, "Создай ручной долг Никите за аренду 20000")
+
+        sent_text = mocked_send.call_args.args[2]
+        self.assertIn("Кнопки подтверждения не созданы", sent_text)
+        self.assertIn("Создать ручной долг", sent_text)
+        self.assertIn("договор/квартира/жилец", sent_text)
+        self.assertNotIn("```", sent_text)
 
 
 if __name__ == "__main__":

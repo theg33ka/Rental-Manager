@@ -6350,6 +6350,52 @@ def owner_request_explicitly_requests_action(text: str) -> bool:
     )
 
 
+def owner_action_unavailable_message(user_text: str, proposal_errors: list[str]) -> str:
+    lowered = (user_text or "").lower()
+    lines = [
+        "Кнопки подтверждения не созданы: не удалось собрать безопасное действие с проверяемыми параметрами.",
+        "Ничего не изменено и никому ничего не отправлено.",
+    ]
+
+    cleaned_errors: list[str] = []
+    for error in proposal_errors:
+        value = clean_ai_response(str(error), max_chars=240).replace("\n", " ").strip()
+        if value and value not in cleaned_errors:
+            cleaned_errors.append(value)
+    if cleaned_errors:
+        lines.append("Почему: " + "; ".join(cleaned_errors[:3]) + ".")
+
+    suggestions: list[str] = []
+    if re.search(r"\b(долг|долж|задолж|начисл|ручн)", lowered):
+        suggestions.append(
+            "Создать ручной долг: нужен конкретный договор/квартира/жилец, сумма, срок оплаты и назначение "
+            "(аренда, коммуналка, на ИП, перевод, прочее)."
+        )
+    if re.search(r"\b(отсроч|перенес|срок|дат)", lowered):
+        suggestions.append("Дать отсрочку: нужен конкретный долг/начисление или платёжная ситуация и новая дата.")
+    if re.search(r"\b(отправ|уведом|напиш|сообщ)", lowered):
+        suggestions.append(
+            "Подготовить сообщение жильцу: отправка возможна только если Telegram-чат жильца привязан; "
+            "если нет — дам текст для ручной отправки."
+        )
+    if re.search(r"\b(напомин|пнут|пни|запусти)", lowered):
+        suggestions.append("Запустить напоминания: могу подготовить run_reminders на подтверждение кнопками.")
+    if re.search(r"\b(чек|плат[её]ж|оплат|зач[её]т|разнес)", lowered):
+        suggestions.append("Разнести платёж или чек: нужен чек/id платежа, сумма, назначение и куда зачесть.")
+    if not suggestions:
+        suggestions.append(
+            "Могу подготовить только операции, которые есть в owner_operations backend. "
+            "Если операции нет, предложу ближайший безопасный ручной путь."
+        )
+
+    lines.append("")
+    lines.append("Что могу сделать из доступного:")
+    lines.extend(f"- {item}" for item in suggestions[:4])
+    lines.append("")
+    lines.append("Напиши недостающие данные одной строкой — подготовлю предложение с кнопками подтверждения.")
+    return "\n".join(lines)
+
+
 def owner_text_confirmation_decision(text: str) -> str:
     normalized = re.sub(r"[.!?,\s]+", " ", (text or "").strip().lower()).strip()
     if normalized in {"да", "ок", "окей", "подтверждаю", "подтвердить", "согласен", "выполняй", "делай"}:
@@ -6647,7 +6693,8 @@ def call_agent_envelope(
     if normalized is None:
         return conversation, AgentEnvelope(reply=AI_UNAVAILABLE_TEXT)
     envelope = parse_agent_envelope(normalized.content)
-    answer = clean_ai_response(envelope.reply) or AI_UNAVAILABLE_TEXT
+    reply_limit = 1800 if actor_role == "owner" else 900
+    answer = clean_ai_response(envelope.reply, max_chars=reply_limit) or AI_UNAVAILABLE_TEXT
     envelope = AgentEnvelope(
         reply=answer,
         actions=envelope.actions,
@@ -7446,12 +7493,10 @@ def handle_owner_ai_message(session: Session, chat_id: int | str, text: str, *, 
     elif not explicitly_requests_action:
         send_telegram_text(session, chat_id, envelope.reply or AI_UNAVAILABLE_TEXT)
     elif not proposals:
-        detail = f" Причина: {'; '.join(proposal_errors)}." if proposal_errors else ""
         send_telegram_text(
             session,
             chat_id,
-            "Действие не подготовлено: backend не получил проверяемых параметров. "
-            f"Ничего не изменено и никому ничего не отправлено.{detail}",
+            owner_action_unavailable_message(user_text, proposal_errors),
         )
     elif proposal_errors:
         send_telegram_text(

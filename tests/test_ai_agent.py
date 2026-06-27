@@ -34,6 +34,7 @@ from rental_manager.services.ai_policy import (
     OWNER_AGENT_SYSTEM_PROMPT,
     TENANT_AGENT_SYSTEM_PROMPT,
     TENANT_SYSTEM_PROMPT,
+    clean_ai_response,
     tenant_question_needs_owner,
 )
 from rental_manager.services.hermes_client import HermesClient, HermesClientError, HermesResult, YandexOpenAIClient
@@ -85,6 +86,14 @@ class AiContextTests(AiAgentDatabaseTestCase):
 
 
 class AiPolicyPromptTests(unittest.TestCase):
+    def test_clean_ai_response_removes_telegram_unfriendly_markup(self) -> None:
+        cleaned = clean_ai_response("```json\\n**Итог**\\n---\\n`создать долг`\\n```", max_chars=200)
+
+        self.assertNotIn("```", cleaned)
+        self.assertNotIn("**", cleaned)
+        self.assertNotIn("`", cleaned)
+        self.assertIn("Итог", cleaned)
+
     def test_owner_agent_prompt_keeps_button_confirmation_and_suspicion_rules(self) -> None:
         self.assertIn("Текстовое “да”", OWNER_AGENT_SYSTEM_PROMPT)
         self.assertIn("кнопкой backend", OWNER_AGENT_SYSTEM_PROMPT)
