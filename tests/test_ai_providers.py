@@ -32,6 +32,17 @@ class AiProviderConfigTests(unittest.TestCase):
 
         self.assertEqual(chain, [AiProvider.YANDEX])
 
+    def test_amvera_llm_config_prefers_hermes_with_yandex_fallback(self) -> None:
+        chain = provider_chain(
+            {
+                "AMVERA_LLM_API_KEY": "amvera-key",
+                "YANDEX_API_KEY": "yandex-key",
+                "AI_FALLBACK_PROVIDER": "yandex",
+            }
+        )
+
+        self.assertEqual(chain, [AiProvider.HERMES, AiProvider.YANDEX])
+
     def test_unknown_provider_is_rejected(self) -> None:
         with self.assertRaises(AiProviderConfigError):
             provider_chain({"AI_PROVIDER": "mystery"})
@@ -52,6 +63,35 @@ class AiProviderConfigTests(unittest.TestCase):
         self.assertIsInstance(runtime.client, YandexOpenAIClient)
         self.assertEqual(runtime.model, "gpt://folder/yandexgpt-lite/latest")
 
+    def test_amvera_llm_runtime_defaults_to_deepseek_v4(self) -> None:
+        runtime = build_provider_runtime(
+            AiProvider.AMVERA_LLM,
+            requested_model="",
+            hermes_base_url="",
+            hermes_api_key="",
+            environ={
+                "AMVERA_LLM_API_KEY": "key",
+            },
+        )
+
+        self.assertIsInstance(runtime.client, HermesClient)
+        self.assertEqual(runtime.model, "deepseek-V4")
+        self.assertEqual(runtime.client.base_url, "https://inference.waw0.amvera.ru")
+
+    def test_amvera_llm_model_alias_is_normalized(self) -> None:
+        runtime = build_provider_runtime(
+            AiProvider.AMVERA_LLM,
+            requested_model="ignored",
+            hermes_base_url="",
+            hermes_api_key="",
+            environ={
+                "AMVERA_LLM_API_KEY": "key",
+                "AMVERA_LLM_MODEL": "deepseek-v4",
+            },
+        )
+
+        self.assertEqual(runtime.model, "deepseek-V4")
+
     def test_hermes_runtime_uses_longer_configurable_timeout(self) -> None:
         default_runtime = build_provider_runtime(
             AiProvider.HERMES,
@@ -69,6 +109,7 @@ class AiProviderConfigTests(unittest.TestCase):
         )
 
         self.assertIsInstance(default_runtime.client, HermesClient)
+        self.assertEqual(default_runtime.model, "hermes-agent")
         self.assertEqual(default_runtime.client.timeout_seconds, 60)
         self.assertEqual(overridden_runtime.client.timeout_seconds, 90)
 

@@ -51,7 +51,7 @@ class HermesGatewayConfigTests(unittest.TestCase):
         self.assertEqual(config["agent"]["api_max_retries"], 1)
         self.assertEqual(_get_platform_tools(config, "api_server"), set())
 
-    def test_yandex_provider_wins_when_deepseek_env_is_also_present(self) -> None:
+    def test_deepseek_provider_wins_when_yandex_env_is_also_present(self) -> None:
         module = load_gateway_module()
         with tempfile.TemporaryDirectory() as tmp:
             env = {
@@ -59,15 +59,16 @@ class HermesGatewayConfigTests(unittest.TestCase):
                 "YANDEX_API_KEY": "test-yandex-key",
                 "YANDEX_FOLDER_ID": "folder-123",
                 "DEEPSEEK_API_KEY": "test-deepseek-key",
+                "DEEPSEEK_MODEL": "deepseek-chat",
             }
             with patch.dict(os.environ, env, clear=True):
                 selected = module.prepare_hermes_provider_config()
                 config = yaml.safe_load((Path(tmp) / "config.yaml").read_text(encoding="utf-8"))
 
-        self.assertEqual(selected[0], "yandex")
-        self.assertEqual(config["model"]["provider"], "yandex")
-        self.assertIn("yandex", config["providers"])
-        self.assertNotIn("deepseek", config["providers"])
+        self.assertEqual(selected[0], "deepseek")
+        self.assertEqual(config["model"]["provider"], "deepseek")
+        self.assertIn("deepseek", config["providers"])
+        self.assertNotIn("yandex", config["providers"])
 
     def test_deepseek_only_writes_deepseek_provider_config(self) -> None:
         module = load_gateway_module()
@@ -84,6 +85,27 @@ class HermesGatewayConfigTests(unittest.TestCase):
         self.assertEqual(selected, ("deepseek", "deepseek-v4-flash", "https://api.deepseek.com"))
         self.assertEqual(config["model"]["provider"], "deepseek")
         self.assertEqual(config["providers"]["deepseek"]["key_env"], "DEEPSEEK_API_KEY")
+
+    def test_amvera_llm_defaults_to_deepseek_v4(self) -> None:
+        module = load_gateway_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "HERMES_HOME": tmp,
+                "AMVERA_LLM_API_KEY": "test-amvera-key",
+                "YANDEX_API_KEY": "test-yandex-key",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                selected = module.prepare_hermes_provider_config()
+                config = yaml.safe_load((Path(tmp) / "config.yaml").read_text(encoding="utf-8"))
+
+        self.assertEqual(selected, ("amvera_llm", "deepseek-V4", "https://inference.waw0.amvera.ru/v1"))
+        self.assertEqual(config["model"]["provider"], "amvera_llm")
+        self.assertEqual(config["model"]["default"], "deepseek-V4")
+        self.assertEqual(config["model"]["base_url"], "https://inference.waw0.amvera.ru/v1")
+        self.assertEqual(config["providers"]["amvera_llm"]["key_env"], "AMVERA_LLM_API_KEY")
+        self.assertEqual(config["agent"]["api_max_retries"], 1)
+        self.assertNotIn("memory", config["agent"]["disabled_toolsets"])
+        self.assertNotIn("skills", config["agent"]["disabled_toolsets"])
 
     def test_explicit_openai_compatible_provider_is_supported(self) -> None:
         module = load_gateway_module()

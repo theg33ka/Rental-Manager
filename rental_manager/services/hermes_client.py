@@ -79,6 +79,9 @@ class HermesClient:
         *,
         extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
+        normalized_path = path
+        if self.base_url.endswith("/v1") and normalized_path.startswith("/v1/"):
+            normalized_path = normalized_path[3:]
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers = {"Content-Type": "application/json; charset=utf-8"}
         if self.api_key:
@@ -87,7 +90,7 @@ class HermesClient:
         if extra_headers:
             headers.update(extra_headers)
         request = urllib.request.Request(
-            f"{self.base_url}{path}",
+            f"{self.base_url}{normalized_path}",
             data=data,
             headers=headers,
             method="POST",

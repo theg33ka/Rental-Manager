@@ -13,7 +13,7 @@ ALLOWED_ACTION_TYPES = {
     "create_manual_debt",
     "send_tenant_message",
 }
-ALLOWED_MEMORY_KINDS = {"fact", "preference", "commitment", "decision", "warning"}
+ALLOWED_MEMORY_KINDS = {"fact", "preference", "commitment", "decision", "warning", "skill"}
 ALLOWED_TENANT_INTENTS = {
     "general",
     "payment_question",

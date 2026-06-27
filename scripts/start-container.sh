@@ -7,13 +7,15 @@ echo "[BOOT] rental-manager starting port=${PORT_VALUE} db_configured=$([ -n "${
 AI_PROVIDER_VALUE="$(printf '%s' "${AI_PROVIDER:-}" | tr '[:upper:]-' '[:lower:]_')"
 if [ -z "$AI_PROVIDER_VALUE" ]; then
   AI_DIRECT_YANDEX_VALUE="$(printf '%s' "${AI_DIRECT_YANDEX:-1}" | tr '[:upper:]' '[:lower:]')"
-  if [ -n "${YANDEX_AI_API_KEY:-}${YANDEX_API_KEY:-}" ] && [ "$AI_DIRECT_YANDEX_VALUE" != "0" ] && [ "$AI_DIRECT_YANDEX_VALUE" != "false" ] && [ "$AI_DIRECT_YANDEX_VALUE" != "off" ]; then
+  if [ -n "${HERMES_INFERENCE_PROVIDER:-}${AMVERA_LLM_API_KEY:-}${DEEPSEEK_API_KEY:-}${OPENAI_COMPATIBLE_API_KEY:-}" ]; then
+    AI_PROVIDER_VALUE="hermes"
+  elif [ -n "${YANDEX_AI_API_KEY:-}${YANDEX_API_KEY:-}" ] && [ "$AI_DIRECT_YANDEX_VALUE" != "0" ] && [ "$AI_DIRECT_YANDEX_VALUE" != "false" ] && [ "$AI_DIRECT_YANDEX_VALUE" != "off" ]; then
     AI_PROVIDER_VALUE="yandex"
   else
     AI_PROVIDER_VALUE="hermes"
   fi
 fi
-echo "[BOOT] ai_provider=${AI_PROVIDER_VALUE} fallback=${AI_FALLBACK_PROVIDER:-none} yandex_key_configured=$([ -n "${YANDEX_AI_API_KEY:-}${YANDEX_API_KEY:-}" ] && echo true || echo false)"
+echo "[BOOT] ai_provider=${AI_PROVIDER_VALUE} fallback=${AI_FALLBACK_PROVIDER:-none} yandex_key_configured=$([ -n "${YANDEX_AI_API_KEY:-}${YANDEX_API_KEY:-}" ] && echo true || echo false) amvera_llm_key_configured=$([ -n "${AMVERA_LLM_API_KEY:-}" ] && echo true || echo false)"
 
 HERMES_ENABLED_VALUE="$(printf '%s' "${HERMES_ENABLED:-true}" | tr '[:upper:]' '[:lower:]')"
 if [ "$AI_PROVIDER_VALUE" = "hermes" ] && [ "$HERMES_ENABLED_VALUE" != "0" ] && [ "$HERMES_ENABLED_VALUE" != "false" ] && [ "$HERMES_ENABLED_VALUE" != "off" ]; then

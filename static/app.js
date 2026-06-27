@@ -418,8 +418,8 @@ function applySettings(settings = {}) {
     ai_enabled: false,
     ai_tenant_free_text_enabled: true,
     hermes_api_base_url: "http://127.0.0.1:8642",
-    hermes_model_default: "yandexgpt-lite",
-    hermes_model_audit: "yandexgpt",
+    hermes_model_default: "deepseek-V4",
+    hermes_model_audit: "deepseek-V4",
     ai_monthly_budget_rub: "1000",
     ip_recipient_name: "",
     ip_recipient_account: "",
@@ -466,8 +466,8 @@ function applySettings(settings = {}) {
   if (aiEnabled) aiEnabled.checked = Boolean(state.settings.ai_enabled);
   if (aiTenantFreeText) aiTenantFreeText.checked = Boolean(state.settings.ai_tenant_free_text_enabled);
   if (hermesBaseUrl) hermesBaseUrl.value = state.settings.hermes_api_base_url || "http://127.0.0.1:8642";
-  if (hermesDefaultModel) hermesDefaultModel.value = state.settings.hermes_model_default || "yandexgpt-lite";
-  if (hermesAuditModel) hermesAuditModel.value = state.settings.hermes_model_audit || "yandexgpt";
+  if (hermesDefaultModel) hermesDefaultModel.value = state.settings.hermes_model_default || "deepseek-V4";
+  if (hermesAuditModel) hermesAuditModel.value = state.settings.hermes_model_audit || "deepseek-V4";
   if (aiBudget) aiBudget.value = state.settings.ai_monthly_budget_rub || "1000";
   if (notificationsEnabled) notificationsEnabled.checked = Boolean(state.settings.notifications_enabled);
   if (notificationCutoffDate) notificationCutoffDate.value = state.settings.notification_cutoff_date || appToday();

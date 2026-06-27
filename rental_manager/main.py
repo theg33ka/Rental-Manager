@@ -303,8 +303,8 @@ DEFAULT_SETTINGS = {
     "ai_supervisor_hour": "10",
     "ai_action_confirmation_ttl_hours": "48",
     "hermes_api_base_url": "http://127.0.0.1:8642",
-    "hermes_model_default": "yandexgpt-lite",
-    "hermes_model_audit": "yandexgpt",
+    "hermes_model_default": "deepseek-V4",
+    "hermes_model_audit": "deepseek-V4",
     "ai_monthly_budget_rub": "1000",
     "ip_recipient_name": "ИНДИВИДУАЛЬНЫЙ ПРЕДПРИНИМАТЕЛЬ ЧАНТУРИЯ ЭРАСТ МИТРИДАТОВИЧ",
     "ip_recipient_inn": "540506055229",
@@ -810,14 +810,14 @@ def ensure_runtime_defaults(session: Session) -> None:
         session.add(AppSetting(key="notification_cutoff_date", value=date.today().isoformat()))
         changed = True
     old_model_defaults = {
-        "hermes_model_default": ("deepseek-v4-flash", "yandexgpt-lite"),
-        "hermes_model_audit": ("deepseek-v4-pro", "yandexgpt"),
+        "hermes_model_default": {"yandexgpt-lite", "yandexgpt", "deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat"},
+        "hermes_model_audit": {"yandexgpt-lite", "yandexgpt", "deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat"},
     }
-    for key, (old_value, new_value) in old_model_defaults.items():
+    for key, old_values in old_model_defaults.items():
         env_name = ENV_SETTING_KEYS.get(key)
         setting = session.get(AppSetting, key)
-        if setting and setting.value == old_value and not (env_name and env_name in os.environ):
-            setting.value = new_value
+        if setting and str(setting.value or "").strip().lower() in old_values and not (env_name and env_name in os.environ):
+            setting.value = "deepseek-V4"
             changed = True
     old_owner_receipt_alert = "Новый чек от {tenant_name}. Квартира: {apartment}. Сумма: {amount}. Канал: {channel}. Статус: {receipt_status}. {receipt_summary}"
     owner_receipt_setting = session.get(AppSetting, "message_owner_receipt_alert")
@@ -6097,11 +6097,20 @@ def ai_model_price_key(model: str) -> str:
         return "yandexgpt-lite"
     if "yandexgpt" in normalized:
         return "yandexgpt"
-    if "deepseek-v4-pro" in normalized:
-        return "deepseek-v4-pro"
     if "deepseek-v4-flash" in normalized:
         return "deepseek-v4-flash"
-    return "yandexgpt-lite"
+    if "deepseek-ai/deepseek-v4-pro" in normalized or "deepseek-v4-pro" in normalized or "deepseek-v4" in normalized or "deepseek_v4" in normalized:
+        return "deepseek-v4-pro"
+    if normalized in {"hermes", "hermes-agent"}:
+        upstream = (
+            os.environ.get("AMVERA_LLM_MODEL")
+            or os.environ.get("DEEPSEEK_MODEL")
+            or os.environ.get("OPENAI_COMPATIBLE_MODEL")
+            or ""
+        )
+        if upstream:
+            return ai_model_price_key(upstream)
+    return "deepseek-v4-pro"
 
 
 def ai_estimated_cost_rub(model: str, prompt_tokens: int, completion_tokens: int) -> float:
@@ -6203,8 +6212,8 @@ def agent_memory_context(
         query.order_by(AgentMemory.importance.desc(), AgentMemory.updated_at.desc(), AgentMemory.id.desc()).limit(limit)
     ).all()
     if not memories:
-        return "Долговременная память: пока пусто."
-    return "Долговременная память:\n" + "\n".join(
+        return "Долговременная память и навыки: пока пусто."
+    return "Долговременная память и навыки:\n" + "\n".join(
         f"- [{memory.kind}] {memory.content}" for memory in memories
     )
 
