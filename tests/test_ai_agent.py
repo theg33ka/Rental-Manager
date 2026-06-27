@@ -29,7 +29,13 @@ from rental_manager.main import (
 )
 from rental_manager.models import AiUsageDaily, Apartment, AppSetting, Lease, RentalObject, RentCharge, Tenant
 from rental_manager.services.ai_context import tenant_context_text
-from rental_manager.services.ai_policy import AI_UNAVAILABLE_TEXT, TENANT_SYSTEM_PROMPT
+from rental_manager.services.ai_policy import (
+    AI_UNAVAILABLE_TEXT,
+    OWNER_AGENT_SYSTEM_PROMPT,
+    TENANT_AGENT_SYSTEM_PROMPT,
+    TENANT_SYSTEM_PROMPT,
+    tenant_question_needs_owner,
+)
 from rental_manager.services.hermes_client import HermesClient, HermesClientError, HermesResult, YandexOpenAIClient
 from rental_manager.services.telegram_bot import TelegramApiError, telegram_api_request
 
@@ -76,6 +82,24 @@ class AiContextTests(AiAgentDatabaseTestCase):
         self.assertNotIn("Tenant Two", context)
         self.assertNotIn("A2", context)
         self.assertNotIn("34 000", context)
+
+
+class AiPolicyPromptTests(unittest.TestCase):
+    def test_owner_agent_prompt_keeps_button_confirmation_and_suspicion_rules(self) -> None:
+        self.assertIn("Текстовое “да”", OWNER_AGENT_SYSTEM_PROMPT)
+        self.assertIn("кнопкой backend", OWNER_AGENT_SYSTEM_PROMPT)
+        self.assertIn("собакой-подозревакой", OWNER_AGENT_SYSTEM_PROMPT)
+        self.assertIn("kind:\"skill\"", OWNER_AGENT_SYSTEM_PROMPT)
+
+    def test_tenant_agent_prompt_hides_internal_suspicion(self) -> None:
+        self.assertIn("не показывай внутренние подозрения", TENANT_AGENT_SYSTEM_PROMPT)
+        self.assertIn("owner_summary", TENANT_AGENT_SYSTEM_PROMPT)
+        self.assertIn("PDF-чека", TENANT_AGENT_SYSTEM_PROMPT)
+
+    def test_tenant_escalation_patterns_include_refusal_to_pay(self) -> None:
+        self.assertTrue(tenant_question_needs_owner("Я не буду платить за коммуналку"))
+        self.assertTrue(tenant_question_needs_owner("Можно отсрочку до пятницы?"))
+        self.assertFalse(tenant_question_needs_owner("Когда платить аренду?"))
 
 
 class AiBudgetTests(AiAgentDatabaseTestCase):
