@@ -203,10 +203,16 @@ async function api(path, options = {}) {
   if (!isFormData && !headers["Content-Type"]) {
     headers["Content-Type"] = "application/json";
   }
-  const response = await fetch(path, {
-    headers,
-    ...options,
-  });
+  let response;
+  try {
+    response = await fetch(path, {
+      credentials: "same-origin",
+      headers,
+      ...options,
+    });
+  } catch (error) {
+    throw new Error("Сервер не ответил на запрос. Обычно это долгий ответ API или оборванное соединение, не магия.");
+  }
   const rawText = await response.text();
   const parseJson = () => {
     if (!rawText) return null;
@@ -3360,13 +3366,18 @@ async function submitPinLogin(event) {
   event.preventDefault();
   const form = event.currentTarget;
   const payload = formData(form);
-  state.auth = await api("/api/auth/pin", { method: "POST", body: JSON.stringify(payload) });
-  applyAccessUi();
-  hideAuthOverlay();
-  form.reset();
-  const remember = qs("#rememberDeviceInput");
-  if (remember) remember.checked = true;
-  await loadAll();
+  try {
+    state.auth = await api("/api/auth/pin", { method: "POST", body: JSON.stringify(payload) });
+    applyAccessUi();
+    hideAuthOverlay();
+    form.reset();
+    const remember = qs("#rememberDeviceInput");
+    if (remember) remember.checked = true;
+    await loadAll();
+  } catch (error) {
+    showAuthOverlay();
+    toast(error.message);
+  }
 }
 
 async function logoutPanel() {

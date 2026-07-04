@@ -143,7 +143,7 @@ from rental_manager.services.telegram_bot import (
 )
 
 
-APP_BUILD_MARKER = "startup-bulk-rent-sync-2026-07-05"
+APP_BUILD_MARKER = "fast-bootstrap-dashboard-2026-07-05"
 
 
 app = FastAPI(title="Rental Manager", version="0.1.0")
@@ -2366,6 +2366,7 @@ def serialize_bill_line(
     *,
     include_payments: bool = True,
     include_reminder: bool = True,
+    include_advance: bool = True,
 ) -> dict[str, Any]:
     update_utility_line_status(line)
     payments = []
@@ -2380,7 +2381,7 @@ def serialize_bill_line(
         ]
     period_label = utility_line_period_label(line)
     metadata = utility_line_metadata(line)
-    advance_applied = utility_advance_applied_to_line(session, line.id) if session and line.id else 0.0
+    advance_applied = utility_advance_applied_to_line(session, line.id) if include_advance and session and line.id else 0.0
     return {
         "id": line.id,
         "bill_id": line.bill_id,
@@ -2424,6 +2425,7 @@ def serialize_bill(
     *,
     include_line_payments: bool = True,
     include_line_reminders: bool = True,
+    include_line_advance: bool = True,
 ) -> dict[str, Any]:
     resident_total_amount = money(sum(line.total_amount for line in bill.lines))
     resident_paid_amount = money(sum(line.paid_amount for line in bill.lines))
@@ -2456,6 +2458,7 @@ def serialize_bill(
                 session,
                 include_payments=include_line_payments,
                 include_reminder=include_line_reminders,
+                include_advance=include_line_advance,
             )
             for line in bill.lines
         ],
@@ -3090,14 +3093,31 @@ def provider_reading_statuses_for_month(
     statuses: list[dict[str, Any]] = []
     services = session.scalars(
         select(UtilityService)
+        .options(joinedload(UtilityService.object))
         .where(UtilityService.active.is_(True))
         .order_by(UtilityService.object_id, UtilityService.kind, UtilityService.id)
     ).all()
+    service_ids = [service.id for service in services]
+    readings_by_service: dict[int, date] = {}
+    if service_ids:
+        rows = session.execute(
+            select(Meter.service_id, func.max(MeterReading.reading_date))
+            .select_from(Meter)
+            .join(MeterReading, MeterReading.meter_id == Meter.id)
+            .where(
+                Meter.service_id.in_(service_ids),
+                Meter.scope == "object",
+                MeterReading.reading_date >= start,
+                MeterReading.reading_date <= end,
+            )
+            .group_by(Meter.service_id)
+        ).all()
+        readings_by_service = {int(service_id): reading_date for service_id, reading_date in rows if reading_date}
     for service in services:
         due = service_due_date(year, month, service.provider_reading_due_day)
-        reading = object_reading_in_month(session, service, start, end)
+        reading_date = readings_by_service.get(int(service.id))
         alert_from = due - timedelta(days=3)
-        if reading:
+        if reading_date:
             status = "paid"
             alert = False
         elif today < alert_from:
@@ -3122,7 +3142,7 @@ def provider_reading_statuses_for_month(
                 "period_start": start.isoformat(),
                 "period_end": end.isoformat(),
                 "due_date": due.isoformat(),
-                "reading_date": reading.reading_date.isoformat() if reading else None,
+                "reading_date": reading_date.isoformat() if reading_date else None,
                 "status": status,
                 "alert": alert,
                 "days_left": (due - today).days,
@@ -3234,6 +3254,43 @@ def build_monthly_reports(session: Session, today: date | None = None) -> list[d
         for entry in iter_dashboard_report_entries(today)
     ]
     return [report for report in reports if not report["accepted"]]
+
+
+def build_monthly_report_shells(session: Session, today: date | None = None) -> list[dict[str, Any]]:
+    today = today or date.today()
+    accepted = accepted_monthly_report_keys(session)
+    reports: list[dict[str, Any]] = []
+    for entry in iter_dashboard_report_entries(today):
+        year = int(entry["year"])
+        month = int(entry["month"])
+        kind = "preliminary" if entry.get("kind") == "preliminary" else "full"
+        key = monthly_report_key(year, month, kind)
+        if key in accepted:
+            continue
+        start, end = month_range(year, month)
+        title_prefix = "Предварительный отчёт за" if kind == "preliminary" else "Готов отчёт за"
+        reports.append(
+            {
+                "key": key,
+                "kind": kind,
+                "year": year,
+                "month": month,
+                "month_name": MONTH_NAMES[month - 1],
+                "title": f"{title_prefix} {MONTH_NAMES[month - 1]} {year}",
+                "period_start": start.isoformat(),
+                "period_end": end.isoformat(),
+                "severity": "warn",
+                "label": "ждёт проверки",
+                "issue_count": 0,
+                "warning_count": 0,
+                "danger_count": 0,
+                "issues": [],
+                "accepted": False,
+                "download_url": f"/api/reports/monthly.xlsx?year={year}&month={month}",
+                "quick": True,
+            }
+        )
+    return reports
 
 
 def notify_available_monthly_reports(session: Session, today: date | None = None) -> int:
@@ -3481,7 +3538,9 @@ def month_dashboard_summary(
 def build_dashboard(session: Session) -> dict[str, Any]:
     today = date.today()
     cutoff = configured_notification_cutoff_date(session)
-    charges = session.scalars(
+    ignored_ids = ignored_lease_ids(session)
+
+    charge_query = (
         select(RentCharge)
         .options(
             joinedload(RentCharge.lease).joinedload(Lease.apartment).joinedload(Apartment.object),
@@ -3491,11 +3550,17 @@ def build_dashboard(session: Session) -> dict[str, Any]:
         .join(Apartment)
         .where(Lease.active.is_(True), Apartment.active.is_(True))
         .order_by(RentCharge.due_date)
-    ).all()
-    charges = [charge for charge in charges if not lease_ignored(session, charge.lease_id)]
+    )
+    if cutoff:
+        charge_query = charge_query.where(RentCharge.due_date >= cutoff)
+    if ignored_ids:
+        charge_query = charge_query.where(Lease.id.not_in(ignored_ids))
+    charges = session.scalars(charge_query).all()
+    charges = [charge for charge in charges if IGNORE_LEASE_MARK not in (charge.lease.notes or "")]
     for charge in charges:
         update_rent_charge_status(charge, today)
-    utility_lines = session.scalars(
+
+    utility_query = (
         select(UtilityBillLine)
         .options(
             joinedload(UtilityBillLine.apartment),
@@ -3504,15 +3569,21 @@ def build_dashboard(session: Session) -> dict[str, Any]:
         )
         .join(Apartment)
         .where(Apartment.active.is_(True))
-    ).all()
-    utility_lines = [line for line in utility_lines if line.lease_id and not lease_ignored(session, line.lease_id)]
+    )
+    if cutoff:
+        utility_query = utility_query.where(or_(UtilityBillLine.due_date.is_(None), UtilityBillLine.due_date >= cutoff))
+    if ignored_ids:
+        utility_query = utility_query.where(or_(UtilityBillLine.lease_id.is_(None), UtilityBillLine.lease_id.not_in(ignored_ids)))
+    utility_lines = session.scalars(utility_query).all()
+    utility_lines = [
+        line
+        for line in utility_lines
+        if line.lease_id
+        and line.lease
+        and IGNORE_LEASE_MARK not in (line.lease.notes or "")
+    ]
     for line in utility_lines:
         update_utility_line_status(line, today)
-    prefetch_latest_message_logs(
-        session,
-        rent_charge_ids=[charge.id for charge in charges],
-        utility_line_ids=[line.id for line in utility_lines],
-    )
 
     def rent_debt(charge: RentCharge) -> float:
         return money(max(0, float(charge.ip_due or 0) - float(charge.ip_paid or 0)) + max(0, float(charge.personal_due or 0) - float(charge.personal_paid or 0)))
@@ -3521,22 +3592,22 @@ def build_dashboard(session: Session) -> dict[str, Any]:
         return money(max(0, float(line.total_amount or 0) - float(line.paid_amount or 0)))
 
     overdue_rent = [
-        serialize_rent_charge(charge, session, include_payments=False)
+        serialize_rent_charge(charge, session, include_payments=False, include_reminder=False)
         for charge in charges
         if charge.status == "overdue" and rent_debt(charge) > 0 and debt_visible_by_cutoff(charge.due_date, cutoff)
     ]
     partial_rent = [
-        serialize_rent_charge(charge, session, include_payments=False)
+        serialize_rent_charge(charge, session, include_payments=False, include_reminder=False)
         for charge in charges
         if charge.status == "partial" and rent_debt(charge) > 0 and debt_visible_by_cutoff(charge.due_date, cutoff)
     ]
     today_rent = [
-        serialize_rent_charge(charge, session, include_payments=False)
+        serialize_rent_charge(charge, session, include_payments=False, include_reminder=False)
         for charge in charges
         if charge.due_date == today and charge.status not in {"paid", "paid_ahead"} and rent_debt(charge) > 0 and debt_visible_by_cutoff(charge.due_date, cutoff)
     ]
     deferred = [
-        serialize_rent_charge(charge, session, include_payments=False)
+        serialize_rent_charge(charge, session, include_payments=False, include_reminder=False)
         for charge in charges
         if charge.status == "deferred"
         and charge.deferral_until
@@ -3545,24 +3616,27 @@ def build_dashboard(session: Session) -> dict[str, Any]:
     ]
 
     overdue_utilities = [
-        serialize_bill_line(line, session, include_payments=False)
+        serialize_bill_line(line, session, include_payments=False, include_reminder=False, include_advance=False)
         for line in utility_lines
         if line.status == "overdue" and utility_debt(line) > 0 and debt_visible_by_cutoff(line.due_date, cutoff)
     ]
     partial_utilities = [
-        serialize_bill_line(line, session, include_payments=False)
+        serialize_bill_line(line, session, include_payments=False, include_reminder=False, include_advance=False)
         for line in utility_lines
         if line.status == "partial" and utility_debt(line) > 0 and debt_visible_by_cutoff(line.due_date, cutoff)
     ]
     issued_utilities = [
-        serialize_bill_line(line, session, include_payments=False)
+        serialize_bill_line(line, session, include_payments=False, include_reminder=False, include_advance=False)
         for line in utility_lines
         if line.status in {"issued", "overdue", "partial"} and utility_debt(line) > 0 and debt_visible_by_cutoff(line.due_date, cutoff)
     ]
     manual_debts = [
-        serialize_manual_debt(debt, session)
+        serialize_manual_debt(debt, session, include_reminder=False)
         for debt in outstanding_manual_debts(session, cutoff=cutoff)
-        if debt.lease_id and not lease_ignored(session, debt.lease_id)
+        if debt.lease_id
+        and int(debt.lease_id) not in ignored_ids
+        and debt.lease
+        and IGNORE_LEASE_MARK not in (debt.lease.notes or "")
     ]
 
     pending_expenses = session.scalars(
@@ -3582,9 +3656,24 @@ def build_dashboard(session: Session) -> dict[str, Any]:
     )
     expense_fund_balance = money(expense_fund_received - expense_fund_spent)
 
+    services = session.scalars(
+        select(UtilityService).options(joinedload(UtilityService.object)).where(UtilityService.active.is_(True))
+    ).all()
+    service_ids = [service.id for service in services]
+    last_reading_by_service: dict[int, date] = {}
+    if service_ids:
+        rows = session.execute(
+            select(Meter.service_id, func.max(MeterReading.reading_date))
+            .select_from(Meter)
+            .outerjoin(MeterReading, MeterReading.meter_id == Meter.id)
+            .where(Meter.service_id.in_(service_ids), Meter.scope == "object")
+            .group_by(Meter.service_id)
+        ).all()
+        last_reading_by_service = {int(service_id): reading_date for service_id, reading_date in rows if reading_date}
+
     stale_readings = []
-    for service in session.scalars(select(UtilityService).where(UtilityService.active.is_(True))).all():
-        last_date = object_last_reading_date(session, service)
+    for service in services:
+        last_date = last_reading_by_service.get(int(service.id))
         if not last_date or (today - last_date).days >= 30:
             stale_readings.append(
                 {
@@ -3602,7 +3691,12 @@ def build_dashboard(session: Session) -> dict[str, Any]:
     ]
 
     provider_debts = [
-        serialize_bill(bill)
+        serialize_bill(
+            bill,
+            include_line_payments=False,
+            include_line_reminders=False,
+            include_line_advance=False,
+        )
         for bill in session.scalars(
             select(UtilityBill)
             .options(joinedload(UtilityBill.service).joinedload(UtilityService.object), selectinload(UtilityBill.lines))
@@ -3618,7 +3712,7 @@ def build_dashboard(session: Session) -> dict[str, Any]:
     return {
         "object_summary": build_object_summary(session),
         "month_summary": month_dashboard_summary(session, today.year, today.month, today),
-        "monthly_reports": build_monthly_reports(session, today),
+        "monthly_reports": build_monthly_report_shells(session, today),
         "rent_overdue": overdue_rent,
         "rent_partial": partial_rent,
         "rent_today": today_rent,
@@ -3770,7 +3864,12 @@ def manual_debt_reference_date(debt: ManualDebt) -> date | None:
     return debt.due_date or debt.period_end or debt.period_start or debt.created_at.date()
 
 
-def serialize_manual_debt(debt: ManualDebt, session: Session | None = None) -> dict[str, Any]:
+def serialize_manual_debt(
+    debt: ManualDebt,
+    session: Session | None = None,
+    *,
+    include_reminder: bool = True,
+) -> dict[str, Any]:
     update_manual_debt_status(debt)
     period_label = ""
     if debt.period_start and debt.period_end:
@@ -3804,7 +3903,7 @@ def serialize_manual_debt(debt: ManualDebt, session: Session | None = None) -> d
             debt.lease,
             manual_debt_reference_date(debt),
             template_key="message_rent_overdue" if debt.kind == "rent" else "message_utility_bill",
-        ) if session and debt.lease else None,
+        ) if include_reminder and session and debt.lease else None,
     }
 
 
