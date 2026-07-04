@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
 from sqlalchemy import and_, func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from rental_manager.models import (
     Apartment,
@@ -24,6 +24,8 @@ LEGACY_IMPORT_MARK = "SCREENSHOT_IMPORT"
 IGNORE_LEASE_MARK = "IGNORE_LEASE_CONTROL"
 LEGACY_PERSONAL_IGNORE_BEFORE = date(2026, 4, 1)
 RENT_GENERATION_START = date(2025, 1, 1)
+RENT_STATUS_REFRESH_PAST_DAYS = 120
+RENT_STATUS_REFRESH_FUTURE_DAYS = 120
 
 
 def parse_date(value: str | date | None, default: date | None = None) -> date:
@@ -122,55 +124,123 @@ def next_due_after(current_due: date, payment_day: int) -> date:
         year, month = add_month(year, month)
 
 
-def generate_rent_charges(session: Session, until: date | None = None) -> int:
-    until = until or (date.today() + timedelta(days=70))
-    created = 0
-    leases = session.scalars(select(Lease).join(Apartment).where(Lease.active.is_(True), Apartment.active.is_(True))).all()
-    for lease in leases:
-        if IGNORE_LEASE_MARK in (lease.notes or ""):
-            continue
-        due = effective_due_date(lease.start_date.year, lease.start_date.month, lease.payment_day)
-        if due < lease.start_date:
-            due = next_due_after(due, lease.payment_day)
-        while due < RENT_GENERATION_START:
-            due = next_due_after(due, lease.payment_day)
-        while due <= until and (lease.end_date is None or due <= lease.end_date):
-            exists = session.scalar(
-                select(RentCharge).where(
-                    RentCharge.lease_id == lease.id,
-                    RentCharge.due_date == due,
-                )
+def rent_charge_schedule_for_lease(lease: Lease, until: date) -> list[tuple[date, date]]:
+    due = effective_due_date(lease.start_date.year, lease.start_date.month, lease.payment_day)
+    if due < lease.start_date:
+        due = next_due_after(due, lease.payment_day)
+    while due < RENT_GENERATION_START:
+        due = next_due_after(due, lease.payment_day)
+
+    schedule: list[tuple[date, date]] = []
+    while due <= until and (lease.end_date is None or due <= lease.end_date):
+        next_due = next_due_after(due, lease.payment_day)
+        schedule.append((due, next_due - timedelta(days=1)))
+        due = next_due
+    return schedule
+
+
+def refresh_generated_rent_statuses(
+    session: Session,
+    lease_ids: list[int],
+    touched_charges: list[RentCharge],
+    *,
+    today: date,
+    until: date,
+) -> None:
+    charges_by_identity: dict[tuple[str, int], RentCharge] = {}
+    for charge in touched_charges:
+        key = ("db", int(charge.id)) if charge.id else ("obj", id(charge))
+        charges_by_identity[key] = charge
+
+    if lease_ids:
+        status_start = max(RENT_GENERATION_START, today - timedelta(days=RENT_STATUS_REFRESH_PAST_DAYS))
+        status_end = max(until, today + timedelta(days=RENT_STATUS_REFRESH_FUTURE_DAYS))
+        window_charges = session.scalars(
+            select(RentCharge)
+            .options(joinedload(RentCharge.lease).joinedload(Lease.tenant))
+            .where(
+                RentCharge.lease_id.in_(lease_ids),
+                RentCharge.due_date >= status_start,
+                RentCharge.due_date <= status_end,
             )
-            next_due = next_due_after(due, lease.payment_day)
+        ).all()
+        for charge in window_charges:
+            charges_by_identity[("db", int(charge.id))] = charge
+
+    for charge in charges_by_identity.values():
+        update_rent_charge_status(charge, today)
+
+
+def generate_rent_charges(session: Session, until: date | None = None) -> int:
+    today = date.today()
+    until = until or (today + timedelta(days=70))
+    created = 0
+    leases = session.scalars(
+        select(Lease)
+        .options(joinedload(Lease.apartment), joinedload(Lease.tenant))
+        .join(Apartment)
+        .where(Lease.active.is_(True), Apartment.active.is_(True))
+    ).all()
+    leases = [lease for lease in leases if IGNORE_LEASE_MARK not in (lease.notes or "")]
+    lease_ids = [int(lease.id) for lease in leases]
+
+    schedules: dict[int, list[tuple[date, date]]] = {}
+    min_due: date | None = None
+    max_due: date | None = None
+    for lease in leases:
+        schedule = rent_charge_schedule_for_lease(lease, until)
+        schedules[int(lease.id)] = schedule
+        for due, _period_end in schedule:
+            min_due = due if min_due is None else min(min_due, due)
+            max_due = due if max_due is None else max(max_due, due)
+
+    existing_by_key: dict[tuple[int, date], RentCharge] = {}
+    if lease_ids and min_due is not None and max_due is not None:
+        existing_charges = session.scalars(
+            select(RentCharge)
+            .options(joinedload(RentCharge.lease).joinedload(Lease.tenant))
+            .where(
+                RentCharge.lease_id.in_(lease_ids),
+                RentCharge.due_date >= min_due,
+                RentCharge.due_date <= max_due,
+            )
+        ).all()
+        existing_by_key = {(int(charge.lease_id), charge.due_date): charge for charge in existing_charges}
+
+    touched_charges: list[RentCharge] = []
+    for lease in leases:
+        for due, period_end in schedules.get(int(lease.id), []):
+            exists = existing_by_key.get((int(lease.id), due))
             if not exists:
-                session.add(
-                    RentCharge(
-                        lease_id=lease.id,
-                        period_start=due,
-                        period_end=next_due - timedelta(days=1),
-                        due_date=due,
-                        ip_due=money(lease.ip_amount),
-                        personal_due=money(lease.personal_amount),
-                    )
+                charge = RentCharge(
+                    lease=lease,
+                    period_start=due,
+                    period_end=period_end,
+                    due_date=due,
+                    ip_due=money(lease.ip_amount),
+                    personal_due=money(lease.personal_amount),
                 )
+                session.add(charge)
+                touched_charges.append(charge)
                 created += 1
-            else:
-                can_sync_future_amounts = (
-                    exists.due_date >= date.today()
-                    and money(float(exists.ip_paid or 0)) <= 0.009
-                    and money(float(exists.personal_paid or 0)) <= 0.009
-                )
-                if can_sync_future_amounts:
-                    exists.ip_due = money(lease.ip_amount)
-                    exists.personal_due = money(lease.personal_amount)
-                elif money(exists.ip_due) <= 0 and money(lease.ip_amount) > 0:
-                    exists.ip_due = money(lease.ip_amount)
-                if not can_sync_future_amounts and money(exists.personal_due) <= 0 and money(lease.personal_amount) > 0:
-                    exists.personal_due = money(lease.personal_amount)
-            due = next_due
+                continue
+
+            touched_charges.append(exists)
+            can_sync_future_amounts = (
+                exists.due_date >= today
+                and money(float(exists.ip_paid or 0)) <= 0.009
+                and money(float(exists.personal_paid or 0)) <= 0.009
+            )
+            if can_sync_future_amounts:
+                exists.ip_due = money(lease.ip_amount)
+                exists.personal_due = money(lease.personal_amount)
+            elif money(exists.ip_due) <= 0 and money(lease.ip_amount) > 0:
+                exists.ip_due = money(lease.ip_amount)
+            if not can_sync_future_amounts and money(exists.personal_due) <= 0 and money(lease.personal_amount) > 0:
+                exists.personal_due = money(lease.personal_amount)
+
     session.flush()
-    for charge in session.scalars(select(RentCharge)).all():
-        update_rent_charge_status(charge)
+    refresh_generated_rent_statuses(session, lease_ids, touched_charges, today=today, until=until)
     return created
 
 

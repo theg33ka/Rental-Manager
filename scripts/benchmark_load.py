@@ -9,6 +9,7 @@ import statistics
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Callable
@@ -210,17 +211,28 @@ def main() -> None:
 
         def create_draft(refresh_mode: str) -> int:
             nonlocal draft_offset
-            start, end = month_range(draft_offset)
-            draft_offset += 1
-            body, size = client.post(
-                "/api/utility-bills/calculate",
-                {
-                    "service_id": service_id,
-                    "period_start": start,
-                    "period_end": end,
-                    "allow_estimate": True,
-                },
-            )
+            last_error = ""
+            for _ in range(36):
+                start, end = month_range(draft_offset)
+                draft_offset += 1
+                try:
+                    body, size = client.post(
+                        "/api/utility-bills/calculate",
+                        {
+                            "service_id": service_id,
+                            "period_start": start,
+                            "period_end": end,
+                            "allow_estimate": True,
+                        },
+                    )
+                    break
+                except urllib.error.HTTPError as exc:
+                    last_error = exc.read().decode("utf-8", errors="replace")
+                    if exc.code == 400 and "Черновик за этот период" in last_error:
+                        continue
+                    raise RuntimeError(f"Draft benchmark failed for {start} -> {end}: {last_error}") from exc
+            else:
+                raise RuntimeError(f"Draft benchmark did not find a free period: {last_error}")
             created_bill_ids.append(int(json.loads(body.decode("utf-8"))["id"]))
             if refresh_mode == "app_state":
                 return size + hit_paths(client, ["/api/app-state"])

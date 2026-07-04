@@ -143,7 +143,7 @@ from rental_manager.services.telegram_bot import (
 )
 
 
-APP_BUILD_MARKER = "silent-mutation-sync-2026-07-04"
+APP_BUILD_MARKER = "startup-bulk-rent-sync-2026-07-05"
 
 
 app = FastAPI(title="Rental Manager", version="0.1.0")
@@ -510,11 +510,10 @@ def startup() -> None:
             seed_if_empty(session)
         ensure_runtime_defaults(session)
         generate_rent_charges(session)
-        backfill_owner_style_preferences(session)
-        notify_available_monthly_reports(session)
         session.commit()
-        ensure_runtime_telegram_webhook(session)
     start_reminder_worker()
+    queue_startup_maintenance()
+    queue_runtime_telegram_webhook_refresh()
     record_background_event(
         "startup",
         int((time_module.perf_counter() - started) * 1000),
@@ -556,6 +555,37 @@ def start_reminder_worker() -> None:
         return
     REMINDER_WORKER_STARTED = True
     thread = threading.Thread(target=reminder_worker_loop, name="rental-reminders", daemon=True)
+    thread.start()
+
+
+def startup_maintenance_background() -> None:
+    started = time_module.perf_counter()
+    status = "ok"
+    detail: dict[str, Any] = {}
+    try:
+        with SessionLocal() as session:
+            detail["owner_preferences_backfilled"] = backfill_owner_style_preferences(session)
+            detail["monthly_report_notifications"] = notify_available_monthly_reports(session)
+            session.commit()
+    except Exception as exc:
+        status = "failed"
+        detail["error"] = repr(exc)[:240]
+        runtime_log("BOOT", f"startup maintenance failed error={exc!r}")
+    finally:
+        record_background_event(
+            "startup_maintenance",
+            int((time_module.perf_counter() - started) * 1000),
+            status=status,
+            detail=detail,
+        )
+
+
+def queue_startup_maintenance() -> None:
+    thread = threading.Thread(
+        target=startup_maintenance_background,
+        name="startup-maintenance",
+        daemon=True,
+    )
     thread.start()
 
 
@@ -9019,6 +9049,42 @@ def ensure_runtime_telegram_webhook(session: Session) -> None:
         runtime_log("TELEGRAM", f"runtime commands refresh ok={bool(commands_result.get('ok'))}")
     except TelegramApiError as exc:
         runtime_log("TELEGRAM", f"runtime commands refresh skipped error={exc}")
+
+
+def refresh_runtime_telegram_webhook_background() -> None:
+    started = time_module.perf_counter()
+    status = "ok"
+    detail: dict[str, Any] = {}
+    try:
+        with SessionLocal() as session:
+            token_configured = bool(telegram_token(session))
+            base_url = app_base_url(session)
+            detail = {
+                "token_configured": token_configured,
+                "base_url_configured": bool(base_url),
+                "https_base_url": base_url.startswith("https://") if base_url else False,
+            }
+            ensure_runtime_telegram_webhook(session)
+    except Exception as exc:
+        status = "failed"
+        detail["error"] = repr(exc)[:240]
+        runtime_log("TELEGRAM", f"runtime webhook background failed error={exc!r}")
+    finally:
+        record_background_event(
+            "telegram_webhook_refresh",
+            int((time_module.perf_counter() - started) * 1000),
+            status=status,
+            detail=detail,
+        )
+
+
+def queue_runtime_telegram_webhook_refresh() -> None:
+    thread = threading.Thread(
+        target=refresh_runtime_telegram_webhook_background,
+        name="telegram-webhook-refresh",
+        daemon=True,
+    )
+    thread.start()
 
 
 @app.post("/api/integrations/telegram/set-webhook")

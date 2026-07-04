@@ -249,6 +249,47 @@ class RentScheduleTests(DatabaseTestCase):
 
         self.assertEqual(created, 0)
 
+    def test_generate_rent_charges_does_not_scan_every_historic_charge(self) -> None:
+        with self.seed() as session:
+            inactive_apartment = Apartment(object_id=1, name="Архив", active=False)
+            tenant = Tenant(full_name="Архивный жилец")
+            session.add_all([inactive_apartment, tenant])
+            session.flush()
+            inactive_lease = Lease(
+                apartment_id=inactive_apartment.id,
+                tenant_id=tenant.id,
+                start_date=date(2025, 1, 1),
+                payment_day=1,
+                active=False,
+                ip_amount=10000,
+                personal_amount=0,
+            )
+            session.add(inactive_lease)
+            session.flush()
+            historic_charge = RentCharge(
+                lease_id=inactive_lease.id,
+                period_start=date(2025, 1, 1),
+                period_end=date(2025, 1, 31),
+                due_date=date(2025, 1, 1),
+                ip_due=10000,
+                personal_due=0,
+                status="pending",
+            )
+            session.add(historic_charge)
+            session.flush()
+            historic_charge_id = historic_charge.id
+
+            with patch("rental_manager.services.billing.update_rent_charge_status", wraps=update_rent_charge_status) as status_mock:
+                generate_rent_charges(session, until=date(2026, 9, 30))
+
+            updated_ids = {
+                call.args[0].id
+                for call in status_mock.call_args_list
+                if call.args and getattr(call.args[0], "id", None)
+            }
+
+        self.assertNotIn(historic_charge_id, updated_ids)
+
     def test_statuses_for_two_part_rent_payment(self) -> None:
         charge = self._charge(due_date=date(2026, 4, 14), ip_due=20000, personal_due=5000)
         self.assertEqual(update_rent_charge_status(charge, today=date(2026, 4, 14)), "pending")
