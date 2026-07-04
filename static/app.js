@@ -44,6 +44,9 @@ const appStateLoadGroups = [
     detail: "Таймлайн, рассылки и чеки. Если тут тормозит, мониторинг покажет виновника.",
   },
 ];
+const appStateSectionOrder = [...new Set(appStateLoadGroups.flatMap((group) => group.sections))];
+let silentRefreshPromise = null;
+const silentRefreshSections = new Set();
 
 function authRole() {
   return state.auth?.role || null;
@@ -666,14 +669,65 @@ async function loadAppStateSections(group) {
   return payload;
 }
 
-async function loadAll() {
+function applyBootstrapState() {
+  if (!state.bootstrap) return;
+  state.auth = { authenticated: true, role: state.bootstrap?.auth?.role || authRole() || "owner" };
+  applySettings(state.bootstrap?.settings);
+  applyAccessUi();
+}
+
+function normalizeAppStateSections(sections) {
+  const requested = Array.isArray(sections) && sections.length ? sections : appStateSectionOrder;
+  const requestedSet = new Set(requested);
+  return appStateSectionOrder.filter((section) => requestedSet.has(section));
+}
+
+async function loadAppStateSilently(sections = appStateSectionOrder) {
+  const selected = normalizeAppStateSections(sections);
+  const sectionParam = encodeURIComponent(selected.join(","));
+  const payload = await api(`/api/app-state?sections=${sectionParam}`);
+  applyAppState(payload);
+  applyBootstrapState();
+  if (!state.bootstrap) return payload;
+  hydrateForms();
+  renderAll();
+  return payload;
+}
+
+async function refreshAfterMutation(sections = appStateSectionOrder) {
+  normalizeAppStateSections(sections).forEach((section) => silentRefreshSections.add(section));
+  if (silentRefreshPromise) return silentRefreshPromise;
+  silentRefreshPromise = (async () => {
+    while (silentRefreshSections.size) {
+      await new Promise((resolve) => window.setTimeout(resolve, 25));
+      const selected = normalizeAppStateSections([...silentRefreshSections]);
+      silentRefreshSections.clear();
+      await loadAppStateSilently(selected);
+    }
+  })()
+    .catch((error) => {
+      toast(`Данные сохранены, но экран не дообновился: ${error.message}`);
+    })
+    .finally(() => {
+      silentRefreshPromise = null;
+      if (silentRefreshSections.size) {
+        window.setTimeout(() => refreshAfterMutation(), 0);
+      }
+    });
+  return silentRefreshPromise;
+}
+
+async function loadAll(options = {}) {
+  const fullScreen = options.fullScreen ?? !state.bootstrap;
+  if (!fullScreen && state.bootstrap) {
+    await refreshAfterMutation();
+    return;
+  }
   state.loadFailures = [];
   setLoadingStep(6, "Подключаюсь к серверу", "Проверяю, отвечает ли пульт, а не просто делает вид.");
   try {
     await loadAppStateSections(appStateLoadGroups[0]);
-    state.auth = { authenticated: true, role: state.bootstrap?.auth?.role || authRole() || "owner" };
-    applySettings(state.bootstrap?.settings);
-    applyAccessUi();
+    applyBootstrapState();
     if (isGuest()) {
       hydrateForms();
       renderGuestView();
@@ -703,9 +757,7 @@ async function loadAll() {
 
 async function refreshBootstrap() {
   state.bootstrap = await api("/api/bootstrap");
-  state.auth = { authenticated: true, role: state.bootstrap.auth?.role || authRole() || "owner" };
-  applySettings(state.bootstrap.settings);
-  applyAccessUi();
+  applyBootstrapState();
   if (isGuest()) {
     hydrateForms();
     renderGuestView();
@@ -3190,7 +3242,7 @@ async function connectTelegramWebhook() {
   });
   const warnings = [result.delete_warning, result.commands_warning].filter(Boolean);
   toast(warnings.length ? `${result.description || "Webhook подключён"}; предупреждение: ${warnings[0]}` : result.description || "Webhook подключён");
-  await loadAll();
+  await loadAll({ fullScreen: true });
 }
 
 async function telegramWebhookInfo() {
@@ -3218,7 +3270,7 @@ async function runRemindersNow() {
     return;
   }
   toast(`Напоминания: отправлено ${result.sent}, дубликаты ${result.skipped_duplicate}, старые долги пропущены ${result.skipped_legacy}`);
-  await loadAll();
+  await loadAll({ fullScreen: true });
 }
 
 function resetQuickReadingConfirm() {
@@ -3311,7 +3363,7 @@ function bindEvents() {
     });
   });
 
-  on("#refreshBtn", "click", loadAll);
+  on("#refreshBtn", "click", () => loadAll({ fullScreen: true }));
   on("#pinLoginForm", "submit", submitPinLogin);
   on("#logoutBtn", "click", logoutPanel);
   on("#runRemindersBtn", "click", runRemindersNow);

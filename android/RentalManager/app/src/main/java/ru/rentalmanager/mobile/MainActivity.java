@@ -53,6 +53,7 @@ public class MainActivity extends Activity {
     private static final long CACHE_TTL_MS = 60_000L;
     private static final long CONNECTION_CHECK_MIN_MS = 2_000L;
     private static final long RECONNECT_INTERVAL_MS = 10_000L;
+    private static final String FULL_APP_STATE_SECTIONS = "bootstrap,rent_charges,utility_bills,expenses,tariffs,utility_timeline,message_targets,suspicious_receipts";
     private static final String[] MONTH_NAMES_RU = {
         "январь", "февраль", "март", "апрель", "май", "июнь",
         "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"
@@ -398,6 +399,18 @@ public class MainActivity extends Activity {
         paymentsLoadedAt = now;
         servicesLoadedAt = now;
         moreLoadedAt = now;
+    }
+
+    private void syncAfterMutation() {
+        runApi("Синхронизирую", false, () -> {
+            applyAppState(api.getJson("/api/app-state?sections=" + FULL_APP_STATE_SECTIONS));
+            long now = System.currentTimeMillis();
+            bootstrapLoadedAt = now;
+            paymentsLoadedAt = now;
+            servicesLoadedAt = now;
+            moreLoadedAt = now;
+            return null;
+        }, value -> renderCurrentTab());
     }
 
     private void applyAppState(JSONObject payload) {
@@ -927,7 +940,7 @@ public class MainActivity extends Activity {
     private void renderPremiumTasks() {
         screenTitle.setText("Дела");
         content.removeAllViews();
-        content.addView(primaryButton("Запустить напоминания", v -> runApi("Напоминания", () -> api.postJson("/api/reminders/run", new JSONObject()), value -> loadCurrentTab(true))), new LinearLayout.LayoutParams(-1, dp(52)));
+        content.addView(primaryButton("Запустить напоминания", v -> runApi("Напоминания", () -> api.postJson("/api/reminders/run", new JSONObject()), value -> syncAfterMutation())), new LinearLayout.LayoutParams(-1, dp(52)));
         List<MonthTask> tasks = buildPremiumTasks(obj(bootstrap, "dashboard"));
         addPremiumTaskGroup(tasks, "Сегодня", 0);
         addPremiumTaskGroup(tasks, "На неделе", 1);
@@ -1756,9 +1769,9 @@ public class MainActivity extends Activity {
                     body.put("notes", notes.getText().toString());
                     if (editing) {
                         int id = existing.optInt("id");
-                        runApi("Сохраняю", () -> api.patchJson("/api/leases/" + id, body), value -> loadCurrentTab(true));
+                        runApi("Сохраняю", () -> api.patchJson("/api/leases/" + id, body), value -> syncAfterMutation());
                     } else {
-                        runApi("Заселяю", () -> api.postJson("/api/leases/onboard", body), value -> loadCurrentTab(true));
+                        runApi("Заселяю", () -> api.postJson("/api/leases/onboard", body), value -> syncAfterMutation());
                     }
                 } catch (Exception ex) {
                     toast(ex.getMessage());
@@ -1776,7 +1789,7 @@ public class MainActivity extends Activity {
         }
         if (showSection("payments_actions")) {
             LinearLayout actions = row();
-            actions.addView(smallButton("Сгенерировать", v -> runApi("Генерирую", () -> api.postJson("/api/rent-charges/generate", new JSONObject()), value -> loadCurrentTab(true))), new LinearLayout.LayoutParams(0, dp(44), 1));
+            actions.addView(smallButton("Сгенерировать", v -> runApi("Генерирую", () -> api.postJson("/api/rent-charges/generate", new JSONObject()), value -> syncAfterMutation())), new LinearLayout.LayoutParams(0, dp(44), 1));
             actions.addView(smallButton("Ручная оплата", v -> showManualPaymentDialog()), new LinearLayout.LayoutParams(0, dp(44), 1));
             content.addView(actions);
         }
@@ -1842,7 +1855,7 @@ public class MainActivity extends Activity {
                     body.put("amount", number(amount));
                     body.put("paid_at", paidAt.getText().toString());
                     body.put("notes", notes.getText().toString());
-                    runApi("Добавляю оплату", () -> api.postJson("/api/payment-receipts/manual", body), value -> loadCurrentTab(true));
+                    runApi("Добавляю оплату", () -> api.postJson("/api/payment-receipts/manual", body), value -> syncAfterMutation());
                 } catch (Exception ex) {
                     toast(ex.getMessage());
                 }
@@ -2125,7 +2138,7 @@ public class MainActivity extends Activity {
                     body.put("telegram_owner_chat_id", ownerChat.getText().toString());
                     body.put("notification_cutoff_date", cutoff.getText().toString());
                     body.put("notifications_enabled", enabled.isChecked());
-                    runApi("Сохраняю настройки", () -> api.postJson("/api/settings", body), value -> loadCurrentTab(true));
+                    runApi("Сохраняю настройки", () -> api.postJson("/api/settings", body), value -> syncAfterMutation());
                 } catch (Exception ex) {
                     toast(ex.getMessage());
                 }
@@ -2173,7 +2186,7 @@ public class MainActivity extends Activity {
                     body.put("period_start", start.getText().toString());
                     body.put("period_end", end.getText().toString());
                     body.put("allow_estimate", estimate.isChecked());
-                    runApi("Считаю", () -> api.postJson("/api/utility-bills/calculate", body), value -> loadCurrentTab(true));
+                    runApi("Считаю", () -> api.postJson("/api/utility-bills/calculate", body), value -> syncAfterMutation());
                 } catch (Exception ex) {
                     toast(ex.getMessage());
                 }
@@ -2203,7 +2216,7 @@ public class MainActivity extends Activity {
                     body.put("reading_date", date.getText().toString());
                     body.put("value", number(value));
                     body.put("note", note.getText().toString());
-                    runApi("Сохраняю", () -> api.postJson("/api/meter-readings", body), done -> loadCurrentTab(true));
+                    runApi("Сохраняю", () -> api.postJson("/api/meter-readings", body), done -> syncAfterMutation());
                 } catch (Exception ex) {
                     toast(ex.getMessage());
                 }
@@ -2233,7 +2246,7 @@ public class MainActivity extends Activity {
                     body.put("starts_on", starts.getText().toString());
                     body.put("name", name.getText().toString());
                     body.put("tiers", tiers.getText().toString());
-                    runApi("Добавляю", () -> api.postJson("/api/tariffs", body), done -> loadCurrentTab(true));
+                    runApi("Добавляю", () -> api.postJson("/api/tariffs", body), done -> syncAfterMutation());
                 } catch (Exception ex) {
                     toast(ex.getMessage());
                 }
@@ -2273,7 +2286,7 @@ public class MainActivity extends Activity {
                     body.put("source_funds", spinnerValue(source));
                     body.put("payment_method", method.getText().toString());
                     body.put("description", description.getText().toString());
-                    runApi("Добавляю расход", () -> api.postJson("/api/expenses", body), done -> loadCurrentTab(true));
+                    runApi("Добавляю расход", () -> api.postJson("/api/expenses", body), done -> syncAfterMutation());
                 } catch (Exception ex) {
                     toast(ex.getMessage());
                 }
@@ -2290,7 +2303,7 @@ public class MainActivity extends Activity {
             body.put("channel", channel);
             body.put("source", "manual");
             return body;
-        }, body -> runApi("Отмечаю оплату", () -> api.postJson("/api/rent-charges/" + charge.optInt("id") + "/payments", (JSONObject) body), done -> loadCurrentTab(true)));
+        }, body -> runApi("Отмечаю оплату", () -> api.postJson("/api/rent-charges/" + charge.optInt("id") + "/payments", (JSONObject) body), done -> syncAfterMutation()));
     }
 
     private void deferRent(JSONObject charge) {
@@ -2299,23 +2312,23 @@ public class MainActivity extends Activity {
             body.put("deferral_days", (int) value);
             body.put("deferral_note", "из Android");
             return body;
-        }, body -> runApi("Сохраняю отсрочку", () -> api.postJson("/api/rent-charges/" + charge.optInt("id") + "/defer", (JSONObject) body), done -> loadCurrentTab(true)));
+        }, body -> runApi("Сохраняю отсрочку", () -> api.postJson("/api/rent-charges/" + charge.optInt("id") + "/defer", (JSONObject) body), done -> syncAfterMutation()));
     }
 
     private void issueBill(JSONObject bill) {
-        confirm("Выставить счёт жильцам?", () -> runApi("Выставляю", () -> api.postJson("/api/utility-bills/" + bill.optInt("id") + "/issue", new JSONObject()), done -> loadCurrentTab(true)));
+        confirm("Выставить счёт жильцам?", () -> runApi("Выставляю", () -> api.postJson("/api/utility-bills/" + bill.optInt("id") + "/issue", new JSONObject()), done -> syncAfterMutation()));
     }
 
     private void providerPaid(JSONObject bill) {
-        runApi("Отмечаю оплату поставщику", () -> api.postJson("/api/utility-bills/" + bill.optInt("id") + "/provider-paid", new JSONObject()), done -> loadCurrentTab(true));
+        runApi("Отмечаю оплату поставщику", () -> api.postJson("/api/utility-bills/" + bill.optInt("id") + "/provider-paid", new JSONObject()), done -> syncAfterMutation());
     }
 
     private void deleteBill(JSONObject bill) {
-        confirm("Удалить черновик коммуналки?", () -> runApi("Удаляю", () -> api.deleteJson("/api/utility-bills/" + bill.optInt("id")), done -> loadCurrentTab(true)));
+        confirm("Удалить черновик коммуналки?", () -> runApi("Удаляю", () -> api.deleteJson("/api/utility-bills/" + bill.optInt("id")), done -> syncAfterMutation()));
     }
 
     private void compensateExpense(JSONObject expense) {
-        runApi("Компенсирую", () -> api.postJson("/api/expenses/" + expense.optInt("id") + "/compensate", new JSONObject()), done -> loadCurrentTab(true));
+        runApi("Компенсирую", () -> api.postJson("/api/expenses/" + expense.optInt("id") + "/compensate", new JSONObject()), done -> syncAfterMutation());
     }
 
     private void toggleLeaseIgnore(JSONObject lease) {
@@ -2324,7 +2337,7 @@ public class MainActivity extends Activity {
             body.put("ignored", !lease.optBoolean("ignored"));
         } catch (Exception ignored) {
         }
-        runApi("Сохраняю", () -> api.patchJson("/api/leases/" + lease.optInt("id") + "/ignore", body), done -> loadCurrentTab(true));
+        runApi("Сохраняю", () -> api.patchJson("/api/leases/" + lease.optInt("id") + "/ignore", body), done -> syncAfterMutation());
     }
 
     private void moveOut(JSONObject lease) {
@@ -2332,7 +2345,7 @@ public class MainActivity extends Activity {
             try {
                 JSONObject body = new JSONObject();
                 body.put("end_date", value);
-                runApi("Оформляю выезд", () -> api.postJson("/api/leases/" + lease.optInt("id") + "/move-out", body), done -> loadCurrentTab(true));
+                runApi("Оформляю выезд", () -> api.postJson("/api/leases/" + lease.optInt("id") + "/move-out", body), done -> syncAfterMutation());
             } catch (Exception ex) {
                 toast(ex.getMessage());
             }
@@ -2345,7 +2358,7 @@ public class MainActivity extends Activity {
             body.put("active", !apartment.optBoolean("active", true));
         } catch (Exception ignored) {
         }
-        runApi("Сохраняю квартиру", () -> api.patchJson("/api/apartments/" + apartment.optInt("id"), body), done -> loadCurrentTab(true));
+        runApi("Сохраняю квартиру", () -> api.patchJson("/api/apartments/" + apartment.optInt("id"), body), done -> syncAfterMutation());
     }
 
     private void moderateReceipt(JSONObject receipt, String action) {
@@ -2354,11 +2367,11 @@ public class MainActivity extends Activity {
             body.put("action", action);
         } catch (Exception ignored) {
         }
-        runApi("Проверяю чек", () -> api.postJson("/api/payment-receipts/" + receipt.optInt("id") + "/moderate", body), done -> loadCurrentTab(true));
+        runApi("Проверяю чек", () -> api.postJson("/api/payment-receipts/" + receipt.optInt("id") + "/moderate", body), done -> syncAfterMutation());
     }
 
     private void ignoreReceipt(JSONObject receipt) {
-        runApi("Скрываю чек", () -> api.postJson("/api/payment-receipts/" + receipt.optInt("id") + "/ignore", new JSONObject()), done -> loadCurrentTab(true));
+        runApi("Скрываю чек", () -> api.postJson("/api/payment-receipts/" + receipt.optInt("id") + "/ignore", new JSONObject()), done -> syncAfterMutation());
     }
 
     private void logout() {

@@ -140,7 +140,7 @@ from rental_manager.services.telegram_bot import (
 )
 
 
-APP_BUILD_MARKER = "performance-monitoring-section-load-2026-06-26"
+APP_BUILD_MARKER = "silent-mutation-sync-2026-07-04"
 
 
 app = FastAPI(title="Rental Manager", version="0.1.0")
