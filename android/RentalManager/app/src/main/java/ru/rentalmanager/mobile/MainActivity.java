@@ -383,24 +383,39 @@ public class MainActivity extends Activity {
         }, value -> renderCurrentTab());
     }
 
+    private void renderLoadedSnapshot(String status) {
+        runOnUiThread(() -> {
+            setConnectionStatus(true, status);
+            if (bootstrapLoadedAt > 0) renderCurrentTab();
+        });
+    }
+
     private void loadAppState() throws Exception {
         updateLoadingCard("Собираю дашборд", "Проверяю PIN, настройки и основные карточки.");
         applyAppState(api.getJson("/api/app-state?sections=bootstrap"));
+        bootstrapLoadedAt = System.currentTimeMillis();
+        renderLoadedSnapshot("дашборд загружен");
+
         updateLoadingCard("Готовлю вкладки", "Объекты, жильцы, счётчики и услуги.");
         applyAppState(api.getJson("/api/app-state?sections=registry"));
+        bootstrapLoadedAt = System.currentTimeMillis();
+        renderLoadedSnapshot("справочник догружен");
+
         updateLoadingCard("Подтягиваю расчёты", "Аренда, коммуналка, расходы и тарифы.");
         applyAppState(api.getJson("/api/app-state?sections=rent_charges,utility_bills,expenses,tariffs"));
+        long financialLoadedAt = System.currentTimeMillis();
+        paymentsLoadedAt = financialLoadedAt;
+        servicesLoadedAt = financialLoadedAt;
+        renderLoadedSnapshot("расчёты догружены");
+
         updateLoadingCard("Догружаю тяжёлые хвосты", "Таймлайн, рассылки и подозрительные чеки.");
         try {
             applyAppState(api.getJson("/api/app-state?sections=utility_timeline,message_targets,suspicious_receipts"));
+            moreLoadedAt = System.currentTimeMillis();
+            renderLoadedSnapshot("данные загружены");
         } catch (Exception ex) {
             runOnUiThread(() -> toast("Часть данных не загрузилась: " + (ex.getMessage() == null ? "ошибка" : ex.getMessage())));
         }
-        long now = System.currentTimeMillis();
-        bootstrapLoadedAt = now;
-        paymentsLoadedAt = now;
-        servicesLoadedAt = now;
-        moreLoadedAt = now;
     }
 
     private void syncAfterMutation() {
