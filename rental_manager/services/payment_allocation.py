@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from rental_manager.models import Lease, PaymentReceipt, RentCharge, UtilityBillLine
+from rental_manager.models import Lease, PaymentReceipt, RentCharge, UtilityAdvanceLedger, UtilityBillLine
 from rental_manager.services.billing import RENT_GENERATION_START, generate_rent_charges, money, update_rent_charge_status, update_utility_line_status
 
 EPS = 0.009
@@ -41,6 +41,20 @@ def recalculate_lease_balances(session: Session, lease_id: int) -> None:
                 charge.ip_paid = money(charge.ip_paid + float(receipt.amount or 0))
             else:
                 charge.personal_paid = money(charge.personal_paid + float(receipt.amount or 0))
+
+    advance_applications = session.scalars(
+        select(UtilityAdvanceLedger)
+        .where(
+            UtilityAdvanceLedger.lease_id == lease_id,
+            UtilityAdvanceLedger.utility_line_id.is_not(None),
+            UtilityAdvanceLedger.amount < 0,
+        )
+        .order_by(UtilityAdvanceLedger.created_at, UtilityAdvanceLedger.id)
+    ).all()
+    for entry in advance_applications:
+        if entry.utility_line_id and entry.utility_line_id in line_map:
+            line = line_map[entry.utility_line_id]
+            line.paid_amount = money(line.paid_amount + abs(float(entry.amount or 0)))
 
     for charge in charges:
         update_rent_charge_status(charge)
@@ -314,7 +328,7 @@ def create_utility_receipts(
             utility_line_id=line.id,
             apartment_id=lease.apartment_id,
             amount=portion,
-            channel="utilities",
+            channel="utility_advance" if (getattr(line, "line_type", "") or "usage") == "advance" else "utilities",
             paid_at=paid_at,
             source=source,
             status=status,

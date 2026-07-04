@@ -642,6 +642,8 @@ def resident_due_date(service: UtilityService, today: date | None = None) -> dat
 
 def update_utility_line_status(line: UtilityBillLine, today: date | None = None) -> str:
     today = today or date.today()
+    if line.status == "cancelled":
+        return line.status
     if line.paid_amount + 0.009 >= line.total_amount:
         line.status = "paid_ahead" if line.paid_amount > line.total_amount + 0.009 else "paid"
     elif line.paid_amount > 0:

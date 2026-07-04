@@ -76,6 +76,7 @@ const statusText = {
   moderated: "модерировано",
   rejected: "отклонён",
   ignored: "скрыт",
+  cancelled: "отменено",
 };
 
 const money = (value) => new Intl.NumberFormat("ru-RU", { style: "currency", currency: "RUB", maximumFractionDigits: 2 }).format(value || 0);
@@ -344,6 +345,45 @@ function utilityReadingDates(serviceId) {
     .filter((event) => event.kind === "reading" && Number(event.service_id) === Number(serviceId))
     .map((event) => event.date);
   return [...new Set(dates)].sort();
+}
+
+function utilityTargetServices(targetValue) {
+  const value = String(targetValue || "");
+  if (value.startsWith("object:")) {
+    const objectId = Number(value.slice("object:".length));
+    return state.bootstrap.services.filter((service) => Number(service.object_id) === objectId);
+  }
+  const serviceId = Number(value.replace("service:", ""));
+  return state.bootstrap.services.filter((service) => Number(service.id) === serviceId);
+}
+
+function utilityReadingDatesForTarget(targetValue) {
+  const services = utilityTargetServices(targetValue);
+  if (!services.length) return [];
+  const dateSets = services.map((service) => new Set(utilityReadingDates(service.id)));
+  const [firstSet, ...restSets] = dateSets;
+  return [...firstSet].filter((value) => restSets.every((set) => set.has(value))).sort();
+}
+
+function hydrateUtilityTargetSelect() {
+  const select = qs("#utilityServiceSelect");
+  if (!select) return;
+  const previous = select.value;
+  const options = [];
+  state.bootstrap.objects.forEach((object) => {
+    const services = state.bootstrap.services.filter((service) => Number(service.object_id) === Number(object.id));
+    if (services.length > 1) {
+      options.push({ value: `object:${object.id}`, label: `${object.name}: общий` });
+    }
+    services.forEach((service) => {
+      options.push({ value: `service:${service.id}`, label: `${service.object}: ${service.name}` });
+    });
+  });
+  select.innerHTML = "";
+  options.forEach((item) => select.append(new Option(item.label, item.value)));
+  if (options.some((item) => item.value === previous)) {
+    select.value = previous;
+  }
 }
 
 function editingLease() {
@@ -823,6 +863,7 @@ function hydrateForms() {
   qsa('select[name="object_id"]').forEach((select) => setOptions(select, state.bootstrap.objects, (o) => o.name, true));
   qsa('select[name="meter_id"]').forEach((select) => setOptions(select, state.bootstrap.meters, (m) => `${m.object}: ${m.name}`));
   qsa('select[name="service_id"]').forEach((select) => setOptions(select, services, (s) => `${s.object}: ${s.name}`));
+  hydrateUtilityTargetSelect();
   qsa('select[name="lease_id"]').forEach((select) => setOptions(select, activeLeases, (lease) => `${lease.object}: ${lease.apartment} — ${lease.tenant}`));
   const rangeInputIds = new Set(["rentStart", "rentEnd", "reportStart", "reportEnd"]);
   const dateInputs = qsa('input[type="date"]');
@@ -1835,10 +1876,27 @@ function renderApartmentRegistry() {
         <td>${apartment.name}</td>
         <td>${apartment.active_tenant || '<span class="muted">нет жильца</span>'}</td>
         <td>${apartment.odn_share_percent}</td>
+        <td>${apartment.utility_advance_override == null ? '<span class="muted">авто</span>' : money(apartment.utility_advance_override)}</td>
         <td><label class="checkbox-inline"><input type="checkbox" ${apartment.active ? "checked" : ""} onchange="toggleApartmentActive(${apartment.id}, this.checked)" /> учитывать</label></td>
+        <td><button class="mini" onclick="editUtilityAdvanceOverride(${apartment.id})">...</button></td>
       </tr>
     `).join("");
-  qs("#apartmentRegistry").innerHTML = table(["Объект", "Квартира", "Текущий жилец", "ОДН %", "Контроль"], rows);
+  qs("#apartmentRegistry").innerHTML = table(["Объект", "Квартира", "Текущий жилец", "ОДН %", "Аванс", "Контроль", ""], rows);
+}
+
+async function editUtilityAdvanceOverride(apartmentId) {
+  const apartment = allApartments().find((item) => Number(item.id) === Number(apartmentId));
+  if (!apartment) return;
+  const current = apartment.utility_advance_override == null ? "" : String(apartment.utility_advance_override);
+  const value = prompt("Фиксированный аванс коммуналки. Пусто = авторасчёт", current);
+  if (value === null) return;
+  const payload = { amount_override: value.trim() };
+  await api(`/api/apartments/${apartmentId}/utility-advance`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+  toast(value.trim() ? "Аванс зафиксирован вручную" : "Аванс вернулся в авторасчёт");
+  await loadAll();
 }
 
 function startLeaseEdit(leaseId) {
@@ -2288,6 +2346,12 @@ function utilityActions(line) {
   return `${left > 0 ? `<button class="mini primary" onclick="payUtility(${line.id}, ${left})">Оплачено</button>` : ""}`;
 }
 
+function isActiveUtilityBill(bill) {
+  return bill.status === "draft"
+    || !bill.provider_paid
+    || (bill.lines || []).some((line) => Number(line.debt ?? Math.max(0, line.total_amount - line.paid_amount)) > 0 && ["issued", "partial", "overdue"].includes(line.status));
+}
+
 function contactButtons(lease) {
   const buttons = [];
   if (lease.phone) buttons.push(`<a class="button mini contact-call" href="tel:${lease.phone}">Звонок</a>`);
@@ -2351,8 +2415,8 @@ function updateUtilityPeriodControls() {
   if (!startInput || !endInput || !startSelect || !endSelect) return;
 
   const allowEstimate = Boolean(form.elements.allow_estimate.checked);
-  const serviceId = form.elements.service_id.value;
-  const dates = serviceId ? utilityReadingDates(serviceId) : [];
+  const targetValue = form.elements.service_id.value;
+  const dates = targetValue ? utilityReadingDatesForTarget(targetValue) : [];
   const currentStart = startSelect.value || startInput.value;
   const currentEnd = endSelect.value || endInput.value;
 
@@ -2431,46 +2495,6 @@ function renderUtilities() {
   renderQuickReadingFields();
   renderUtilityTimeline();
   updateUtilityPeriodControls();
-  const bills = state.utilityBills.map((bill) => {
-    const lines = bill.lines.map((line) => `
-      <tr>
-        <td>${line.apartment}</td>
-        <td><strong>${line.tenant || "без жильца"}</strong>${line.period_label ? `<br><span class="muted">${line.period_label}</span>` : ""}</td>
-        <td>${line.personal_consumption}</td>
-        <td>${line.odn_consumption}</td>
-        <td>${money(line.total_amount)}</td>
-        <td>${money(line.paid_amount)}</td>
-        <td>${statusPill(line.status, line.due_date)}</td>
-        <td class="actions">${utilityActions(line)}</td>
-      </tr>
-    `).join("");
-    return `<article class="card">
-      <h3>${bill.object}: ${bill.service}</h3>
-      <p class="muted">${bill.period_label}. По дому: ${money(bill.total_cost)} и ${bill.total_consumption}. Жильцам сейчас: ${money(bill.resident_total_amount)}.</p>
-      <div class="pill-row">
-        ${statusPill(bill.status, bill.due_date)}
-        ${bill.is_forecast ? '<span class="pill warn">прогноз</span>' : ""}
-        ${bill.provider_paid ? '<span class="pill ok">поставщик оплачен</span>' : '<span class="pill warn">поставщик не отмечен</span>'}
-        <span class="pill">личное ${bill.apartment_consumption}</span>
-        <span class="pill">ОДН ${bill.odn_consumption}</span>
-        ${bill.provider_paid_at ? `<span class="pill ok">закрыт ${formatDate(bill.provider_paid_at)}</span>` : ""}
-      </div>
-      <div class="pill-row">
-        ${bill.status === "draft" ? `<button class="mini primary" onclick="issueBill(${bill.id})">Выставить жильцам</button>` : ""}
-        <button class="mini danger-soft" onclick="deleteUtilityBill(${bill.id}, '${bill.status}')">${bill.status === "draft" ? "Удалить черновик" : "Удалить счёт"}</button>
-        ${!bill.provider_paid ? `<button class="mini primary" onclick="providerPaid(${bill.id})">Поставщик оплачен</button>` : ""}
-      </div>
-      <div class="table-wrap">${table(["Квартира", "Жилец / сегмент", "Личный", "ОДН", "Сумма", "Оплачено", "Статус", "Действия"], lines)}</div>
-      ${bill.notes ? `<p class="muted">${bill.notes.replace(/\n/g, "<br>")}</p>` : ""}
-    </article>`;
-  }).join("");
-  qs("#utilityBills").innerHTML = bills || `<div class="card"><p class="muted">Коммунальных счетов пока нет.</p></div>`;
-}
-
-function renderUtilities() {
-  renderQuickReadingFields();
-  renderUtilityTimeline();
-  updateUtilityPeriodControls();
   const previewCard = state.utilityIssuePreview ? `
     <article class="card warn">
       <div class="section-title">
@@ -2502,13 +2526,13 @@ function renderUtilities() {
       </div>
     </article>
   ` : "";
-  const bills = state.utilityBills.map((bill) => {
+  const renderBillCard = (bill) => {
     const lines = bill.lines.map((line) => `
       <tr>
         <td>${line.apartment}</td>
         <td><strong>${line.tenant || "без жильца"}</strong>${line.period_label ? `<br><span class="muted">${line.period_label}</span>` : ""}</td>
-        <td>${line.personal_consumption}</td>
-        <td>${line.odn_consumption}</td>
+        <td>${line.line_type === "advance" ? "аванс" : line.personal_consumption}</td>
+        <td>${line.line_type === "advance" ? "предоплата" : line.odn_consumption}</td>
         <td>${money(line.total_amount)}</td>
         <td>${money(line.paid_amount)}</td>
         <td>${statusPill(line.status, line.due_date)}</td>
@@ -2521,7 +2545,7 @@ function renderUtilities() {
       <div class="pill-row">
         ${statusPill(bill.status, bill.due_date)}
         ${bill.is_forecast ? '<span class="pill warn">прогноз</span>' : ""}
-        ${bill.provider_paid ? '<span class="pill ok">поставщик оплачен</span>' : '<span class="pill warn">поставщик не отмечен</span>'}
+        ${bill.bill_type === "advance" ? '<span class="pill">без поставщика</span>' : bill.provider_paid ? '<span class="pill ok">поставщик оплачен</span>' : '<span class="pill warn">поставщик не отмечен</span>'}
         <span class="pill">личное ${bill.apartment_consumption}</span>
         <span class="pill">ОДН ${bill.odn_consumption}</span>
         ${bill.provider_paid_at ? `<span class="pill ok">закрыт ${formatDate(bill.provider_paid_at)}</span>` : ""}
@@ -2529,12 +2553,18 @@ function renderUtilities() {
       <div class="pill-row">
         ${bill.status === "draft" ? `<button class="mini primary" onclick="issueBill(${bill.id})">Выставить жильцам</button>` : ""}
         <button class="mini danger-soft" onclick="deleteUtilityBill(${bill.id}, '${bill.status}')">${bill.status === "draft" ? "Удалить черновик" : "Удалить счёт"}</button>
-        ${!bill.provider_paid ? `<button class="mini primary" onclick="providerPaid(${bill.id})">Поставщик оплачен</button>` : ""}
+        ${!bill.provider_paid && bill.bill_type !== "advance" ? `<button class="mini primary" onclick="providerPaid(${bill.id})">Поставщик оплачен</button>` : ""}
       </div>
       <div class="table-wrap">${table(["Квартира", "Жилец / сегмент", "Личное", "ОДН", "Сумма", "Оплачено", "Статус", "Действия"], lines)}</div>
       ${bill.notes ? `<p class="muted">${bill.notes.replace(/\n/g, "<br>")}</p>` : ""}
     </article>`;
-  }).join("");
+  };
+  const activeBills = state.utilityBills.filter(isActiveUtilityBill);
+  const historyBills = state.utilityBills.filter((bill) => !isActiveUtilityBill(bill));
+  const bills = [
+    activeBills.length ? `<div class="section-title"><h3>Активные счета</h3><span>Черновики, долги жильцов и поставщики без отметки оплаты.</span></div>${activeBills.map(renderBillCard).join("")}` : "",
+    historyBills.length ? `<div class="section-title"><h3>История коммуналки</h3><span>Закрытые периоды, чтобы были под рукой, но не под ногами.</span></div>${historyBills.map(renderBillCard).join("")}` : "",
+  ].join("");
   qs("#utilityBills").innerHTML = `${previewCard}${bills || `<div class="card"><p class="muted">Коммунальных счетов пока нет.</p></div>`}`;
 }
 
@@ -3155,7 +3185,7 @@ function openUtilitiesTab() {
 function useTimelineReading(serviceId, edge, dateValue) {
   const form = qs("#utilityCalcForm");
   if (!form) return;
-  form.elements.service_id.value = String(serviceId);
+  form.elements.service_id.value = `service:${serviceId}`;
   updateUtilityPeriodControls();
   if (form.elements.allow_estimate.checked) {
     form.elements[edge === "start" ? "period_start" : "period_end"].value = dateValue;
@@ -3415,8 +3445,19 @@ function bindEvents() {
     event.preventDefault();
     const form = event.currentTarget;
     syncUtilityPeriodInputs();
-    const result = await api("/api/utility-bills/calculate", { method: "POST", body: JSON.stringify(formData(form)) });
-    toast(`Черновик создан: ${money(result.total_cost)}`);
+    const payload = formData(form);
+    const targetValue = String(payload.service_id || "");
+    let result;
+    if (targetValue.startsWith("object:")) {
+      payload.object_id = Number(targetValue.slice("object:".length));
+      delete payload.service_id;
+      result = await api("/api/utility-bills/calculate-object", { method: "POST", body: JSON.stringify(payload) });
+      toast(`Черновики объекта созданы: ${result.created?.length || 0}`);
+    } else {
+      payload.service_id = Number(targetValue.replace("service:", ""));
+      result = await api("/api/utility-bills/calculate", { method: "POST", body: JSON.stringify(payload) });
+      toast(`Черновик создан: ${money(result.total_cost)}`);
+    }
     await loadAll();
   });
   on("#utilityServiceSelect", "change", updateUtilityPeriodControls);

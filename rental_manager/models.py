@@ -39,6 +39,7 @@ class Apartment(Base):
     object: Mapped[RentalObject] = relationship(back_populates="apartments")
     leases: Mapped[list["Lease"]] = relationship(back_populates="apartment")
     meters: Mapped[list["Meter"]] = relationship(back_populates="apartment")
+    utility_advance_setting: Mapped["UtilityAdvanceSetting | None"] = relationship(back_populates="apartment")
 
 
 class Tenant(Base):
@@ -392,6 +393,7 @@ class UtilityBill(Base):
     service_id: Mapped[int] = mapped_column(ForeignKey("utility_services.id"))
     period_start: Mapped[date] = mapped_column(Date)
     period_end: Mapped[date] = mapped_column(Date)
+    bill_type: Mapped[str] = mapped_column(String(40), default="utility")
     status: Mapped[str] = mapped_column(String(40), default="draft")
     total_consumption: Mapped[float] = mapped_column(Float, default=0)
     apartment_consumption: Mapped[float] = mapped_column(Float, default=0)
@@ -416,6 +418,7 @@ class UtilityBillLine(Base):
     bill_id: Mapped[int] = mapped_column(ForeignKey("utility_bills.id"))
     apartment_id: Mapped[int] = mapped_column(ForeignKey("apartments.id"))
     lease_id: Mapped[int | None] = mapped_column(ForeignKey("leases.id"), nullable=True)
+    line_type: Mapped[str] = mapped_column(String(40), default="usage")
     personal_consumption: Mapped[float] = mapped_column(Float, default=0)
     odn_consumption: Mapped[float] = mapped_column(Float, default=0)
     total_amount: Mapped[float] = mapped_column(Float, default=0)
@@ -424,10 +427,60 @@ class UtilityBillLine(Base):
     issued_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     note: Mapped[str] = mapped_column(Text, default="")
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
 
     bill: Mapped[UtilityBill] = relationship(back_populates="lines")
     apartment: Mapped[Apartment] = relationship()
     lease: Mapped[Lease | None] = relationship()
+
+
+class UtilityAdvanceSetting(Base):
+    __tablename__ = "utility_advance_settings"
+    __table_args__ = (UniqueConstraint("apartment_id", name="uq_utility_advance_setting_apartment"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    apartment_id: Mapped[int] = mapped_column(ForeignKey("apartments.id"))
+    amount_override: Mapped[float | None] = mapped_column(Float, nullable=True)
+    note: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
+
+    apartment: Mapped[Apartment] = relationship(back_populates="utility_advance_setting")
+
+
+class UtilityAdvanceLedger(Base):
+    __tablename__ = "utility_advance_ledger"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    apartment_id: Mapped[int] = mapped_column(ForeignKey("apartments.id"))
+    lease_id: Mapped[int | None] = mapped_column(ForeignKey("leases.id"), nullable=True)
+    utility_line_id: Mapped[int | None] = mapped_column(ForeignKey("utility_bill_lines.id"), nullable=True)
+    payment_receipt_id: Mapped[int | None] = mapped_column(ForeignKey("payment_receipts.id"), nullable=True)
+    period_start: Mapped[date | None] = mapped_column(Date, nullable=True)
+    period_end: Mapped[date | None] = mapped_column(Date, nullable=True)
+    amount: Mapped[float] = mapped_column(Float, default=0)
+    kind: Mapped[str] = mapped_column(String(40), default="adjustment")
+    note: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+    apartment: Mapped[Apartment] = relationship()
+    lease: Mapped[Lease | None] = relationship()
+    utility_line: Mapped[UtilityBillLine | None] = relationship()
+    payment_receipt: Mapped[PaymentReceipt | None] = relationship()
+
+
+class UtilityAdvanceSettingHistory(Base):
+    __tablename__ = "utility_advance_setting_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    apartment_id: Mapped[int] = mapped_column(ForeignKey("apartments.id"))
+    old_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    new_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    actor: Mapped[str] = mapped_column(String(40), default="owner")
+    note: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+    apartment: Mapped[Apartment] = relationship()
 
 
 class ManualDebt(Base):

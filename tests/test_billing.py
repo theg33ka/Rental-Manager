@@ -4,7 +4,7 @@ import asyncio
 import json
 import tempfile
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
@@ -15,7 +15,7 @@ from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import sessionmaker
 
 from rental_manager.database import Base
-from rental_manager.main import apartment_month_state, build_all_debts_breakdown, build_dashboard, create_manual_payment, create_move_out_utility_lines, delete_utility_bill, expense_period_summary, issue_utility_bill, month_dashboard_summary, move_out, owner_charge_status_label, owner_expected_ip_for_charge, panel_role_for_pin, process_move_out_notifications, provider_reading_statuses_for_month, render_message_text, rent_report, resolve_broadcast_recipients, transfer_lease, update_payment_receipt, utility_bill_for_month
+from rental_manager.main import apartment_month_state, build_all_debts_breakdown, build_dashboard, create_manual_payment, create_move_out_utility_lines, delete_utility_bill, ensure_utility_advance_drafts_for_bills, expense_period_summary, issue_utility_bill, month_dashboard_summary, move_out, owner_charge_status_label, owner_expected_ip_for_charge, panel_role_for_pin, preview_issue_utility_bill, process_move_out_notifications, provider_reading_statuses_for_month, render_message_text, rent_report, resolve_broadcast_recipients, transfer_lease, update_payment_receipt, utility_bill_for_month
 from rental_manager.main import apply_database_import_payload, current_database_snapshot, inspect_database_import_payload, parse_database_import_bytes
 from rental_manager.main import api_performance, app_state, record_perf_request
 from rental_manager.models import AppSetting, Apartment, Expense, Lease, MessageLog, Meter, MeterReading, PaymentReceipt, RentalObject, RentCharge, Tenant, UtilityBill, UtilityBillLine, UtilityService, Tariff
@@ -1516,6 +1516,101 @@ class UtilityAdvanceTests(DatabaseTestCase):
         self.assertEqual(summary["advance_paid"], 500)
         self.assertEqual(summary["advance_due"], 1000)
         self.assertEqual(summary["occupied"], 1)
+
+
+    def test_auto_advance_draft_uses_apartment_history_and_current_bill(self) -> None:
+        with self.Session() as session:
+            lease, bill, _line = self._seed_bill(session, total_amount=1000)
+            historical_bill = UtilityBill(
+                service=bill.service,
+                period_start=date(2025, 6, 30),
+                period_end=date(2025, 7, 30),
+                status="issued",
+                total_consumption=90,
+                apartment_consumption=90,
+                odn_consumption=0,
+                total_cost=900,
+                average_unit_price=10,
+            )
+            historical_bill.lines.append(
+                UtilityBillLine(
+                    apartment=lease.apartment,
+                    lease=lease,
+                    personal_consumption=90,
+                    odn_consumption=0,
+                    total_amount=900,
+                    paid_amount=900,
+                    status="paid",
+                )
+            )
+            session.add(historical_bill)
+            session.flush()
+
+            advance_bills = ensure_utility_advance_drafts_for_bills(session, [bill])
+            session.flush()
+
+            self.assertEqual(len(advance_bills), 1)
+            advance_line = advance_bills[0].lines[0]
+            self.assertEqual(advance_bills[0].bill_type, "advance")
+            self.assertEqual(advance_line.line_type, "advance")
+            self.assertAlmostEqual(advance_line.total_amount, 917.5)
+            self.assertIn("Аванс коммуналки", advance_line.note)
+
+    def test_auto_advance_is_skipped_for_last_month_before_move_out(self) -> None:
+        with self.Session() as session:
+            lease, bill, _line = self._seed_bill(session, total_amount=1000)
+            lease.end_date = bill.period_end + timedelta(days=10)
+            session.flush()
+
+            advance_bills = ensure_utility_advance_drafts_for_bills(session, [bill])
+
+            self.assertEqual(advance_bills, [])
+
+    def test_issue_preview_groups_object_drafts_and_advance(self) -> None:
+        with self.Session() as session:
+            lease, bill, _line = self._seed_bill(session, total_amount=1000)
+            water = UtilityService(
+                object=lease.apartment.object,
+                kind="water",
+                name="Вода",
+                provider_due_day=24,
+                resident_due_days=7,
+                active=True,
+            )
+            water_bill = UtilityBill(
+                service=water,
+                period_start=bill.period_start,
+                period_end=bill.period_end,
+                status="draft",
+                total_consumption=50,
+                apartment_consumption=50,
+                odn_consumption=0,
+                total_cost=500,
+                average_unit_price=10,
+            )
+            water_bill.lines.append(
+                UtilityBillLine(
+                    apartment=lease.apartment,
+                    lease=lease,
+                    personal_consumption=50,
+                    odn_consumption=0,
+                    total_amount=500,
+                    paid_amount=0,
+                    status="draft",
+                )
+            )
+            session.add(water_bill)
+            session.flush()
+            advance_bills = ensure_utility_advance_drafts_for_bills(session, [bill, water_bill])
+            session.flush()
+
+            preview = preview_issue_utility_bill(bill.id, session=session)
+
+            self.assertEqual(set(preview["bill_ids"]), {bill.id, water_bill.id, advance_bills[0].id})
+            self.assertEqual(len(preview["targets"]), 1)
+            self.assertIn("электричество", preview["targets"][0]["text"].lower())
+            self.assertIn("вода", preview["targets"][0]["text"].lower())
+            self.assertIn("аванс коммуналки", preview["targets"][0]["text"].lower())
 
 
 
