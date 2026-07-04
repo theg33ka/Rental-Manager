@@ -2358,6 +2358,154 @@ function isActiveUtilityBill(bill) {
     || (bill.lines || []).some((line) => Number(line.debt ?? Math.max(0, line.total_amount - line.paid_amount)) > 0 && ["issued", "partial", "overdue"].includes(line.status));
 }
 
+function draftUtilityBasePeriod(bill) {
+  if (bill.bill_type !== "advance") {
+    return { start: bill.period_start, end: bill.period_end, keyEnd: bill.period_end };
+  }
+  return { start: "", end: bill.period_start, keyEnd: bill.period_start };
+}
+
+function utilityDraftGroupKey(bill) {
+  const period = draftUtilityBasePeriod(bill);
+  return `draft:${bill.object}:${period.keyEnd}`;
+}
+
+function utilityDraftGroups(bills) {
+  const groups = new Map();
+  bills.filter((bill) => bill.status === "draft").forEach((bill) => {
+    const key = utilityDraftGroupKey(bill);
+    if (!groups.has(key)) {
+      const period = draftUtilityBasePeriod(bill);
+      groups.set(key, {
+        kind: "draft_group",
+        key,
+        object: bill.object,
+        period_start: period.start || bill.period_start,
+        period_end: period.end || bill.period_end,
+        bills: [],
+      });
+    }
+    if (bill.bill_type !== "advance") {
+      groups.get(key).period_start = bill.period_start;
+      groups.get(key).period_end = bill.period_end;
+    }
+    groups.get(key).bills.push(bill);
+  });
+  return [...groups.values()].map((group) => ({
+    ...group,
+    bills: group.bills.sort((left, right) =>
+      Number(left.bill_type === "advance") - Number(right.bill_type === "advance")
+      || String(left.service).localeCompare(String(right.service), "ru")
+      || Number(left.id) - Number(right.id)
+    ),
+  }));
+}
+
+function groupedDraftBillIds(group) {
+  return group.bills.map((bill) => bill.id);
+}
+
+function groupedDraftPrimaryBillId(group) {
+  const usage = group.bills.find((bill) => bill.bill_type !== "advance");
+  return (usage || group.bills[0])?.id;
+}
+
+function groupedDraftServiceLabel(group) {
+  const services = group.bills
+    .filter((bill) => bill.bill_type !== "advance")
+    .map((bill) => bill.service);
+  if (!services.length) return "аванс коммуналки";
+  if (services.length === 1) return services[0];
+  return "общий";
+}
+
+function groupedDraftProviderOpen(group) {
+  return group.bills.some((bill) => bill.bill_type !== "advance" && !bill.provider_paid);
+}
+
+function groupedDraftRows(group) {
+  const rows = new Map();
+  group.bills.forEach((bill) => {
+    (bill.lines || []).forEach((line) => {
+      const row = rows.get(line.apartment_id) || {
+        apartment_id: line.apartment_id,
+        apartment: line.apartment,
+        tenant: line.tenant || "без жильца",
+        fact: 0,
+        paid: 0,
+        advanceBalance: 0,
+        advanceCharge: 0,
+        statuses: new Set(),
+      };
+      row.statuses.add(line.status);
+      if (line.line_type === "advance") {
+        row.advanceBalance = Math.max(row.advanceBalance, Number(line.advance_balance_before || line.advance_balance_available || 0));
+        row.advanceCharge += Number(line.total_amount || 0);
+        row.paid += Number(line.paid_amount || 0);
+      } else {
+        row.fact += Number(line.total_amount || 0);
+        row.paid += Number(line.paid_amount || 0);
+        row.advanceBalance = Math.max(row.advanceBalance, Number(line.advance_balance_available || 0));
+      }
+      rows.set(line.apartment_id, row);
+    });
+  });
+  return [...rows.values()]
+    .map((row) => {
+      const advanceImpact = -Math.min(Math.max(row.advanceBalance, 0), Math.max(row.fact, 0));
+      const total = Math.max(0, row.fact + advanceImpact) + row.advanceCharge;
+      return {
+        ...row,
+        advanceImpact,
+        total,
+        status: row.statuses.has("overdue") ? "overdue" : row.statuses.has("partial") ? "partial" : row.statuses.has("issued") ? "issued" : "draft",
+      };
+    })
+    .sort((left, right) => compareApartmentRefs(left, right));
+}
+
+function renderGroupedDraftCard(group) {
+  const groupedRows = groupedDraftRows(group);
+  const rows = groupedRows.map((row) => `
+    <tr>
+      <td>${escapeHtml(row.apartment)}</td>
+      <td><strong>${escapeHtml(row.tenant)}</strong></td>
+      <td>${money(row.fact)}</td>
+      <td>${row.advanceImpact ? money(row.advanceImpact) : '<span class="muted">0 ₽</span>'}</td>
+      <td>${money(row.advanceCharge)}</td>
+      <td>${money(row.total)}</td>
+      <td>${money(row.paid)}</td>
+      <td>${statusPill(row.status)}</td>
+    </tr>
+  `).join("");
+  const services = group.bills
+    .filter((bill) => bill.bill_type !== "advance")
+    .map((bill) => bill.service)
+    .join(", ");
+  const advanceBill = group.bills.find((bill) => bill.bill_type === "advance");
+  const totalFact = groupedRows.reduce((sum, row) => sum + row.fact, 0);
+  const totalAdvanceImpact = groupedRows.reduce((sum, row) => sum + row.advanceImpact, 0);
+  const totalAdvanceCharge = groupedRows.reduce((sum, row) => sum + row.advanceCharge, 0);
+  const total = groupedRows.reduce((sum, row) => sum + row.total, 0);
+  return `<article class="card">
+    <h3>${escapeHtml(group.object)}: ${escapeHtml(groupedDraftServiceLabel(group))}</h3>
+    <p class="muted">${formatDate(group.period_start)} → ${formatDate(group.period_end)}. ${services ? `Услуги: ${escapeHtml(services)}.` : ""} ${advanceBill ? "Аванс включён в этот черновик." : ""}</p>
+    <div class="pill-row">
+      ${statusPill("draft")}
+      ${groupedDraftProviderOpen(group) ? '<span class="pill warn">поставщик не отмечен</span>' : '<span class="pill ok">поставщик закрыт</span>'}
+      <span class="pill">факт ${money(totalFact)}</span>
+      <span class="pill">аванс ${money(totalAdvanceImpact)}</span>
+      <span class="pill">новый аванс ${money(totalAdvanceCharge)}</span>
+      <span class="pill">итого ${money(total)}</span>
+    </div>
+    <div class="pill-row">
+      <button class="mini primary" onclick="issueBill(${groupedDraftPrimaryBillId(group)})">Выставить жильцам</button>
+      <button class="mini danger-soft" onclick="deleteUtilityGroup('${groupedDraftBillIds(group).join(",")}')">Удалить черновик</button>
+    </div>
+    <div class="table-wrap">${table(["Квартира", "Жилец", "Факт", "Аванс", "Аванс к начислению", "Итого", "Оплачено", "Статус"], rows)}</div>
+  </article>`;
+}
+
 function contactButtons(lease) {
   const buttons = [];
   if (lease.phone) buttons.push(`<a class="button mini contact-call" href="tel:${lease.phone}">Звонок</a>`);
@@ -2565,10 +2713,14 @@ function renderUtilities() {
       ${bill.notes ? `<p class="muted">${bill.notes.replace(/\n/g, "<br>")}</p>` : ""}
     </article>`;
   };
-  const activeBills = state.utilityBills.filter(isActiveUtilityBill);
+  const draftGroups = utilityDraftGroups(state.utilityBills);
+  const activeBills = [
+    ...draftGroups,
+    ...state.utilityBills.filter((bill) => bill.status !== "draft" && isActiveUtilityBill(bill)),
+  ];
   const historyBills = state.utilityBills.filter((bill) => !isActiveUtilityBill(bill));
   const bills = [
-    activeBills.length ? `<div class="section-title"><h3>Активные счета</h3><span>Черновики, долги жильцов и поставщики без отметки оплаты.</span></div>${activeBills.map(renderBillCard).join("")}` : "",
+    activeBills.length ? `<div class="section-title"><h3>Активные счета</h3><span>Черновики, долги жильцов и поставщики без отметки оплаты.</span></div>${activeBills.map((item) => item.kind === "draft_group" ? renderGroupedDraftCard(item) : renderBillCard(item)).join("")}` : "",
     historyBills.length ? `<div class="section-title"><h3>История коммуналки</h3><span>Закрытые периоды, чтобы были под рукой, но не под ногами.</span></div>${historyBills.map(renderBillCard).join("")}` : "",
   ].join("");
   qs("#utilityBills").innerHTML = `${previewCard}${bills || `<div class="card"><p class="muted">Коммунальных счетов пока нет.</p></div>`}`;
@@ -3025,6 +3177,20 @@ async function deleteUtilityBill(id, status = "draft") {
   if (!confirm(question)) return;
   await api(`/api/utility-bills/${id}`, { method: "DELETE" });
   toast(issued ? "Счёт удалён" : "Черновик удалён");
+  await loadAll();
+}
+
+async function deleteUtilityGroup(idsText) {
+  const ids = String(idsText || "")
+    .split(",")
+    .map((value) => Number(value))
+    .filter(Boolean);
+  if (!ids.length) return;
+  if (!confirm("Удалить этот общий черновик коммуналки вместе с авансом? Потом можно пересоздать заново.")) return;
+  for (const id of ids) {
+    await api(`/api/utility-bills/${id}`, { method: "DELETE" });
+  }
+  toast("Общий черновик удалён");
   await loadAll();
 }
 

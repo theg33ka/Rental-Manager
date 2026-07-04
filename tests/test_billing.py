@@ -1593,19 +1593,28 @@ class UtilityAdvanceTests(DatabaseTestCase):
             self.assertEqual(len(advance_bills), 1)
             advance_line = advance_bills[0].lines[0]
             self.assertEqual(advance_bills[0].bill_type, "advance")
+            self.assertEqual(advance_bills[0].period_start, date(2026, 6, 30))
+            self.assertEqual(advance_bills[0].period_end, date(2026, 7, 30))
             self.assertEqual(advance_line.line_type, "advance")
             self.assertAlmostEqual(advance_line.total_amount, 917.5)
             self.assertIn("Аванс коммуналки", advance_line.note)
 
-    def test_auto_advance_is_skipped_for_last_month_before_move_out(self) -> None:
+    def test_auto_advance_is_prorated_until_planned_move_out(self) -> None:
         with self.Session() as session:
             lease, bill, _line = self._seed_bill(session, total_amount=1000)
             lease.end_date = bill.period_end + timedelta(days=10)
             session.flush()
 
             advance_bills = ensure_utility_advance_drafts_for_bills(session, [bill])
+            session.flush()
 
-            self.assertEqual(advance_bills, [])
+            self.assertEqual(len(advance_bills), 1)
+            advance_line = advance_bills[0].lines[0]
+            self.assertAlmostEqual(advance_line.total_amount, 333.33)
+            self.assertIn("30.06.2026 -> 10.07.2026", advance_line.note)
+            metadata = json.loads(advance_line.metadata_json)
+            self.assertEqual(metadata["line_period_end"], "2026-07-10")
+            self.assertAlmostEqual(metadata["period_factor"], 0.3333)
 
     def test_issue_preview_groups_object_drafts_and_advance(self) -> None:
         with self.Session() as session:

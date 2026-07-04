@@ -2308,15 +2308,30 @@ def estimated_apartment_utility_amount(
     }
 
 
+def add_calendar_month(value: date) -> date:
+    year = value.year + (1 if value.month == 12 else 0)
+    month = 1 if value.month == 12 else value.month + 1
+    _, last_day = calendar.monthrange(year, month)
+    return date(year, month, min(value.day, last_day))
+
+
 def next_utility_advance_period(period_start: date, period_end: date) -> tuple[date, date]:
-    days = max((period_end - period_start).days, 1)
-    return period_end, period_end + timedelta(days=days)
+    return period_end, add_calendar_month(period_end)
 
 
 def lease_should_skip_utility_advance(lease: Lease, advance_start: date, advance_end: date) -> bool:
     if lease.end_date is None:
         return False
-    return lease.end_date <= advance_end
+    return lease.end_date <= advance_start
+
+
+def lease_utility_advance_period(lease: Lease, advance_start: date, advance_end: date) -> tuple[date, date] | None:
+    if lease_should_skip_utility_advance(lease, advance_start, advance_end):
+        return None
+    line_end = min(advance_end, lease.end_date) if lease.end_date else advance_end
+    if line_end <= advance_start:
+        return None
+    return advance_start, line_end
 
 
 def sync_utility_advance_credit_for_receipt(session: Session, receipt: PaymentReceipt) -> None:
@@ -2382,6 +2397,7 @@ def serialize_bill_line(
     period_label = utility_line_period_label(line)
     metadata = utility_line_metadata(line)
     advance_applied = utility_advance_applied_to_line(session, line.id) if include_advance and session and line.id else 0.0
+    advance_balance_available = utility_advance_balance(session, line.apartment_id) if include_advance and session and line.apartment_id else 0.0
     return {
         "id": line.id,
         "bill_id": line.bill_id,
@@ -2398,6 +2414,7 @@ def serialize_bill_line(
         "paid_amount": line.paid_amount,
         "debt": utility_line_debt_amount(line),
         "advance_applied_amount": advance_applied,
+        "advance_balance_available": advance_balance_available,
         "advance_balance_before": metadata.get("advance_balance_before", 0),
         "advance_recommended_amount": metadata.get("advance_recommended_amount", 0),
         "status": line.status,
@@ -11073,6 +11090,8 @@ def build_utility_advance_line_payload(
     lease: Lease,
     advance_start: date,
     advance_end: date,
+    line_start: date,
+    line_end: date,
     *,
     current_amount: float,
 ) -> tuple[float, dict[str, Any]]:
@@ -11082,15 +11101,23 @@ def build_utility_advance_line_payload(
         advance_start,
         current_amount=current_amount,
     )
+    full_days = max((advance_end - advance_start).days, 1)
+    line_days = max((line_end - line_start).days, 0)
+    period_factor = min(1.0, max(0.0, line_days / full_days))
+    prorated_recommended = money(recommended * period_factor)
     balance_before = utility_advance_balance(session, apartment.id)
-    amount = money(max(0.0, recommended - balance_before))
+    amount = money(max(0.0, prorated_recommended - balance_before))
     metadata = {
         **forecast_meta,
         "advance_recommended_amount": recommended,
+        "advance_prorated_amount": prorated_recommended,
         "advance_balance_before": balance_before,
         "advance_amount": amount,
         "advance_period_start": advance_start.isoformat(),
         "advance_period_end": advance_end.isoformat(),
+        "line_period_start": line_start.isoformat(),
+        "line_period_end": line_end.isoformat(),
+        "period_factor": round(period_factor, 4),
         "calculated_at": utc_now().isoformat(),
     }
     return amount, metadata
@@ -11119,23 +11146,27 @@ def ensure_utility_advance_draft_for_object(
         .where(Apartment.object_id == object_id, Apartment.active.is_(True))
         .order_by(Apartment.sort_order, Apartment.name)
     ).all()
-    desired: dict[int, tuple[Apartment, Lease, float, dict[str, Any]]] = {}
+    desired: dict[int, tuple[Apartment, Lease, float, dict[str, Any], date, date]] = {}
     for apartment in apartments:
         lease = active_lease_for_apartment(session, apartment.id, period_start, period_end)
         if not lease or lease_ignored(session, lease.id):
             continue
-        if lease_should_skip_utility_advance(lease, advance_start, advance_end):
+        line_period = lease_utility_advance_period(lease, advance_start, advance_end)
+        if not line_period:
             continue
+        line_start, line_end = line_period
         amount, metadata = build_utility_advance_line_payload(
             session,
             apartment,
             lease,
             advance_start,
             advance_end,
+            line_start,
+            line_end,
             current_amount=current_amounts_by_apartment.get(apartment.id, 0.0),
         )
         if amount > EPS:
-            desired[apartment.id] = (apartment, lease, amount, metadata)
+            desired[apartment.id] = (apartment, lease, amount, metadata, line_start, line_end)
 
     if not desired:
         if existing and not any(money(line.paid_amount) > EPS for line in existing.lines):
@@ -11167,7 +11198,7 @@ def ensure_utility_advance_draft_for_object(
         for line in bill.lines
         if utility_line_is_advance(line)
     }
-    for apartment_id, (apartment, lease, amount, metadata) in desired.items():
+    for apartment_id, (apartment, lease, amount, metadata, line_start, line_end) in desired.items():
         line = existing_lines_by_apartment.pop(apartment_id, None)
         if line is None:
             line = UtilityBillLine(
@@ -11182,7 +11213,7 @@ def ensure_utility_advance_draft_for_object(
         line.lease_id = lease.id
         line.total_amount = amount
         line.paid_amount = money(line.paid_amount)
-        line.note = f"Аванс коммуналки {advance_start:%d.%m.%Y} -> {advance_end:%d.%m.%Y}"
+        line.note = f"Аванс коммуналки {line_start:%d.%m.%Y} -> {line_end:%d.%m.%Y}"
         set_utility_line_metadata(line, metadata)
         update_utility_line_status(line)
         if line.status == "paid" and utility_line_debt_amount(line) > EPS:
