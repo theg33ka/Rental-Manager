@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Mapping
 from pathlib import Path
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
@@ -16,6 +17,7 @@ DATA_DIR.mkdir(exist_ok=True)
 DEFAULT_DATABASE_URL = f"sqlite:///{(DATA_DIR / 'rental_manager.db').as_posix()}"
 DEFAULT_POSTGRES_MAINTENANCE_DATABASE = "postgres"
 DEFAULT_POSTGRES_POOL_RECYCLE_SECONDS = 1800
+DEFAULT_DB_SLOW_QUERY_MS = 500
 
 
 def normalize_database_url(url: str) -> str:
@@ -94,6 +96,31 @@ DATABASE_URL = normalize_database_url(configured_database_url())
 
 engine = create_engine(DATABASE_URL, **database_engine_options(DATABASE_URL))
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+
+
+def compact_sql_statement(statement: str) -> str:
+    return " ".join(str(statement or "").split())[:280]
+
+
+def install_query_timing(target_engine) -> None:
+    slow_ms = int(os.environ.get("RENTAL_MANAGER_DB_SLOW_MS", str(DEFAULT_DB_SLOW_QUERY_MS)) or DEFAULT_DB_SLOW_QUERY_MS)
+
+    @event.listens_for(target_engine, "before_cursor_execute")
+    def before_cursor_execute(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
+        conn.info.setdefault("query_start_time", []).append(time.perf_counter())
+
+    @event.listens_for(target_engine, "after_cursor_execute")
+    def after_cursor_execute(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
+        started_stack = conn.info.get("query_start_time") or []
+        started = started_stack.pop() if started_stack else None
+        if started is None:
+            return
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        if duration_ms >= slow_ms:
+            print(f"[DB-SLOW] duration_ms={duration_ms} sql={compact_sql_statement(statement)}", flush=True)
+
+
+install_query_timing(engine)
 
 
 class Base(DeclarativeBase):

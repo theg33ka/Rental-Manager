@@ -27,26 +27,46 @@ const guestTabs = ["dashboard", "reports"];
 const appStateLoadGroups = [
   {
     sections: ["bootstrap"],
-    percent: 28,
-    title: "Собираю дашборд",
-    detail: "Проверяю PIN, настройки и основные карточки.",
+    percent: 64,
+    title: "Открываю пульт",
+    detail: "Загружаю минимум для первого экрана. Остальное не держит дверь.",
+  },
+  {
+    sections: ["registry"],
+    percent: 72,
+    title: "Готовлю вкладки",
+    detail: "Объекты, жильцы, счётчики и услуги догружаются после первого экрана.",
   },
   {
     sections: ["rent_charges", "utility_bills", "expenses", "tariffs"],
-    percent: 68,
+    percent: 86,
     title: "Подтягиваю расчёты",
     detail: "Аренда, коммуналка, расходы и тарифы идут одним спокойным пакетом.",
   },
   {
     sections: ["utility_timeline", "message_targets", "suspicious_receipts"],
-    percent: 92,
+    percent: 94,
     title: "Догружаю тяжёлые хвосты",
     detail: "Таймлайн, рассылки и чеки. Если тут тормозит, мониторинг покажет виновника.",
   },
 ];
 const appStateSectionOrder = [...new Set(appStateLoadGroups.flatMap((group) => group.sections))];
+const mutationRefreshSections = appStateSectionOrder.filter((section) => section !== "registry");
+const registryRefreshSections = [...appStateSectionOrder];
 let silentRefreshPromise = null;
 const silentRefreshSections = new Set();
+
+function markFrontendPerf(name, detail = {}) {
+  try {
+    const markName = `rental:${name}`;
+    window.performance?.mark?.(markName);
+    console.info("[PERF]", name, detail);
+  } catch {
+    // Диагностика не должна ломать пульт. Было бы неловко, да.
+  }
+}
+
+markFrontendPerf("script_loaded");
 
 function authRole() {
   return state.auth?.role || null;
@@ -369,6 +389,59 @@ function utilityReadingDatesForTarget(targetValue) {
   const dateSets = services.map((service) => new Set(utilityReadingDates(service.id)));
   const [firstSet, ...restSets] = dateSets;
   return [...firstSet].filter((value) => restSets.every((set) => set.has(value))).sort();
+}
+
+function bootstrapDefaults() {
+  return {
+    today: today(),
+    auth: { role: authRole() },
+    objects: [],
+    leases: [],
+    meters: [],
+    services: [],
+    settings: {},
+    dashboard: {
+      object_summary: { occupied: 0, total: 0, by_object: [] },
+      month_summary: {},
+      monthly_reports: [],
+      rent_overdue: [],
+      rent_partial: [],
+      rent_today: [],
+      rent_deferred: [],
+      utility_overdue: [],
+      utility_partial: [],
+      utility_issued: [],
+      manual_debts: [],
+      pending_personal_expenses: [],
+      expense_fund: { received: 0, spent: 0, balance: 0, has_mismatch: false },
+      stale_readings: [],
+      provider_reading_due: [],
+      provider_debts: [],
+      suspicious_receipts: [],
+    },
+  };
+}
+
+function mergeBootstrap(payload = {}) {
+  const previous = state.bootstrap || bootstrapDefaults();
+  const next = { ...bootstrapDefaults(), ...previous, ...payload };
+  ["objects", "leases", "meters", "services"].forEach((key) => {
+    if (!Array.isArray(payload[key]) || (!payload[key].length && Array.isArray(previous[key]) && previous[key].length)) {
+      next[key] = Array.isArray(previous[key]) ? previous[key] : [];
+    }
+  });
+  next.settings = { ...(previous.settings || {}), ...(payload.settings || {}) };
+  next.dashboard = { ...(bootstrapDefaults().dashboard), ...(previous.dashboard || {}), ...(payload.dashboard || {}) };
+  return next;
+}
+
+function applyRegistryPayload(registry = {}) {
+  state.bootstrap = mergeBootstrap({
+    objects: Array.isArray(registry.objects) ? registry.objects : [],
+    leases: Array.isArray(registry.leases) ? registry.leases : [],
+    meters: Array.isArray(registry.meters) ? registry.meters : [],
+    services: Array.isArray(registry.services) ? registry.services : [],
+  });
 }
 
 function hydrateUtilityTargetSelect() {
@@ -696,8 +769,9 @@ async function loadPerformanceMonitor() {
 
 function applyAppState(payload) {
   if (!payload || typeof payload !== "object") return;
-  if ("bootstrap" in payload) state.bootstrap = payload.bootstrap || {};
-  else if ("today" in payload || "dashboard" in payload) state.bootstrap = payload;
+  if ("bootstrap" in payload) state.bootstrap = mergeBootstrap(payload.bootstrap || {});
+  else if ("today" in payload || "dashboard" in payload) state.bootstrap = mergeBootstrap(payload);
+  if ("registry" in payload) applyRegistryPayload(payload.registry || {});
   if ("rent_charges" in payload) state.rentCharges = payload.rent_charges || [];
   if ("utility_bills" in payload) state.utilityBills = payload.utility_bills || [];
   if ("utility_timeline" in payload) state.utilityTimeline = payload.utility_timeline || [];
@@ -728,7 +802,7 @@ function normalizeAppStateSections(sections) {
   return appStateSectionOrder.filter((section) => requestedSet.has(section));
 }
 
-async function loadAppStateSilently(sections = appStateSectionOrder) {
+async function loadAppStateSilently(sections = mutationRefreshSections) {
   const selected = normalizeAppStateSections(sections);
   const sectionParam = encodeURIComponent(selected.join(","));
   const payload = await api(`/api/app-state?sections=${sectionParam}`);
@@ -740,7 +814,7 @@ async function loadAppStateSilently(sections = appStateSectionOrder) {
   return payload;
 }
 
-async function refreshAfterMutation(sections = appStateSectionOrder) {
+async function refreshAfterMutation(sections = mutationRefreshSections) {
   normalizeAppStateSections(sections).forEach((section) => silentRefreshSections.add(section));
   if (silentRefreshPromise) return silentRefreshPromise;
   silentRefreshPromise = (async () => {
@@ -763,38 +837,53 @@ async function refreshAfterMutation(sections = appStateSectionOrder) {
   return silentRefreshPromise;
 }
 
+function renderFirstScreen() {
+  hydrateForms();
+  renderDashboard();
+  renderObjects();
+  renderPerformanceMonitor();
+  setReportLinks();
+}
+
+async function loadPostBootstrapSections() {
+  state.loadFailures = [];
+  for (const group of appStateLoadGroups.slice(1)) {
+    try {
+      await loadAppStateSilently(group.sections);
+    } catch (error) {
+      state.loadFailures.push(`${group.title}: ${error.message}`);
+      toast(`Не всё загрузилось: ${state.loadFailures[state.loadFailures.length - 1]}`);
+    }
+  }
+  markFrontendPerf("post_bootstrap_loaded", { failures: state.loadFailures.length });
+}
+
 async function loadAll(options = {}) {
   const fullScreen = options.fullScreen ?? !state.bootstrap;
+  const refreshSections = options.refreshSections || mutationRefreshSections;
+  markFrontendPerf("load_all_start", { fullScreen });
   if (!fullScreen && state.bootstrap) {
-    await refreshAfterMutation();
+    await refreshAfterMutation(refreshSections);
     return;
   }
   state.loadFailures = [];
   setLoadingStep(6, "Подключаюсь к серверу", "Проверяю, отвечает ли пульт, а не просто делает вид.");
   try {
     await loadAppStateSections(appStateLoadGroups[0]);
+    markFrontendPerf("bootstrap_loaded");
     applyBootstrapState();
     if (isGuest()) {
-      hydrateForms();
       renderGuestView();
+      markFrontendPerf("first_screen_rendered", { role: "guest" });
       setLoadingStep(100, "Готово", "Гостевой обзор загружен.");
       window.setTimeout(hideLoadingOverlay, 180);
       return;
     }
-    for (const group of appStateLoadGroups.slice(1)) {
-      try {
-        await loadAppStateSections(group);
-      } catch (error) {
-        state.loadFailures.push(`${group.title}: ${error.message}`);
-      }
-    }
-    hydrateForms();
-    renderAll();
-    setLoadingStep(100, "Готово", state.loadFailures.length ? "Часть данных не доехала, но пульт уже можно смотреть." : "Данные на месте.");
-    window.setTimeout(hideLoadingOverlay, 220);
-    if (state.loadFailures.length) {
-      toast(`Не всё загрузилось: ${state.loadFailures[0]}`);
-    }
+    renderFirstScreen();
+    markFrontendPerf("first_screen_rendered", { role: authRole() });
+    setLoadingStep(100, "Пульт открыт", "Тяжёлые вкладки догружаются в фоне.");
+    window.setTimeout(hideLoadingOverlay, 160);
+    window.setTimeout(() => loadPostBootstrapSections(), 0);
   } catch (error) {
     hideLoadingOverlay();
     throw error;
@@ -802,18 +891,7 @@ async function loadAll(options = {}) {
 }
 
 async function refreshBootstrap() {
-  state.bootstrap = await api("/api/bootstrap");
-  applyBootstrapState();
-  if (isGuest()) {
-    hydrateForms();
-    renderGuestView();
-    return;
-  }
-  hydrateForms();
-  renderObjects();
-  renderLeases();
-  renderApartmentRegistry();
-  renderDashboard();
+  await loadAppStateSilently(["bootstrap", "registry"]);
 }
 
 async function loadRent() {
@@ -1902,7 +1980,7 @@ async function editUtilityAdvanceOverride(apartmentId) {
     body: JSON.stringify(payload),
   });
   toast(value.trim() ? "Аванс зафиксирован вручную" : "Аванс вернулся в авторасчёт");
-  await loadAll();
+  await loadAll({ refreshSections: registryRefreshSections });
 }
 
 function startLeaseEdit(leaseId) {
@@ -1968,7 +2046,7 @@ async function deleteLease(leaseId) {
   if (!confirm("Удалить запись о жильце и связанную историю? Данные пропадут из приложения.")) return;
   await api(`/api/leases/${leaseId}`, { method: "DELETE" });
   toast("Запись о жильце удалена");
-  await loadAll();
+  await loadAll({ refreshSections: registryRefreshSections });
 }
 
 function renderRent() {
@@ -2227,7 +2305,7 @@ async function importBaseline() {
   if (!confirm("Импортировать данные из старой базы и перезаписать текущие demo-данные?")) return;
   const result = await api("/api/admin/import-release-baseline", { method: "POST", body: "{}" });
   toast(`Импорт завершён: жильцов ${result.tenants}, аренд ${result.leases}, платежей ${result.receipts}`);
-  await loadAll();
+  await loadAll({ refreshSections: registryRefreshSections });
 }
 
 function selectedDatabaseImportFile() {
@@ -2293,7 +2371,7 @@ async function importDatabase() {
   const result = await api("/api/admin/database-import", { method: "POST", body });
   renderDatabaseImportInspection(result.inspection || {});
   toast(`Импорт завершён. Строк: ${result.imported?.total_rows || 0}`);
-  await loadAll();
+  await loadAll({ refreshSections: registryRefreshSections });
 }
 
 function updateManualPaymentKind() {
@@ -3088,7 +3166,7 @@ async function saveLeaseAutomation(event, leaseId) {
     body: JSON.stringify(formData(event.currentTarget)),
   });
   toast("Индивидуальные настройки уведомлений сохранены");
-  await loadAll();
+  await loadAll({ refreshSections: registryRefreshSections });
 }
 
 function renderMessagePreview() {
@@ -3272,7 +3350,7 @@ async function moveOut(id) {
   const result = await api(`/api/leases/${id}/move-out`, { method: "POST", body: JSON.stringify({ end_date: endDate }) });
   const s = result.summary;
   alert(`Выезд оформлен.\nПолных месяцев: ${s.full_months_lived}\nПоследний оплаченный день: ${formatDate(s.last_paid_day)}\nДолг аренда: ${money(s.rent_debt)}\nДолг коммуналка: ${money(s.utility_debt)}\nЗалог: ${money(s.deposit_amount)}\nУсловия: ${s.deposit_terms || "нет"}`);
-  await loadAll();
+  await loadAll({ refreshSections: registryRefreshSections });
 }
 
 function moneyPromptValue(value) {
@@ -3326,7 +3404,7 @@ async function transferLease(id) {
     }),
   });
   toast(`Переезд оформлен: ${result.old_lease.apartment} → ${result.new_lease.apartment}`);
-  await loadAll();
+  await loadAll({ refreshSections: registryRefreshSections });
 }
 
 function openReportsTab() {
@@ -3606,7 +3684,7 @@ function bindEvents() {
       toast("Жилец заселён");
     }
     form.reset();
-    await loadAll();
+    await loadAll({ refreshSections: registryRefreshSections });
   });
   on("#cancelLeaseEditBtn", "click", cancelLeaseEdit);
 

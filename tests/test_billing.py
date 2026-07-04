@@ -107,11 +107,20 @@ class AppStatePerformanceTests(DatabaseTestCase):
             bootstrap_only = app_state(request, sections="bootstrap", session=session)
             self.assertEqual(set(bootstrap_only), {"bootstrap"})
             self.assertIn("dashboard", bootstrap_only["bootstrap"])
+            self.assertEqual(bootstrap_only["bootstrap"]["objects"], [])
+            self.assertEqual(bootstrap_only["bootstrap"]["leases"], [])
+            self.assertEqual(bootstrap_only["bootstrap"]["meters"], [])
 
             selected = app_state(request, sections="rent_charges,tariffs", session=session)
             self.assertEqual(set(selected), {"rent_charges", "tariffs"})
             self.assertIsInstance(selected["rent_charges"], list)
             self.assertIsInstance(selected["tariffs"], list)
+
+            registry = app_state(request, sections="registry", session=session)
+            self.assertEqual(set(registry), {"registry"})
+            self.assertGreater(len(registry["registry"]["objects"]), 0)
+            self.assertIsInstance(registry["registry"]["leases"], list)
+            self.assertGreater(len(registry["registry"]["meters"]), 0)
 
     def test_performance_snapshot_exposes_request_and_ai_summary(self) -> None:
         record_perf_request(

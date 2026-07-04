@@ -53,7 +53,7 @@ public class MainActivity extends Activity {
     private static final long CACHE_TTL_MS = 60_000L;
     private static final long CONNECTION_CHECK_MIN_MS = 2_000L;
     private static final long RECONNECT_INTERVAL_MS = 10_000L;
-    private static final String FULL_APP_STATE_SECTIONS = "bootstrap,rent_charges,utility_bills,expenses,tariffs,utility_timeline,message_targets,suspicious_receipts";
+    private static final String FULL_APP_STATE_SECTIONS = "bootstrap,registry,rent_charges,utility_bills,expenses,tariffs,utility_timeline,message_targets,suspicious_receipts";
     private static final String[] MONTH_NAMES_RU = {
         "январь", "февраль", "март", "апрель", "май", "июнь",
         "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"
@@ -386,6 +386,8 @@ public class MainActivity extends Activity {
     private void loadAppState() throws Exception {
         updateLoadingCard("Собираю дашборд", "Проверяю PIN, настройки и основные карточки.");
         applyAppState(api.getJson("/api/app-state?sections=bootstrap"));
+        updateLoadingCard("Готовлю вкладки", "Объекты, жильцы, счётчики и услуги.");
+        applyAppState(api.getJson("/api/app-state?sections=registry"));
         updateLoadingCard("Подтягиваю расчёты", "Аренда, коммуналка, расходы и тарифы.");
         applyAppState(api.getJson("/api/app-state?sections=rent_charges,utility_bills,expenses,tariffs"));
         updateLoadingCard("Догружаю тяжёлые хвосты", "Таймлайн, рассылки и подозрительные чеки.");
@@ -419,6 +421,15 @@ public class MainActivity extends Activity {
             bootstrap = payload.optJSONObject("bootstrap");
             if (bootstrap == null) bootstrap = new JSONObject();
         }
+        if (payload.has("registry")) {
+            JSONObject registry = payload.optJSONObject("registry");
+            if (registry != null) {
+                putBootstrapArray("objects", registry.optJSONArray("objects"));
+                putBootstrapArray("leases", registry.optJSONArray("leases"));
+                putBootstrapArray("meters", registry.optJSONArray("meters"));
+                putBootstrapArray("services", registry.optJSONArray("services"));
+            }
+        }
         if (payload.has("rent_charges")) {
             rentCharges = payload.optJSONArray("rent_charges");
             if (rentCharges == null) rentCharges = new JSONArray();
@@ -446,6 +457,19 @@ public class MainActivity extends Activity {
         if (payload.has("suspicious_receipts")) {
             suspiciousReceipts = payload.optJSONArray("suspicious_receipts");
             if (suspiciousReceipts == null) suspiciousReceipts = new JSONArray();
+        }
+    }
+
+    private JSONObject ensureBootstrapObject() {
+        if (bootstrap == null) bootstrap = new JSONObject();
+        return bootstrap;
+    }
+
+    private void putBootstrapArray(String key, JSONArray value) {
+        try {
+            ensureBootstrapObject().put(key, value == null ? new JSONArray() : value);
+        } catch (Exception ignored) {
+            // Локальное слияние payload не должно валить экран.
         }
     }
 

@@ -205,9 +205,11 @@ def main() -> None:
         ]
         sectioned_app_state_paths = [
             "/api/app-state?sections=bootstrap",
+            "/api/app-state?sections=registry",
             "/api/app-state?sections=rent_charges,utility_bills,expenses,tariffs",
             "/api/app-state?sections=utility_timeline,message_targets,suspicious_receipts",
         ]
+        first_screen_paths = ["/", "/static/app.js", "/api/auth/status", "/api/app-state?sections=bootstrap"]
 
         def create_draft(refresh_mode: str) -> int:
             nonlocal draft_offset
@@ -249,7 +251,8 @@ def main() -> None:
                     pass
 
         results = [
-            measure("first_screen_app_state", lambda: hit_paths(client, ["/", "/static/app.js", "/api/auth/status", "/api/app-state"]), args.repeats),
+            measure("first_screen_bootstrap", lambda: hit_paths(client, first_screen_paths), args.repeats),
+            measure("full_app_state", lambda: hit_paths(client, ["/api/app-state"]), args.repeats),
             measure("first_screen_sectioned", lambda: hit_paths(client, ["/", "/static/app.js", "/api/auth/status", *sectioned_app_state_paths]), args.repeats),
             measure("web_app_state", lambda: hit_paths(client, ["/api/app-state"]), args.repeats),
             measure("web_sectioned_app_state", lambda: hit_paths(client, sectioned_app_state_paths), args.repeats),

@@ -143,7 +143,7 @@ from rental_manager.services.telegram_bot import (
 )
 
 
-APP_BUILD_MARKER = "fast-bootstrap-dashboard-2026-07-05"
+APP_BUILD_MARKER = "progressive-boot-2026-07-05"
 
 
 app = FastAPI(title="Rental Manager", version="0.1.0")
@@ -2628,7 +2628,65 @@ def logout_panel(request: Request, response: Response, session: Session = Depend
     return {"ok": True}
 
 
-def build_bootstrap_payload(request: Request, session: Session) -> dict[str, Any]:
+def build_registry_payload(session: Session, role: str | None) -> dict[str, Any]:
+    if role != "owner":
+        return {"objects": [], "leases": [], "meters": [], "services": []}
+    return {
+        "objects": [
+            serialize_object(obj)
+            for obj in session.scalars(
+                select(RentalObject)
+                .options(
+                    selectinload(RentalObject.apartments).selectinload(Apartment.leases).joinedload(Lease.tenant),
+                    selectinload(RentalObject.services),
+                )
+                .order_by(RentalObject.name)
+            ).all()
+        ],
+        "leases": [
+            serialize_lease(lease, session)
+            for lease in session.scalars(
+                select(Lease)
+                .options(
+                    joinedload(Lease.apartment).joinedload(Apartment.object),
+                    joinedload(Lease.tenant),
+                )
+                .order_by(Lease.active.desc(), Lease.start_date.desc())
+            ).all()
+        ],
+        "meters": [
+            serialize_meter(meter)
+            for meter in session.scalars(
+                select(Meter)
+                .options(
+                    joinedload(Meter.service).joinedload(UtilityService.object),
+                    joinedload(Meter.apartment),
+                    selectinload(Meter.readings),
+                )
+                .order_by(Meter.object_id, Meter.scope, Meter.name)
+            ).all()
+        ],
+        "services": [
+            serialize_service(service)
+            for service in session.scalars(
+                select(UtilityService)
+                .options(joinedload(UtilityService.object))
+                .order_by(UtilityService.object_id, UtilityService.kind)
+            ).all()
+        ],
+    }
+
+
+def empty_registry_payload() -> dict[str, list[Any]]:
+    return {"objects": [], "leases": [], "meters": [], "services": []}
+
+
+def build_bootstrap_payload(
+    request: Request,
+    session: Session,
+    *,
+    include_registry: bool = False,
+) -> dict[str, Any]:
     role = getattr(request.state, "panel_role", None) or panel_role_from_request(request, session)
     settings_payload = get_settings(session) if role == "owner" else public_settings(session)
     dashboard_payload = build_dashboard(session)
@@ -2647,51 +2705,11 @@ def build_bootstrap_payload(request: Request, session: Session) -> dict[str, Any
                 "suspicious_receipts": len(dashboard_payload["suspicious_receipts"]),
             },
         }
+    registry_payload = build_registry_payload(session, role) if include_registry else empty_registry_payload()
     return {
         "today": date.today().isoformat(),
         "auth": {"role": role},
-        "objects": [
-            serialize_object(obj)
-            for obj in session.scalars(
-                select(RentalObject)
-                .options(
-                    selectinload(RentalObject.apartments).selectinload(Apartment.leases).joinedload(Lease.tenant),
-                    selectinload(RentalObject.services),
-                )
-                .order_by(RentalObject.name)
-            ).all()
-        ] if role == "owner" else [],
-        "leases": [
-            serialize_lease(lease, session)
-            for lease in session.scalars(
-                select(Lease)
-                .options(
-                    joinedload(Lease.apartment).joinedload(Apartment.object),
-                    joinedload(Lease.tenant),
-                )
-                .order_by(Lease.active.desc(), Lease.start_date.desc())
-            ).all()
-        ] if role == "owner" else [],
-        "meters": [
-            serialize_meter(meter)
-            for meter in session.scalars(
-                select(Meter)
-                .options(
-                    joinedload(Meter.service).joinedload(UtilityService.object),
-                    joinedload(Meter.apartment),
-                    selectinload(Meter.readings),
-                )
-                .order_by(Meter.object_id, Meter.scope, Meter.name)
-            ).all()
-        ] if role == "owner" else [],
-        "services": [
-            serialize_service(service)
-            for service in session.scalars(
-                select(UtilityService)
-                .options(joinedload(UtilityService.object))
-                .order_by(UtilityService.object_id, UtilityService.kind)
-            ).all()
-        ] if role == "owner" else [],
+        **registry_payload,
         "settings": settings_payload,
         "dashboard": dashboard_payload,
     }
@@ -2699,11 +2717,12 @@ def build_bootstrap_payload(request: Request, session: Session) -> dict[str, Any
 
 @app.get("/api/bootstrap")
 def bootstrap(request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
-    return build_bootstrap_payload(request, session)
+    return build_bootstrap_payload(request, session, include_registry=True)
 
 
 APP_STATE_SECTION_ORDER = (
     "bootstrap",
+    "registry",
     "rent_charges",
     "utility_bills",
     "expenses",
@@ -2753,6 +2772,8 @@ def app_state(
         for key in selected:
             if key == "bootstrap":
                 load_section("bootstrap", lambda: build_bootstrap_payload(request, session))
+            elif key == "registry":
+                load_section("registry", lambda: build_registry_payload(session, role))
             else:
                 payload[key] = []
                 timings[key] = 0
@@ -2766,6 +2787,7 @@ def app_state(
 
     loaders = {
         "bootstrap": lambda: build_bootstrap_payload(request, session),
+        "registry": lambda: build_registry_payload(session, role),
         "rent_charges": lambda: rent_charges_payload(
             session=session,
             include_payments=False,
