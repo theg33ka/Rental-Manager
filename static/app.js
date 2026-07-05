@@ -3300,8 +3300,10 @@ async function confirmIssueBill() {
   const result = await api(`/api/utility-bills/${state.utilityIssuePreview.bill_id}/issue`, { method: "POST", body: "{}" });
   const sent = Number(result.sent || 0);
   const skipped = Number(result.skipped_unlinked || 0);
+  const failed = Number(result.failed || 0);
   state.utilityIssuePreview = null;
   toast(`Счёт выставлен. Отправлено: ${sent}. Ждут /start: ${skipped}.`);
+  if (failed) toast(`Telegram errors: ${failed}.`);
   await loadAll();
 }
 

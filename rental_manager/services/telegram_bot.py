@@ -12,6 +12,19 @@ class TelegramApiError(RuntimeError):
     pass
 
 
+def normalize_bot_token(value: str | None) -> str:
+    token = str(value or "").strip()
+    for prefix in ("https://api.telegram.org/bot", "http://api.telegram.org/bot"):
+        if token.lower().startswith(prefix):
+            token = token[len(prefix):]
+            break
+    if token.lower().startswith("bot"):
+        token = token[3:]
+    if "/" in token:
+        token = token.split("/", 1)[0]
+    return token.strip()
+
+
 def parse_command(text: str) -> tuple[str, list[str]]:
     raw = (text or "").strip()
     if not raw:
@@ -125,6 +138,8 @@ def telegram_api_request(token: str, method: str, payload: dict[str, Any]) -> di
                 description = error_payload.get("description") or body
             except json.JSONDecodeError:
                 description = body
+            if exc.code == 404 and str(description).strip().lower() == "not found":
+                description = "Not Found: Telegram не узнаёт токен бота. Проверь token в настройках."
             raise TelegramApiError(f"Telegram API {method} failed: {description}") from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             last_error = exc

@@ -1526,6 +1526,76 @@ class UtilityAdvanceTests(DatabaseTestCase):
         self.assertEqual(leftover.amount, 400)
         self.assertEqual(applied.amount, 1000)
 
+    def test_issue_utility_bill_reports_partial_telegram_failures(self) -> None:
+        with self.Session() as session:
+            lease, bill, line = self._seed_bill(session, total_amount=1000)
+            second_apartment = Apartment(
+                object=lease.apartment.object,
+                name="2",
+                sort_order=2,
+                odn_share_percent=100,
+                active=True,
+            )
+            second_tenant = Tenant(full_name="Second tenant", active=True)
+            second_lease = Lease(
+                apartment=second_apartment,
+                tenant=second_tenant,
+                start_date=date(2026, 6, 1),
+                payment_day=1,
+                ip_amount=10000,
+                personal_amount=0,
+                active=True,
+            )
+            second_line = UtilityBillLine(
+                apartment=second_apartment,
+                lease=second_lease,
+                personal_consumption=100,
+                odn_consumption=0,
+                total_amount=700,
+                paid_amount=0,
+                status="draft",
+            )
+            bill.lines.append(second_line)
+            session.add_all([second_apartment, second_tenant, second_lease])
+            session.flush()
+            session.add(AppSetting(key="telegram_tenant_links", value=json.dumps({str(lease.tenant_id): "100", str(second_tenant.id): "200"})))
+            session.commit()
+
+            def fake_send(_session, chat_id, _text, _keyboard=None):
+                if str(chat_id) == "200":
+                    raise HTTPException(400, "Telegram API sendMessage failed: Not Found")
+                return {"ok": True}
+
+            with patch("rental_manager.main.send_telegram_text", side_effect=fake_send):
+                payload = issue_utility_bill(bill.id, session=session)
+                session.refresh(bill)
+                session.refresh(line)
+                session.refresh(second_line)
+
+        self.assertEqual(payload["sent"], 1)
+        self.assertEqual(payload["failed"], 1)
+        self.assertEqual(payload["failed_recipients"][0]["tenant"], "Second tenant")
+        self.assertEqual(bill.status, "issued")
+        self.assertEqual(line.status, "issued")
+        self.assertEqual(second_line.status, "issued")
+
+    def test_issue_utility_bill_keeps_draft_when_all_telegram_sends_fail(self) -> None:
+        with self.Session() as session:
+            lease, bill, line = self._seed_bill(session, total_amount=1000)
+            session.add(AppSetting(key="telegram_tenant_links", value=json.dumps({str(lease.tenant_id): "100"})))
+            session.commit()
+
+            with patch("rental_manager.main.send_telegram_text", side_effect=HTTPException(400, "Telegram API sendMessage failed: Not Found")):
+                with self.assertRaises(HTTPException) as exc:
+                    issue_utility_bill(bill.id, session=session)
+                self.assertIn("Не отправлено ни одного сообщения", str(exc.exception.detail))
+                session.rollback()
+                session.refresh(bill)
+                session.refresh(line)
+
+        self.assertEqual(bill.status, "draft")
+        self.assertEqual(line.status, "draft")
+
     def test_month_summary_tracks_salary_bills_and_advances(self) -> None:
         with self.Session() as session:
             lease, bill, line = self._seed_bill(session, total_amount=1000)

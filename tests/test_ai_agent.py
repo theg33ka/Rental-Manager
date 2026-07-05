@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import urllib.error
 from datetime import date
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -38,7 +39,7 @@ from rental_manager.services.ai_policy import (
     tenant_question_needs_owner,
 )
 from rental_manager.services.hermes_client import HermesClient, HermesClientError, HermesResult, YandexOpenAIClient
-from rental_manager.services.telegram_bot import TelegramApiError, telegram_api_request
+from rental_manager.services.telegram_bot import TelegramApiError, normalize_bot_token, telegram_api_request
 
 
 class AiAgentDatabaseTestCase(unittest.TestCase):
@@ -279,6 +280,24 @@ class HermesClientTests(unittest.TestCase):
 
 
 class TelegramApiRequestTests(unittest.TestCase):
+    def test_normalizes_common_bot_token_pastes(self) -> None:
+        self.assertEqual(normalize_bot_token(" bot123:abc "), "123:abc")
+        self.assertEqual(normalize_bot_token("https://api.telegram.org/bot123:abc/sendMessage"), "123:abc")
+
+    def test_telegram_not_found_mentions_bot_token(self) -> None:
+        error = urllib.error.HTTPError(
+            "https://api.telegram.org/botbad/sendMessage",
+            404,
+            "Not Found",
+            {},
+            BytesIO(b'{"ok": false, "description": "Not Found"}'),
+        )
+        with patch("rental_manager.services.telegram_bot.urllib.request.urlopen", side_effect=error):
+            with self.assertRaises(TelegramApiError) as exc:
+                telegram_api_request("bad", "sendMessage", {"chat_id": 1, "text": "ok"})
+
+        self.assertIn("токен", str(exc.exception))
+
     def test_retries_transient_network_errors(self) -> None:
         class Response:
             def __enter__(self):

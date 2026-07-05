@@ -134,6 +134,7 @@ from rental_manager.services.telegram_bot import (
     clear_inline_keyboard,
     copy_message,
     download_telegram_file,
+    normalize_bot_token,
     owner_commands,
     parse_command,
     send_message,
@@ -965,6 +966,8 @@ def save_settings(session: Session, payload: dict[str, Any], preserve_panel_toke
             setting.value = "1" if setting_bool_value(value) else "0"
         elif key == "notification_cutoff_date" and not value:
             setting.value = date.today().isoformat()
+        elif key == "telegram_bot_token":
+            setting.value = normalize_bot_token(str(value))
         else:
             setting.value = str(value)
         if key in {"panel_owner_pin_code", "panel_guest_pin_code"}:
@@ -1273,7 +1276,7 @@ def apply_database_import_payload(session: Session, payload: dict[str, Any]) -> 
 
 
 def telegram_token(session: Session) -> str:
-    return get_setting_value(session, "telegram_bot_token").strip()
+    return normalize_bot_token(get_setting_value(session, "telegram_bot_token"))
 
 
 def telegram_secret(session: Session) -> str:
@@ -11276,6 +11279,33 @@ def ensure_utility_advance_drafts_for_bills(session: Session, bills: list[Utilit
     return result
 
 
+def exception_detail_text(exc: BaseException) -> str:
+    if isinstance(exc, HTTPException):
+        detail = exc.detail
+    else:
+        detail = str(exc)
+    if isinstance(detail, str):
+        return detail
+    try:
+        return json.dumps(detail, ensure_ascii=False)
+    except TypeError:
+        return str(detail)
+
+
+def utility_issue_apartment_label(apartment: Apartment) -> str:
+    object_name = apartment.object.name if apartment.object else ""
+    return f"{object_name}, {apartment.name}" if object_name else apartment.name
+
+
+def utility_issue_failed_recipient(lease: Lease, detail: str) -> dict[str, Any]:
+    return {
+        "lease_id": lease.id,
+        "tenant": lease.tenant.full_name if lease.tenant else "",
+        "apartment": utility_issue_apartment_label(lease.apartment) if lease.apartment else "",
+        "detail": detail,
+    }
+
+
 @app.post("/api/utility-bills/{bill_id}/issue")
 def issue_utility_bill(bill_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
     bill = session.get(UtilityBill, bill_id)
@@ -11300,6 +11330,8 @@ def issue_utility_bill(bill_id: int, session: Session = Depends(get_session)) ->
     applied_advances = money(sum(apply_utility_advances_to_bill(session, item) for item in bills if not utility_bill_is_advance(item)))
     sent = 0
     skipped_unlinked = 0
+    linked_targets = sum(1 for preview in previews if preview["linked"])
+    failed_recipients: list[dict[str, Any]] = []
     for preview in previews:
         lease = session.get(Lease, preview["lease_id"])
         if not lease:
@@ -11313,23 +11345,34 @@ def issue_utility_bill(bill_id: int, session: Session = Depends(get_session)) ->
             if primary_line and primary_line.lease_id
             else None
         )
-        send_tenant_message(
-            session,
-            lease,
-            "message_utility_bill",
-            line=primary_line,
-            note="utility-issue",
-            utility_lines_override=[line for line_id in preview["all_line_ids"] if (line := session.get(UtilityBillLine, line_id))],
-            utility_due_date_override=due,
-            keyboard=tenant_situation_keyboard(situation) if situation else None,
+        try:
+            send_tenant_message(
+                session,
+                lease,
+                "message_utility_bill",
+                line=primary_line,
+                note="utility-issue",
+                utility_lines_override=[line for line_id in preview["all_line_ids"] if (line := session.get(UtilityBillLine, line_id))],
+                utility_due_date_override=due,
+                keyboard=tenant_situation_keyboard(situation) if situation else None,
+            )
+            sent += 1
+        except HTTPException as exc:
+            failed_recipients.append(utility_issue_failed_recipient(lease, exception_detail_text(exc)))
+    if linked_targets > 0 and sent == 0 and failed_recipients:
+        first_failure = failed_recipients[0]
+        raise HTTPException(
+            400,
+            f"Не отправлено ни одного сообщения. {first_failure['apartment']} {first_failure['tenant']}: {first_failure['detail']}",
         )
-        sent += 1
     session.commit()
     session.refresh(bill)
     payload = serialize_bill(bill)
     payload["bill_ids"] = [item.id for item in bills]
     payload["sent"] = sent
     payload["skipped_unlinked"] = skipped_unlinked
+    payload["failed"] = len(failed_recipients)
+    payload["failed_recipients"] = failed_recipients
     payload["applied_advances"] = applied_advances
     return payload
 
