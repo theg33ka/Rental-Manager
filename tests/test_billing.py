@@ -1678,6 +1678,104 @@ class UtilityAdvanceTests(DatabaseTestCase):
             self.assertAlmostEqual(advance_line.total_amount, 917.5)
             self.assertIn("Аванс коммуналки", advance_line.note)
 
+    def test_auto_advance_caps_non_winter_history_spike_against_current_bill(self) -> None:
+        with self.Session() as session:
+            lease, bill, _line = self._seed_bill(session, total_amount=1475.54)
+            historical_bill = UtilityBill(
+                service=bill.service,
+                period_start=date(2025, 6, 1),
+                period_end=date(2025, 6, 30),
+                status="issued",
+                total_consumption=4500,
+                apartment_consumption=4500,
+                odn_consumption=0,
+                total_cost=44948.18,
+                average_unit_price=10,
+            )
+            historical_bill.lines.append(
+                UtilityBillLine(
+                    apartment=lease.apartment,
+                    lease=lease,
+                    personal_consumption=4500,
+                    odn_consumption=0,
+                    total_amount=44948.18,
+                    paid_amount=44948.18,
+                    status="paid",
+                )
+            )
+            session.add(historical_bill)
+            session.flush()
+
+            advance_bills = ensure_utility_advance_drafts_for_bills(session, [bill])
+            session.flush()
+
+            advance_line = advance_bills[0].lines[0]
+            metadata = json.loads(advance_line.metadata_json)
+            self.assertAlmostEqual(advance_line.total_amount, 2951.08)
+            self.assertTrue(metadata["forecast_capped"])
+            self.assertGreater(metadata["uncapped_forecast"], 29000)
+            self.assertEqual(metadata["forecast_cap_multiplier"], 2.0)
+
+    def test_issue_preview_refreshes_existing_bad_advance_draft(self) -> None:
+        with self.Session() as session:
+            lease, bill, _line = self._seed_bill(session, total_amount=1475.54)
+            historical_bill = UtilityBill(
+                service=bill.service,
+                period_start=date(2025, 6, 1),
+                period_end=date(2025, 6, 30),
+                status="issued",
+                total_consumption=4500,
+                apartment_consumption=4500,
+                odn_consumption=0,
+                total_cost=44948.18,
+                average_unit_price=10,
+            )
+            historical_bill.lines.append(
+                UtilityBillLine(
+                    apartment=lease.apartment,
+                    lease=lease,
+                    personal_consumption=4500,
+                    odn_consumption=0,
+                    total_amount=44948.18,
+                    paid_amount=44948.18,
+                    status="paid",
+                )
+            )
+            advance_bill = UtilityBill(
+                service=bill.service,
+                bill_type="advance",
+                period_start=date(2026, 6, 30),
+                period_end=date(2026, 7, 30),
+                status="draft",
+                total_consumption=0,
+                apartment_consumption=0,
+                odn_consumption=0,
+                total_cost=29732.76,
+                average_unit_price=0,
+                is_forecast=True,
+                provider_paid=True,
+            )
+            advance_line = UtilityBillLine(
+                apartment=lease.apartment,
+                lease=lease,
+                line_type="advance",
+                personal_consumption=0,
+                odn_consumption=0,
+                total_amount=29732.76,
+                paid_amount=0,
+                status="draft",
+            )
+            advance_bill.lines.append(advance_line)
+            session.add_all([historical_bill, advance_bill])
+            session.flush()
+
+            preview_issue_utility_bill(bill.id, session=session)
+            session.refresh(advance_line)
+
+            self.assertAlmostEqual(advance_line.total_amount, 2951.08)
+            metadata = json.loads(advance_line.metadata_json)
+            self.assertTrue(metadata["forecast_capped"])
+
     def test_auto_advance_is_prorated_until_planned_move_out(self) -> None:
         with self.Session() as session:
             lease, bill, _line = self._seed_bill(session, total_amount=1000)

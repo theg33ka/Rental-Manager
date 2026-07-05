@@ -219,7 +219,7 @@
       @keyframes loading-rotate { to { transform: rotate(360deg); } }
       @keyframes loading-dot { 0%, 100% { opacity: .35; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-2px); } }
     </style>
-    <link rel="stylesheet" href="/static/styles.css?v=2026-06-26-loader-2" />
+    <link rel="stylesheet" href="/static/styles.css?v=2026-07-05-dialogs" />
   </head>
   <body class="auth-locked app-loading">
     <div id="loadingOverlay" class="loading-overlay" role="status" aria-live="polite">
@@ -269,6 +269,7 @@
       <button class="tab" data-tab="tariffs">Тарифы</button>
       <button class="tab" data-tab="expenses">Расходы</button>
       <button class="tab" data-tab="reports">Отчёты</button>
+      <button class="tab" data-tab="dialogs">Диалоги</button>
       <button class="tab" data-tab="messages">Сообщения</button>
       <button class="tab" data-tab="automation">Автоматизация</button>
       <button class="tab" data-tab="settings">Настройки</button>
@@ -452,6 +453,27 @@
           <a class="button" id="historyReport" href="/api/reports/history.xlsx">История</a>
         </div>
         <div id="monthlyReportDetails" class="monthly-report-details"></div>
+      </section>
+
+      <section class="panel" id="dialogs">
+        <div class="section-title">
+          <div>
+            <h2>Диалоги бота</h2>
+            <span>История Telegram-чатов и ручной ответ от лица бота. А зачем искать телефон, если чат уже тут?</span>
+          </div>
+          <button id="botDialogsRefreshBtn" type="button">Обновить диалоги</button>
+        </div>
+        <div class="messenger-layout">
+          <aside class="dialog-list" id="botDialogList"></aside>
+          <div class="messenger-chat">
+            <div class="messenger-head" id="botDialogHeader"></div>
+            <div class="messenger-messages" id="botDialogMessages"></div>
+            <form class="messenger-compose" id="botDialogForm">
+              <textarea id="botDialogInput" rows="2" placeholder="Текст от имени бота"></textarea>
+              <button class="primary" type="submit">Отправить</button>
+            </form>
+          </div>
+        </div>
       </section>
 
       <section class="panel" id="messages">
@@ -754,7 +776,7 @@
     <div id="manualAllocationModal" class="modal-shell" hidden></div>
     <div id="manualDebtModal" class="modal-shell" hidden></div>
     <div id="toast" role="status" aria-live="polite"></div>
-    <script src="/static/app.js?v=2026-07-05-utility-telegram-fix"></script>
+    <script src="/static/app.js?v=2026-07-05-dialogs"></script>
   </body>
 </html>
 

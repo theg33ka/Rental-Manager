@@ -436,6 +436,10 @@ UTILITY_LINE_USAGE = "usage"
 UTILITY_LINE_ADVANCE = "advance"
 UTILITY_BILL_USAGE = "utility"
 UTILITY_BILL_ADVANCE = "advance"
+UTILITY_ADVANCE_CURRENT_CAP_DEFAULT = 2.0
+UTILITY_ADVANCE_CURRENT_CAP_SHOULDER = 5.0
+UTILITY_ADVANCE_CURRENT_CAP_WINTER = 8.0
+UTILITY_ADVANCE_CURRENT_CAP_BUFFER = 1000.0
 REMINDER_WORKER_STARTED = False
 REMINDER_WORKER_INTERVAL_SECONDS = 900
 TELEGRAM_PROCESSED_UPDATE_LIMIT = 500
@@ -658,6 +662,8 @@ PERFORMANCE_INDEXES = [
     ("ix_rm_payment_receipts_utility_status", "payment_receipts (utility_line_id, status)"),
     ("ix_rm_message_logs_rent_created", "message_logs (rent_charge_id, created_at)"),
     ("ix_rm_message_logs_utility_created", "message_logs (utility_line_id, created_at)"),
+    ("ix_rm_message_logs_lease_created", "message_logs (lease_id, created_at)"),
+    ("ix_rm_message_logs_chat_created", "message_logs (recipient_chat_id, created_at)"),
     ("ix_rm_meter_readings_meter_date", "meter_readings (meter_id, reading_date)"),
     ("ix_rm_meters_service_scope_active", "meters (service_id, scope, active)"),
     ("ix_rm_utility_bills_service_period", "utility_bills (service_id, period_start, period_end)"),
@@ -2239,6 +2245,40 @@ def average_money(values: list[float]) -> float:
     return money(sum(values) / len(values)) if values else 0.0
 
 
+def utility_advance_current_cap_multiplier(target_start: date) -> float:
+    if target_start.month in {11, 12, 1, 2, 3}:
+        return UTILITY_ADVANCE_CURRENT_CAP_WINTER
+    if target_start.month in {4, 10}:
+        return UTILITY_ADVANCE_CURRENT_CAP_SHOULDER
+    return UTILITY_ADVANCE_CURRENT_CAP_DEFAULT
+
+
+def capped_utility_advance_forecast(
+    forecast: float,
+    current_amount: float,
+    target_start: date,
+) -> tuple[float, dict[str, Any]]:
+    uncapped = money(forecast)
+    current = money(current_amount)
+    multiplier = utility_advance_current_cap_multiplier(target_start)
+    metadata = {
+        "current_amount": current,
+        "uncapped_forecast": uncapped,
+        "forecast_cap_multiplier": multiplier,
+        "forecast_cap": 0.0,
+        "forecast_capped": False,
+    }
+    if current <= EPS or uncapped <= current + EPS:
+        return uncapped, metadata
+
+    forecast_cap = money(max(current * multiplier, current + UTILITY_ADVANCE_CURRENT_CAP_BUFFER))
+    metadata["forecast_cap"] = forecast_cap
+    if uncapped > forecast_cap + EPS:
+        metadata["forecast_capped"] = True
+        return forecast_cap, metadata
+    return uncapped, metadata
+
+
 def utility_advance_setting_for_apartment(session: Session, apartment_id: int) -> UtilityAdvanceSetting | None:
     return session.scalar(
         select(UtilityAdvanceSetting)
@@ -2302,12 +2342,14 @@ def estimated_apartment_utility_amount(
     else:
         forecast = annual_average
         source = "annual_average" if annual_average > EPS else "empty_history"
-    return money(forecast), {
+    capped_forecast, cap_meta = capped_utility_advance_forecast(forecast, current_amount, target_start)
+    return capped_forecast, {
         "source": source,
         "recent_average": recent_average,
         "seasonal_average": seasonal_average,
         "annual_average": annual_average,
         "history_months": len(last_12),
+        **cap_meta,
     }
 
 
@@ -4448,6 +4490,418 @@ def send_tenant_message(
         "template_key": template_key,
         "text": text,
     }
+
+
+BOT_DIALOG_LIST_LIMIT = 1200
+BOT_DIALOG_HISTORY_LIMIT = 220
+
+
+def bot_dialog_id_for_lease(lease_id: int) -> str:
+    return f"lease:{lease_id}"
+
+
+def bot_dialog_id_for_chat(chat_id: int | str, *, owner: bool = False) -> str:
+    return f"{'owner' if owner else 'chat'}:{str(chat_id)}"
+
+
+def bot_dialog_created_at(value: datetime | None) -> str:
+    return value.isoformat() if value else ""
+
+
+def bot_dialog_message_text(value: str | None) -> str:
+    return re.sub(r"\s+", " ", (value or "").strip())[:180]
+
+
+def lease_for_dialog(session: Session, lease_id: int) -> Lease | None:
+    return session.scalar(
+        select(Lease)
+        .options(
+            joinedload(Lease.apartment).joinedload(Apartment.object),
+            joinedload(Lease.tenant),
+        )
+        .where(Lease.id == lease_id)
+        .limit(1)
+    )
+
+
+def latest_dialog_chat_id(session: Session, lease: Lease) -> str:
+    linked = lease_chat_id(session, lease)
+    if linked:
+        return linked
+    recent = session.scalar(
+        select(MessageLog.recipient_chat_id)
+        .where(MessageLog.lease_id == lease.id, MessageLog.recipient_chat_id != "")
+        .order_by(MessageLog.created_at.desc(), MessageLog.id.desc())
+        .limit(1)
+    )
+    return str(recent or "")
+
+
+def ensure_bot_dialog_for_lease(
+    session: Session,
+    dialogs: dict[str, dict[str, Any]],
+    lease: Lease,
+    *,
+    chat_id: str | None = None,
+) -> dict[str, Any]:
+    dialog_id = bot_dialog_id_for_lease(lease.id)
+    linked_chat_id = str(chat_id or latest_dialog_chat_id(session, lease) or "")
+    dialog = dialogs.get(dialog_id)
+    if not dialog:
+        dialog = {
+            "id": dialog_id,
+            "kind": "tenant",
+            "lease_id": lease.id,
+            "tenant_id": lease.tenant_id,
+            "tenant": lease.tenant.full_name,
+            "object": lease.apartment.object.name if lease.apartment and lease.apartment.object else "",
+            "apartment": lease.apartment.name if lease.apartment else "",
+            "title": lease.tenant.full_name,
+            "subtitle": f"{lease.apartment.object.name}, {lease.apartment.name}" if lease.apartment and lease.apartment.object else "",
+            "chat_id": linked_chat_id,
+            "linked": bool(linked_chat_id),
+            "status": "active" if lease.active else "archived",
+            "last_at": "",
+            "last_text": "",
+            "last_direction": "",
+            "message_count": 0,
+        }
+        dialogs[dialog_id] = dialog
+    elif linked_chat_id and not dialog.get("chat_id"):
+        dialog["chat_id"] = linked_chat_id
+        dialog["linked"] = True
+    return dialog
+
+
+def ensure_bot_dialog_for_chat(
+    session: Session,
+    dialogs: dict[str, dict[str, Any]],
+    chat_id: int | str,
+    *,
+    owner: bool | None = None,
+) -> dict[str, Any]:
+    chat_ref = str(chat_id or "").strip()
+    is_owner = bool(owner) if owner is not None else chat_ref in telegram_owner_ids(session)
+    dialog_id = bot_dialog_id_for_chat(chat_ref, owner=is_owner)
+    dialog = dialogs.get(dialog_id)
+    if not dialog:
+        dialog = {
+            "id": dialog_id,
+            "kind": "owner" if is_owner else "chat",
+            "lease_id": None,
+            "tenant_id": None,
+            "tenant": "",
+            "object": "",
+            "apartment": "",
+            "title": "Владелец" if is_owner else f"Telegram {chat_ref}",
+            "subtitle": "owner-чат бота" if is_owner else "чат без активной привязки к жильцу",
+            "chat_id": chat_ref,
+            "linked": bool(chat_ref),
+            "status": "active",
+            "last_at": "",
+            "last_text": "",
+            "last_direction": "",
+            "message_count": 0,
+        }
+        dialogs[dialog_id] = dialog
+    return dialog
+
+
+def update_bot_dialog_last(dialog: dict[str, Any], text: str, created_at: datetime | None, direction: str) -> None:
+    dialog["message_count"] = int(dialog.get("message_count") or 0) + 1
+    created_text = bot_dialog_created_at(created_at)
+    if created_text and created_text >= str(dialog.get("last_at") or ""):
+        dialog["last_at"] = created_text
+        dialog["last_text"] = bot_dialog_message_text(text)
+        dialog["last_direction"] = direction
+
+
+def bot_dialog_for_message_log(
+    session: Session,
+    dialogs: dict[str, dict[str, Any]],
+    log: MessageLog,
+) -> dict[str, Any] | None:
+    if log.lease_id:
+        lease = lease_for_dialog(session, int(log.lease_id))
+        if lease:
+            return ensure_bot_dialog_for_lease(session, dialogs, lease, chat_id=log.recipient_chat_id)
+    if log.recipient_chat_id:
+        return ensure_bot_dialog_for_chat(session, dialogs, log.recipient_chat_id)
+    return None
+
+
+def bot_dialog_for_ai_message(
+    session: Session,
+    dialogs: dict[str, dict[str, Any]],
+    message: AiMessage,
+) -> dict[str, Any] | None:
+    if message.lease_id:
+        lease = lease_for_dialog(session, int(message.lease_id))
+        if lease:
+            return ensure_bot_dialog_for_lease(session, dialogs, lease, chat_id=message.conversation.chat_id if message.conversation else "")
+    conversation = message.conversation
+    if conversation and conversation.chat_id:
+        return ensure_bot_dialog_for_chat(
+            session,
+            dialogs,
+            conversation.chat_id,
+            owner=conversation.role == "owner",
+        )
+    return None
+
+
+def serialize_bot_dialog_log_message(session: Session, log: MessageLog) -> dict[str, Any]:
+    incoming = log.status == "incoming"
+    owner_incoming = incoming and (
+        "incoming:owner" in (log.note or "") or str(log.recipient_chat_id or "") in telegram_owner_ids(session)
+    )
+    return {
+        "id": f"log:{log.id}",
+        "source": "message_log",
+        "direction": "incoming" if incoming else "outgoing",
+        "author": "Владелец" if owner_incoming else "Жилец" if incoming else "Бот",
+        "role": "user" if incoming else "assistant",
+        "text": log.text or "",
+        "created_at": bot_dialog_created_at(log.created_at),
+        "status": log.status,
+        "template_key": log.template_key or "",
+        "note": log.note or "",
+    }
+
+
+def serialize_bot_dialog_ai_message(message: AiMessage) -> dict[str, Any]:
+    conversation_role = message.conversation.role if message.conversation else ""
+    incoming = message.role == "user"
+    author = (
+        "Владелец"
+        if incoming and conversation_role == "owner"
+        else "Жилец"
+        if incoming
+        else "Бот"
+        if message.role == "assistant"
+        else message.role
+    )
+    return {
+        "id": f"ai:{message.id}",
+        "source": "ai",
+        "direction": "incoming" if incoming else "outgoing" if message.role == "assistant" else "system",
+        "author": author,
+        "role": message.role,
+        "text": message.text or "",
+        "created_at": bot_dialog_created_at(message.created_at),
+        "status": "sent" if message.role == "assistant" else "received",
+        "template_key": "",
+        "note": message.model or "",
+    }
+
+
+def bot_dialog_message_matches_log(message: AiMessage, logs: list[MessageLog]) -> bool:
+    text = (message.text or "").strip()
+    if not text:
+        return False
+    for log in logs:
+        if (log.text or "").strip() != text:
+            continue
+        if not log.created_at or not message.created_at:
+            return True
+        if abs((log.created_at - message.created_at).total_seconds()) <= 300:
+            return True
+    return False
+
+
+def bot_dialogs_payload(session: Session) -> list[dict[str, Any]]:
+    dialogs: dict[str, dict[str, Any]] = {}
+    leases = session.scalars(
+        select(Lease)
+        .options(
+            joinedload(Lease.apartment).joinedload(Apartment.object),
+            joinedload(Lease.tenant),
+        )
+        .where(Lease.active.is_(True))
+        .order_by(Lease.start_date.desc(), Lease.id.desc())
+    ).all()
+    for lease in leases:
+        if lease.apartment and lease.apartment.active and not lease_ignored(session, lease.id):
+            ensure_bot_dialog_for_lease(session, dialogs, lease)
+
+    logs = session.scalars(
+        select(MessageLog)
+        .where(MessageLog.channel == "telegram")
+        .order_by(MessageLog.created_at.desc(), MessageLog.id.desc())
+        .limit(BOT_DIALOG_LIST_LIMIT)
+    ).all()
+    for log in logs:
+        dialog = bot_dialog_for_message_log(session, dialogs, log)
+        if dialog:
+            update_bot_dialog_last(
+                dialog,
+                log.text,
+                log.created_at,
+                "incoming" if log.status == "incoming" else "outgoing",
+            )
+
+    ai_messages = session.scalars(
+        select(AiMessage)
+        .options(joinedload(AiMessage.conversation))
+        .where(AiMessage.channel == "telegram")
+        .order_by(AiMessage.created_at.desc(), AiMessage.id.desc())
+        .limit(BOT_DIALOG_LIST_LIMIT)
+    ).all()
+    for message in ai_messages:
+        dialog = bot_dialog_for_ai_message(session, dialogs, message)
+        if dialog:
+            update_bot_dialog_last(
+                dialog,
+                message.text,
+                message.created_at,
+                "incoming" if message.role == "user" else "outgoing",
+            )
+
+    return sorted(
+        dialogs.values(),
+        key=lambda item: (
+            bool(item.get("last_at")),
+            str(item.get("last_at") or ""),
+            bool(item.get("linked")),
+            str(item.get("title") or ""),
+        ),
+        reverse=True,
+    )
+
+
+def resolve_bot_dialog_target(session: Session, dialog_id: str) -> dict[str, Any]:
+    raw = str(dialog_id or "").strip()
+    if raw.startswith("lease:"):
+        try:
+            lease_id = int(raw.split(":", 1)[1])
+        except ValueError as exc:
+            raise HTTPException(400, "Некорректный id диалога") from exc
+        lease = lease_for_dialog(session, lease_id)
+        if not lease:
+            raise HTTPException(404, "Диалог не найден")
+        return {"dialog_id": bot_dialog_id_for_lease(lease.id), "lease": lease, "chat_id": latest_dialog_chat_id(session, lease)}
+    if raw.startswith("owner:") or raw.startswith("chat:"):
+        _kind, chat_id = raw.split(":", 1)
+        chat_id = chat_id.strip()
+        if not chat_id:
+            raise HTTPException(400, "В диалоге нет chat id")
+        return {"dialog_id": raw, "lease": None, "chat_id": chat_id}
+    raise HTTPException(400, "Некорректный id диалога")
+
+
+def bot_dialog_messages_payload(session: Session, dialog_id: str, limit: int = BOT_DIALOG_HISTORY_LIMIT) -> dict[str, Any]:
+    target = resolve_bot_dialog_target(session, dialog_id)
+    lease: Lease | None = target["lease"]
+    chat_id = str(target["chat_id"] or "")
+    conditions = []
+    if lease:
+        conditions.append(MessageLog.lease_id == lease.id)
+    if chat_id:
+        conditions.append(MessageLog.recipient_chat_id == chat_id)
+    if not conditions:
+        raise HTTPException(400, "У диалога ещё нет Telegram chat id")
+
+    logs = session.scalars(
+        select(MessageLog)
+        .where(MessageLog.channel == "telegram", or_(*conditions))
+        .order_by(MessageLog.created_at.desc(), MessageLog.id.desc())
+        .limit(max(limit * 2, limit))
+    ).all()
+
+    if lease:
+        ai_query = (
+            select(AiMessage)
+            .options(joinedload(AiMessage.conversation))
+            .where(AiMessage.channel == "telegram", AiMessage.lease_id == lease.id)
+        )
+    else:
+        ai_query = (
+            select(AiMessage)
+            .join(AiConversation, AiMessage.conversation_id == AiConversation.id)
+            .options(joinedload(AiMessage.conversation))
+            .where(AiMessage.channel == "telegram", AiConversation.chat_id == chat_id)
+        )
+    ai_messages = session.scalars(
+        ai_query.order_by(AiMessage.created_at.desc(), AiMessage.id.desc()).limit(max(limit * 2, limit))
+    ).all()
+
+    incoming_logs = [log for log in logs if log.status == "incoming"]
+    messages = [serialize_bot_dialog_log_message(session, log) for log in logs]
+    for message in ai_messages:
+        if message.role == "user" and bot_dialog_message_matches_log(message, incoming_logs):
+            continue
+        messages.append(serialize_bot_dialog_ai_message(message))
+
+    messages = sorted(messages, key=lambda item: (item["created_at"], item["id"]))[-limit:]
+    return {
+        "dialog": target["dialog_id"],
+        "chat_id": chat_id,
+        "linked": bool(chat_id),
+        "messages": messages,
+    }
+
+
+def telegram_history_text(message: dict[str, Any]) -> str:
+    parts: list[str] = []
+    text = (message.get("text") or message.get("caption") or "").strip()
+    if text:
+        parts.append(text)
+    contact = message.get("contact") or {}
+    if contact:
+        phone = str(contact.get("phone_number") or "").strip()
+        name = " ".join(str(contact.get(key) or "").strip() for key in ("first_name", "last_name")).strip()
+        parts.append(f"[контакт] {name or phone}".strip())
+    document = message.get("document") or {}
+    if document:
+        parts.append(f"[документ] {document.get('file_name') or document.get('file_id') or 'файл'}")
+    if message.get("photo"):
+        parts.append("[фото]")
+    if message.get("voice"):
+        parts.append("[голосовое сообщение]")
+    if message.get("sticker"):
+        parts.append("[стикер]")
+    return "\n".join(part for part in parts if part).strip() or "[служебное сообщение Telegram]"
+
+
+def log_telegram_incoming_message(
+    session: Session,
+    message: dict[str, Any],
+    lease: Lease | None,
+    *,
+    is_owner: bool,
+) -> None:
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    if not chat_id:
+        return
+    message_id = message.get("message_id")
+    note = f"incoming:{'owner' if is_owner else 'tenant'}:{message_id or ''}"
+    if message_id:
+        existing = session.scalar(
+            select(MessageLog.id)
+            .where(
+                MessageLog.channel == "telegram",
+                MessageLog.status == "incoming",
+                MessageLog.recipient_chat_id == str(chat_id),
+                MessageLog.note.like(f"{note}%"),
+            )
+            .limit(1)
+        )
+        if existing:
+            return
+    sender = message_sender_label(message)
+    session.add(
+        MessageLog(
+            lease_id=lease.id if lease else None,
+            channel="telegram",
+            template_key="telegram_incoming",
+            status="incoming",
+            recipient_chat_id=str(chat_id),
+            text=telegram_history_text(message),
+            note=f"{note}; sender={sender}",
+        )
+    )
+    session.flush()
 
 
 def int_selection(values: Any) -> set[int]:
@@ -8853,6 +9307,7 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
     owner_id = telegram_owner_chat_id(session)
     is_owner = owner_message_allowed(session, message)
     linked_lease = None if is_owner else maybe_link_tenant_chat(session, message)
+    log_telegram_incoming_message(session, message, linked_lease, is_owner=is_owner)
     preparation_ms = int((time_module.perf_counter() - started) * 1000)
     runtime_log(
         "TELEGRAM",
@@ -9377,6 +9832,56 @@ def send_message_to_tenant(payload: dict[str, Any], session: Session = Depends(g
     )
     session.commit()
     return result
+
+
+@app.get("/api/bot-dialogs")
+def list_bot_dialogs(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    return bot_dialogs_payload(session)
+
+
+@app.get("/api/bot-dialogs/{dialog_id}/messages")
+def get_bot_dialog_messages(
+    dialog_id: str,
+    limit: int = BOT_DIALOG_HISTORY_LIMIT,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    safe_limit = max(20, min(int(limit or BOT_DIALOG_HISTORY_LIMIT), BOT_DIALOG_HISTORY_LIMIT))
+    return bot_dialog_messages_payload(session, dialog_id, safe_limit)
+
+
+@app.post("/api/bot-dialogs/{dialog_id}/send")
+def send_bot_dialog_message(dialog_id: str, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
+    target = resolve_bot_dialog_target(session, dialog_id)
+    lease: Lease | None = target["lease"]
+    chat_id = str(target["chat_id"] or "").strip()
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "Введите текст сообщения")
+    if len(text) > 4000:
+        raise HTTPException(400, "Telegram не любит сообщения длиннее 4000 символов. Тут без романа, пожалуйста.")
+    if not chat_id:
+        raise HTTPException(400, "Этот диалог ещё не привязан к Telegram-чату")
+
+    log = MessageLog(
+        lease_id=lease.id if lease else None,
+        channel="telegram",
+        template_key="direct",
+        status="sent",
+        recipient_chat_id=chat_id,
+        text=text,
+        note="web-dialog",
+    )
+    try:
+        send_telegram_text(session, chat_id, text)
+    except HTTPException as exc:
+        log.status = "failed"
+        log.note = f"web-dialog: {exc.detail}"
+        session.add(log)
+        session.commit()
+        raise
+    session.add(log)
+    session.commit()
+    return {"ok": True, "message": serialize_bot_dialog_log_message(session, log)}
 
 
 @app.post("/api/reminders/run")
@@ -11279,6 +11784,20 @@ def ensure_utility_advance_drafts_for_bills(session: Session, bills: list[Utilit
     return result
 
 
+def refreshed_utility_issue_group_bills(session: Session, bill: UtilityBill) -> list[UtilityBill]:
+    bills = utility_issue_group_bills(session, bill)
+    usage_bills = [
+        item
+        for item in bills
+        if not utility_bill_is_advance(item) and item.status == "draft"
+    ]
+    if not usage_bills:
+        return bills
+    ensure_utility_advance_drafts_for_bills(session, usage_bills)
+    session.flush()
+    return utility_issue_group_bills(session, bill)
+
+
 def exception_detail_text(exc: BaseException) -> str:
     if isinstance(exc, HTTPException):
         detail = exc.detail
@@ -11311,7 +11830,7 @@ def issue_utility_bill(bill_id: int, session: Session = Depends(get_session)) ->
     bill = session.get(UtilityBill, bill_id)
     if not bill:
         raise HTTPException(404, "Коммунальный счёт не найден")
-    bills = utility_issue_group_bills(session, bill)
+    bills = refreshed_utility_issue_group_bills(session, bill)
     previews = utility_issue_targets_for_bills(session, bills)
     due = resident_due_date_for_bills(bills)
     for item in bills:
@@ -11382,7 +11901,7 @@ def preview_issue_utility_bill(bill_id: int, session: Session = Depends(get_sess
     bill = session.get(UtilityBill, bill_id)
     if not bill:
         raise HTTPException(404, "Коммунальный счёт не найден")
-    bills = utility_issue_group_bills(session, bill)
+    bills = refreshed_utility_issue_group_bills(session, bill)
     object_name = bill.service.object.name
     services = [utility_bill_service_label(item) for item in bills]
     period_label = (

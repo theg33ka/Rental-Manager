@@ -7,6 +7,11 @@ const state = {
   expenses: [],
   tariffs: [],
   messageTargets: [],
+  botDialogs: [],
+  botDialogMessages: [],
+  selectedBotDialogId: null,
+  botDialogsLoaded: false,
+  botDialogLoading: false,
   messagePreview: null,
   suspiciousReceipts: [],
   paymentHistory: null,
@@ -22,7 +27,7 @@ const state = {
   loadFailures: [],
 };
 
-const ownerTabs = ["dashboard", "tenants", "rent", "meters", "utilities", "tariffs", "expenses", "reports", "messages", "automation", "settings"];
+const ownerTabs = ["dashboard", "tenants", "rent", "meters", "utilities", "tariffs", "expenses", "reports", "dialogs", "messages", "automation", "settings"];
 const guestTabs = ["dashboard", "reports"];
 const appStateLoadGroups = [
   {
@@ -1001,6 +1006,7 @@ function renderAll() {
   renderUtilities();
   renderTariffs();
   renderExpenses();
+  renderBotMessenger();
   renderMessages();
   renderMessagePreview();
   renderSuspiciousReceipts();
@@ -2888,6 +2894,203 @@ function renderExpenses() {
   qs("#expenseList").innerHTML = `${summary}${table(["Дата", "Объект", "Квартира", "Категория", "Сумма", "Источник", "Компенсация", "Описание", "Действия"], rows)}`;
 }
 
+function botDialogById(dialogId = state.selectedBotDialogId) {
+  return state.botDialogs.find((dialog) => dialog.id === dialogId) || null;
+}
+
+function botDialogStatus(dialog) {
+  if (!dialog) return "";
+  if (!dialog.linked) return '<span class="pill warn">ждём /start</span>';
+  if (dialog.kind === "owner") return '<span class="pill">owner</span>';
+  return '<span class="pill ok">бот привязан</span>';
+}
+
+function botDialogMessageTime(value) {
+  return value ? formatDateTime(value) : "";
+}
+
+function scrollBotDialogToBottom() {
+  const node = qs("#botDialogMessages");
+  if (node) node.scrollTop = node.scrollHeight;
+}
+
+function renderBotDialogList() {
+  const root = qs("#botDialogList");
+  if (!root) return;
+  if (state.botDialogLoading && !state.botDialogs.length) {
+    root.innerHTML = `<div class="dialog-empty">Загружаю диалоги</div>`;
+    return;
+  }
+  if (!state.botDialogs.length) {
+    root.innerHTML = `<div class="dialog-empty">Диалогов пока нет</div>`;
+    return;
+  }
+  root.innerHTML = state.botDialogs.map((dialog) => {
+    const active = dialog.id === state.selectedBotDialogId;
+    const lastPrefix = dialog.last_direction === "outgoing" ? "Бот: " : dialog.last_direction === "incoming" ? "" : "";
+    return `
+      <button class="dialog-item ${active ? "active" : ""}" type="button" onclick="selectBotDialog('${escapeAttr(dialog.id)}')">
+        <span class="dialog-item__avatar">${escapeHtml((dialog.title || "?").slice(0, 1).toUpperCase())}</span>
+        <span class="dialog-item__body">
+          <span class="dialog-item__top">
+            <strong>${escapeHtml(dialog.title || "Без имени")}</strong>
+            <small>${escapeHtml(botDialogMessageTime(dialog.last_at))}</small>
+          </span>
+          <span class="dialog-item__place">${escapeHtml(dialog.subtitle || dialog.chat_id || "")}</span>
+          <span class="dialog-item__last">${escapeHtml(dialog.last_text ? `${lastPrefix}${dialog.last_text}` : dialog.linked ? "чат готов" : "чат не привязан")}</span>
+        </span>
+      </button>
+    `;
+  }).join("");
+}
+
+function renderBotDialogHeader() {
+  const root = qs("#botDialogHeader");
+  if (!root) return;
+  const dialog = botDialogById();
+  if (!dialog) {
+    root.innerHTML = `
+      <div>
+        <h3>Диалог не выбран</h3>
+        <span class="muted">История появится после выбора чата</span>
+      </div>
+    `;
+    return;
+  }
+  root.innerHTML = `
+    <div>
+      <h3>${escapeHtml(dialog.title || "Диалог")}</h3>
+      <span class="muted">${escapeHtml(dialog.subtitle || dialog.chat_id || "")}</span>
+    </div>
+    <div class="pill-row">
+      ${botDialogStatus(dialog)}
+      ${dialog.chat_id ? `<span class="pill">chat ${escapeHtml(dialog.chat_id)}</span>` : ""}
+    </div>
+  `;
+}
+
+function renderBotDialogMessages() {
+  const root = qs("#botDialogMessages");
+  if (!root) return;
+  const dialog = botDialogById();
+  if (!dialog) {
+    root.innerHTML = `<div class="messenger-empty">Диалог не выбран</div>`;
+    return;
+  }
+  if (!state.botDialogMessages.length) {
+    root.innerHTML = `<div class="messenger-empty">История пока пустая</div>`;
+    return;
+  }
+  root.innerHTML = state.botDialogMessages.map((message) => {
+    const direction = message.direction === "incoming" ? "incoming" : message.direction === "system" ? "system" : "outgoing";
+    const statusClass = message.status === "failed" ? "failed" : "";
+    const meta = [
+      message.author || (direction === "incoming" ? "Собеседник" : "Бот"),
+      botDialogMessageTime(message.created_at),
+      message.status === "failed" ? "не отправлено" : "",
+    ].filter(Boolean).join(" · ");
+    return `
+      <article class="message-bubble ${direction} ${statusClass}">
+        <div class="message-bubble__meta">${escapeHtml(meta)}</div>
+        <div class="message-bubble__text">${escapeHtml(message.text || "").replaceAll("\n", "<br>")}</div>
+      </article>
+    `;
+  }).join("");
+}
+
+function setBotDialogComposeState() {
+  const dialog = botDialogById();
+  const input = qs("#botDialogInput");
+  const button = qs("#botDialogForm button[type='submit']");
+  const disabled = !dialog || !dialog.linked;
+  if (input) {
+    input.disabled = disabled;
+    input.placeholder = disabled ? "Чат ещё не привязан" : "Текст от имени бота";
+  }
+  if (button) button.disabled = disabled;
+}
+
+function renderBotMessenger() {
+  renderBotDialogList();
+  renderBotDialogHeader();
+  renderBotDialogMessages();
+  setBotDialogComposeState();
+}
+
+async function loadBotDialogMessages(dialogId = state.selectedBotDialogId, options = {}) {
+  if (!dialogId) {
+    state.botDialogMessages = [];
+    renderBotMessenger();
+    return;
+  }
+  const payload = await api(`/api/bot-dialogs/${encodeURIComponent(dialogId)}/messages`);
+  state.botDialogMessages = payload.messages || [];
+  renderBotMessenger();
+  if (options.scroll !== false) window.setTimeout(scrollBotDialogToBottom, 0);
+}
+
+async function loadBotDialogs(force = false) {
+  if (state.botDialogLoading) return;
+  if (state.botDialogsLoaded && !force) {
+    renderBotMessenger();
+    return;
+  }
+  state.botDialogLoading = true;
+  renderBotMessenger();
+  try {
+    state.botDialogs = await api("/api/bot-dialogs");
+    state.botDialogsLoaded = true;
+    if (!botDialogById() && state.botDialogs.length) {
+      state.selectedBotDialogId = state.botDialogs[0].id;
+    }
+    if (!state.botDialogs.some((dialog) => dialog.id === state.selectedBotDialogId)) {
+      state.selectedBotDialogId = state.botDialogs[0]?.id || null;
+    }
+    await loadBotDialogMessages(state.selectedBotDialogId, { scroll: true });
+  } finally {
+    state.botDialogLoading = false;
+    renderBotMessenger();
+  }
+}
+
+async function selectBotDialog(dialogId) {
+  if (!dialogId || dialogId === state.selectedBotDialogId) return;
+  state.selectedBotDialogId = dialogId;
+  state.botDialogMessages = [];
+  renderBotMessenger();
+  await loadBotDialogMessages(dialogId, { scroll: true });
+}
+
+async function submitBotDialogMessage(event) {
+  event.preventDefault();
+  const dialog = botDialogById();
+  const input = qs("#botDialogInput");
+  const text = input?.value.trim() || "";
+  if (!dialog || !dialog.linked) {
+    toast("Этот чат ещё не привязан к Telegram");
+    return;
+  }
+  if (!text) {
+    toast("Введите текст сообщения");
+    return;
+  }
+  const button = qs("#botDialogForm button[type='submit']");
+  if (button) button.disabled = true;
+  try {
+    await api(`/api/bot-dialogs/${encodeURIComponent(dialog.id)}/send`, {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    });
+    if (input) input.value = "";
+    toast("Сообщение отправлено от имени бота");
+    state.botDialogsLoaded = false;
+    await loadBotDialogs(true);
+  } finally {
+    if (button) button.disabled = false;
+    setBotDialogComposeState();
+  }
+}
+
 function groupedBroadcastTargets() {
   const groups = new Map();
   [...state.messageTargets].sort(compareApartmentRefs).forEach((target) => {
@@ -3647,6 +3850,9 @@ function bindEvents() {
       qsa(".panel").forEach((item) => item.classList.remove("active"));
       tab.classList.add("active");
       qs(`#${tab.dataset.tab}`)?.classList.add("active");
+      if (tab.dataset.tab === "dialogs") {
+        loadBotDialogs().catch((error) => toast(error.message));
+      }
     });
   });
 
@@ -3667,6 +3873,8 @@ function bindEvents() {
   on("#telegramWebhookBtn", "click", connectTelegramWebhook);
   on("#telegramWebhookInfoBtn", "click", telegramWebhookInfo);
   on("#telegramTestBtn", "click", sendTelegramTest);
+  on("#botDialogsRefreshBtn", "click", () => loadBotDialogs(true));
+  on("#botDialogForm", "submit", submitBotDialogMessage);
   on("#performanceRefreshBtn", "click", loadPerformanceMonitor);
   on("#loadRentBtn", "click", async () => {
     await loadRent();

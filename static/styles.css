@@ -746,6 +746,191 @@ section {
   color: var(--muted);
 }
 
+.messenger-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 360px) minmax(0, 1fr);
+  min-height: min(720px, calc(100vh - 250px));
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.dialog-list {
+  min-height: 420px;
+  max-height: min(720px, calc(100vh - 250px));
+  overflow: auto;
+  border-right: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg) 72%, var(--surface));
+}
+
+.dialog-item {
+  width: 100%;
+  min-height: 84px;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  padding: 12px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  text-align: left;
+  white-space: normal;
+}
+
+.dialog-item:hover,
+.dialog-item.active {
+  background: color-mix(in srgb, var(--primary) 11%, transparent);
+}
+
+.dialog-item.active {
+  box-shadow: inset 3px 0 0 var(--primary);
+}
+
+.dialog-item__avatar {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--primary);
+  color: #fff;
+  font-weight: 800;
+}
+
+.dialog-item__body {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.dialog-item__top {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.dialog-item__top strong,
+.dialog-item__place,
+.dialog-item__last {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dialog-item__top small,
+.dialog-item__place,
+.dialog-item__last,
+.dialog-empty,
+.messenger-empty {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.dialog-empty,
+.messenger-empty {
+  padding: 18px;
+}
+
+.messenger-chat {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: auto minmax(260px, 1fr) auto;
+  background:
+    linear-gradient(0deg, color-mix(in srgb, var(--bg) 42%, transparent), transparent),
+    var(--surface);
+}
+
+.messenger-head {
+  min-height: 76px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.messenger-head h3 {
+  margin: 0 0 3px;
+}
+
+.messenger-head .pill-row {
+  justify-content: flex-end;
+  margin: 0;
+}
+
+.messenger-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 320px;
+  max-height: min(620px, calc(100vh - 380px));
+  overflow: auto;
+  padding: 16px;
+}
+
+.message-bubble {
+  width: fit-content;
+  max-width: min(680px, 78%);
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 4px 14px rgba(35, 31, 24, 0.06);
+}
+
+.message-bubble.incoming {
+  align-self: flex-start;
+}
+
+.message-bubble.outgoing {
+  align-self: flex-end;
+  border-color: color-mix(in srgb, var(--primary) 46%, var(--line));
+  background: color-mix(in srgb, var(--ok-bg) 75%, var(--surface));
+}
+
+.message-bubble.system {
+  align-self: center;
+  max-width: 82%;
+  color: var(--muted);
+  background: var(--pill-bg);
+}
+
+.message-bubble.failed {
+  border-color: var(--danger);
+  background: var(--danger-bg);
+}
+
+.message-bubble__meta {
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.message-bubble__text {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.messenger-compose {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  padding: 12px;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.messenger-compose textarea {
+  min-height: 48px;
+  max-height: 180px;
+}
+
 .attention-actions {
   display: flex;
   flex-wrap: wrap;
@@ -1836,6 +2021,36 @@ td.actions .button {
   .attention-card__footer-actions > *,
   .attention-card__footer-primary > * {
     flex: 1 1 100%;
+  }
+
+  .messenger-layout {
+    grid-template-columns: 1fr;
+    min-height: auto;
+  }
+
+  .dialog-list {
+    max-height: 260px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .messenger-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .messenger-messages {
+    max-height: 56vh;
+    min-height: 300px;
+    padding: 12px;
+  }
+
+  .message-bubble {
+    max-width: 92%;
+  }
+
+  .messenger-compose {
+    grid-template-columns: 1fr;
   }
 
   .table-wrap {
