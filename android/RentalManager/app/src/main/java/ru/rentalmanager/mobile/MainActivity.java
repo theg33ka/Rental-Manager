@@ -59,17 +59,17 @@ public class MainActivity extends Activity {
         "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"
     };
 
-    private final int bg = Color.rgb(7, 10, 14);
-    private final int surface = Color.rgb(18, 23, 31);
-    private final int surface2 = Color.rgb(26, 33, 43);
-    private final int hairline = Color.rgb(44, 54, 68);
-    private final int text = Color.rgb(243, 247, 251);
-    private final int muted = Color.rgb(142, 153, 167);
-    private final int blue = Color.rgb(10, 132, 255);
-    private final int green = Color.rgb(48, 209, 88);
-    private final int orange = Color.rgb(255, 159, 10);
-    private final int red = Color.rgb(255, 69, 58);
-    private final int gray = Color.rgb(105, 112, 124);
+    private final int bg = Color.rgb(8, 11, 15);
+    private final int surface = Color.rgb(17, 24, 32);
+    private final int surface2 = Color.rgb(24, 33, 43);
+    private final int hairline = Color.rgb(42, 51, 62);
+    private final int text = Color.rgb(244, 241, 233);
+    private final int muted = Color.rgb(143, 154, 167);
+    private final int blue = Color.rgb(198, 165, 107);
+    private final int green = Color.rgb(111, 155, 124);
+    private final int orange = Color.rgb(201, 154, 85);
+    private final int red = Color.rgb(201, 111, 104);
+    private final int gray = Color.rgb(105, 116, 128);
 
     private ApiClient api;
     private FrameLayout appFrame;
@@ -211,28 +211,16 @@ public class MainActivity extends Activity {
 
     private void buildBottomNav() {
         bottomBar.removeAllViews();
-        if (premiumUiEnabled()) {
-            if (!isPremiumTab(currentTab)) currentTab = "dashboard";
-            addNav("Пульт", "dashboard");
-            addNav("Объекты", "properties");
-            addNav("Оплаты", "payments");
-            addNav("Дела", "tasks");
-            return;
-        }
-        if ("properties".equals(currentTab) || "tasks".equals(currentTab)) currentTab = "dashboard";
-        addNav("Дом", "dashboard");
-        addNav("Жильцы", "tenants");
+        if (!isOperationalTab(currentTab)) currentTab = "dashboard";
+        addNav("Пульт", "dashboard");
+        addNav("Дела", "tasks");
         addNav("Оплаты", "payments");
-        addNav("Учёт", "services");
+        addNav("Объекты", "properties");
         addNav("Ещё", "more");
     }
 
-    private boolean premiumUiEnabled() {
-        return NotificationPrefs.premiumUiEnabled(this);
-    }
-
-    private boolean isPremiumTab(String tab) {
-        return "dashboard".equals(tab) || "properties".equals(tab) || "payments".equals(tab) || "tasks".equals(tab);
+    private boolean isOperationalTab(String tab) {
+        return "dashboard".equals(tab) || "properties".equals(tab) || "payments".equals(tab) || "tasks".equals(tab) || "more".equals(tab);
     }
 
     private void addNav(String title, String tab) {
@@ -249,9 +237,7 @@ public class MainActivity extends Activity {
         if ("dashboard".equals(tab)) return "⌂\n" + title;
         if ("properties".equals(tab)) return "◩\n" + title;
         if ("tasks".equals(tab)) return "✓\n" + title;
-        if ("tenants".equals(tab)) return "◉\n" + title;
         if ("payments".equals(tab)) return "₽\n" + title;
-        if ("services".equals(tab)) return "▦\n" + title;
         return "⋯\n" + title;
     }
 
@@ -354,24 +340,17 @@ public class MainActivity extends Activity {
 
     private void renderCurrentTab() {
         try {
-            if (premiumUiEnabled()) {
-                renderPremiumCurrentTab();
-                return;
-            }
-            if ("dashboard".equals(currentTab)) renderDashboard();
-            else if ("tenants".equals(currentTab)) renderTenants();
-            else if ("payments".equals(currentTab)) renderPayments();
-            else if ("services".equals(currentTab)) renderServices();
-            else renderMore();
+            renderOperationalCurrentTab();
         } finally {
             hideLoadingCard();
         }
     }
 
-    private void renderPremiumCurrentTab() {
+    private void renderOperationalCurrentTab() {
         if ("properties".equals(currentTab)) renderPremiumProperties();
         else if ("payments".equals(currentTab)) renderPremiumPayments();
         else if ("tasks".equals(currentTab)) renderPremiumTasks();
+        else if ("more".equals(currentTab)) renderMore();
         else renderPremiumDashboard();
     }
 
@@ -621,9 +600,6 @@ public class MainActivity extends Activity {
 
     private void showAppMenuDialog() {
         LinearLayout form = dialogForm();
-        CheckBox premium = checkbox("Новый мобильный интерфейс");
-        premium.setChecked(premiumUiEnabled());
-        form.addView(premium);
         form.addView(secondaryButton("Сменить хост приложения", v -> showHostDialog()), new LinearLayout.LayoutParams(-1, dp(46)));
         form.addView(secondaryButton("Публичный URL и Telegram", v -> showServerSettingsDialog()), new LinearLayout.LayoutParams(-1, dp(46)));
         form.addView(secondaryButton("Экспорт базы", v -> download("/api/admin/database-export", "rental-manager-db.json")), new LinearLayout.LayoutParams(-1, dp(46)));
@@ -633,16 +609,7 @@ public class MainActivity extends Activity {
         new AlertDialog.Builder(this)
             .setTitle("Rental Manager")
             .setView(wrapDialog(form))
-            .setPositiveButton("Сохранить", (dialog, which) -> {
-                boolean changed = premium.isChecked() != premiumUiEnabled();
-                NotificationPrefs.setPremiumUiEnabled(this, premium.isChecked());
-                if (changed) {
-                    currentTab = "dashboard";
-                    buildBottomNav();
-                    loadCurrentTab(false);
-                }
-            })
-            .setNegativeButton("Закрыть", null)
+            .setPositiveButton("Закрыть", null)
             .show();
     }
 
@@ -2009,12 +1976,6 @@ public class MainActivity extends Activity {
         ui.addView(label("Видимость экранов", 19, text, true));
         ui.addView(label("Выберите, какие блоки показывать на каждой странице.", 14, muted, false));
         ui.addView(primaryButton("Настроить страницы", v -> showPageSectionsDialog()));
-        ui.addView(secondaryButton("Включить новый мобильный интерфейс", v -> {
-            NotificationPrefs.setPremiumUiEnabled(this, true);
-            currentTab = "dashboard";
-            buildBottomNav();
-            loadCurrentTab(false);
-        }));
         content.addView(ui);
 
         if (showSection("more_notifications")) {
@@ -2432,7 +2393,7 @@ public class MainActivity extends Activity {
                 String newUrl = NotificationPrefs.normalizeBaseUrl(input.getText().toString());
                 NotificationPrefs.setBaseUrl(this, newUrl);
                 if (!oldUrl.equals(newUrl)) {
-                    NotificationPrefs.prefs(this).edit().remove(ApiClient.KEY_SESSION_COOKIE).apply();
+                    new SessionStore(this).clear();
                 }
                 invalidateAllCaches();
                 screenSubtitle.setText(api.baseUrl());

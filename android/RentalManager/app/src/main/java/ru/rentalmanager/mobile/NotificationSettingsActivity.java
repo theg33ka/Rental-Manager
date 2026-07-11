@@ -20,12 +20,12 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 public class NotificationSettingsActivity extends Activity {
-    private final int bg = Color.rgb(7, 10, 14);
-    private final int surface = Color.rgb(18, 23, 31);
-    private final int field = Color.rgb(26, 33, 43);
-    private final int text = Color.rgb(243, 247, 251);
-    private final int muted = Color.rgb(142, 153, 167);
-    private final int blue = Color.rgb(10, 132, 255);
+    private final int bg = Color.rgb(8, 11, 15);
+    private final int surface = Color.rgb(17, 24, 32);
+    private final int field = Color.rgb(24, 33, 43);
+    private final int text = Color.rgb(244, 241, 233);
+    private final int muted = Color.rgb(143, 154, 167);
+    private final int blue = Color.rgb(198, 165, 107);
 
     private EditText baseUrl;
     private EditText quietStart;

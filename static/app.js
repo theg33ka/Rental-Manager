@@ -31,6 +31,20 @@ const state = {
 
 const ownerTabs = ["dashboard", "tenants", "rent", "meters", "utilities", "tariffs", "expenses", "reports", "dialogs", "messages", "automation", "settings"];
 const guestTabs = ["dashboard", "reports"];
+const panelMeta = {
+  dashboard: ["Операционный центр", "Состояние портфеля"],
+  tenants: ["Портфель", "Жильцы и договоры"],
+  rent: ["Финансы", "Начисления и оплаты"],
+  meters: ["Коммунальные услуги", "Показания счётчиков"],
+  utilities: ["Коммунальные услуги", "Счета и распределение"],
+  tariffs: ["Коммунальные услуги", "Тарифы"],
+  expenses: ["Финансы", "Расходы"],
+  reports: ["Аналитика", "Отчёты и документы"],
+  dialogs: ["Коммуникации", "Входящие диалоги"],
+  messages: ["Коммуникации", "Рассылки и шаблоны"],
+  automation: ["Управление", "Автоматизация"],
+  settings: ["Система", "Настройки"],
+};
 let activeNavGroup = "overview";
 const appStateLoadGroups = [
   {
@@ -268,6 +282,8 @@ function applyAccessUi() {
     badge.textContent = role === "owner" ? "owner" : role === "guest" ? "guest" : "PIN не введён";
     badge.className = `pill ${role === "owner" ? "ok" : role === "guest" ? "warn" : ""}`.trim();
   }
+  const visibleActiveTab = qs(".tab.active:not([hidden])");
+  if (visibleActiveTab) updateWorkspaceContext(visibleActiveTab.dataset.tab);
 }
 
 function activateNavGroup(groupName, selectDefault = true) {
@@ -276,6 +292,91 @@ function activateNavGroup(groupName, selectDefault = true) {
   if (!selectDefault) return;
   const firstAvailable = qsa(`.tab[data-group="${groupName}"]`).find((tab) => !tab.hidden && !tab.disabled);
   if (firstAvailable) firstAvailable.click();
+}
+
+function updateWorkspaceContext(tabName) {
+  const [context, title] = panelMeta[tabName] || ["Rental Manager", "Рабочая область"];
+  const contextNode = qs("#pageContext");
+  const titleNode = qs("#pageTitle");
+  if (contextNode) contextNode.textContent = isGuest() && tabName === "dashboard" ? "Owner view" : context;
+  if (titleNode) titleNode.textContent = isGuest() && tabName === "dashboard" ? "Сводка для владельца" : title;
+  document.title = `${title} · Rental Manager`;
+}
+
+function filterActivePanel(value) {
+  const query = String(value || "").trim().toLocaleLowerCase("ru");
+  const panel = qs(".panel.active");
+  if (!panel) return;
+  qsa("tbody tr, .attention-card, .dialog-item, .tariff-grid > *, .stack > .card", panel).forEach((item) => {
+    item.classList.toggle("search-hidden", Boolean(query) && !item.textContent.toLocaleLowerCase("ru").includes(query));
+  });
+}
+
+function closeQuickActions() {
+  const root = qs("#quickActionsModal");
+  if (!root) return;
+  root.hidden = true;
+  root.innerHTML = "";
+  restoreModalFocus(root);
+}
+
+function openQuickActions() {
+  if (!isOwner()) return;
+  const root = qs("#quickActionsModal");
+  if (!root) return;
+  root.innerHTML = `
+    <div class="modal-card">
+      <div class="section-title"><div><p class="eyebrow">Быстрый доступ</p><h2>Новое действие</h2></div><button class="mini" type="button" onclick="closeQuickActions()">Закрыть</button></div>
+      <div class="quick-actions-grid">
+        <button class="quick-action" type="button" onclick="runQuickAction('onboard')"><strong>Новый договор</strong><span>Заселить жильца и задать условия</span></button>
+        <button class="quick-action" type="button" onclick="runQuickAction('payment')"><strong>Зачесть платёж</strong><span>Наличные, перевод или корректировка</span></button>
+        <button class="quick-action" type="button" onclick="runQuickAction('reading')"><strong>Внести показание</strong><span>Добавить значение счётчика</span></button>
+        <button class="quick-action" type="button" onclick="runQuickAction('utility')"><strong>Рассчитать коммуналку</strong><span>Создать черновик начислений</span></button>
+        <button class="quick-action" type="button" onclick="runQuickAction('expense')"><strong>Добавить расход</strong><span>Зафиксировать операционные затраты</span></button>
+        <button class="quick-action" type="button" onclick="runQuickAction('message')"><strong>Отправить сообщение</strong><span>Открыть коммуникации с жильцами</span></button>
+      </div>
+    </div>
+  `;
+  openAccessibleModal(root, closeQuickActions);
+}
+
+function openOnboardTool() {
+  const tool = qs("#onboardTool");
+  if (!tool) return;
+  tool.open = true;
+  tool.scrollIntoView({ behavior: "smooth", block: "start" });
+  qs('#onboardForm select[name="apartment_id"]')?.focus();
+}
+
+function openManualPaymentTool() {
+  const tool = qs("#manualPaymentTool");
+  if (!tool) return;
+  tool.open = true;
+  tool.scrollIntoView({ behavior: "smooth", block: "start" });
+  qs("#manualPaymentLeaseSelect")?.focus();
+}
+
+function runQuickAction(action) {
+  closeQuickActions();
+  if (action === "onboard") {
+    openTenantsTab();
+    window.setTimeout(openOnboardTool, 0);
+  } else if (action === "payment") {
+    openRentTab();
+    window.setTimeout(openManualPaymentTool, 0);
+  } else if (action === "reading") {
+    openMetersTab();
+    window.setTimeout(() => qs('#readingForm select[name="meter_id"]')?.focus(), 0);
+  } else if (action === "utility") {
+    openUtilitiesTab();
+    window.setTimeout(() => qs("#utilityServiceSelect")?.focus(), 0);
+  } else if (action === "expense") {
+    openExpensesTab();
+    window.setTimeout(() => qs('#expenseForm input[name="amount"]')?.focus(), 0);
+  } else if (action === "message") {
+    openMessagesTab();
+    window.setTimeout(() => qs("#broadcastMessageInput")?.focus(), 0);
+  }
 }
 
 configureApiClient({
@@ -529,7 +630,7 @@ function monthMeta(value) {
 
 function applySettings(settings = {}) {
   state.settings = {
-    color_palette: "classic",
+    color_palette: "premium",
     app_base_url: "",
     telegram_owner_chat_id: "",
     notifications_enabled: false,
@@ -556,9 +657,9 @@ function applySettings(settings = {}) {
     hermes_api_key_configured: false,
     ...settings,
   };
-  document.body.dataset.palette = state.settings.color_palette || "classic";
+  document.body.dataset.palette = "premium";
   const select = qs("#paletteSelect");
-  if (select) select.value = state.settings.color_palette || "classic";
+  if (select) select.value = "premium";
   const appBase = qs("#appBaseUrlInput");
   const ownerChat = qs("#telegramOwnerChatIdInput");
   const token = qs("#telegramBotTokenInput");
@@ -1791,40 +1892,120 @@ function expenseFundCard(fund) {
   );
 }
 
+function dashboardDebtTotal(dashboard) {
+  const rentDebt = [
+    ...(dashboard.rent_overdue || []),
+    ...(dashboard.rent_partial || []),
+    ...(dashboard.rent_today || []),
+    ...(dashboard.rent_deferred || []),
+  ].reduce((total, item) => total
+    + Math.max(0, Number(item.ip_due || 0) - Number(item.ip_paid || 0))
+    + Math.max(0, Number(item.personal_due || 0) - Number(item.personal_paid || 0)), 0);
+  const utilityDebt = (dashboard.utility_issued || []).reduce(
+    (total, item) => total + Math.max(0, Number(item.total_amount || 0) - Number(item.paid_amount || 0)),
+    0,
+  );
+  const manualDebt = (dashboard.manual_debts || []).reduce(
+    (total, item) => total + Number(item.outstanding_amount ?? item.amount ?? 0),
+    0,
+  );
+  return rentDebt + utilityDebt + manualDebt;
+}
+
+function metricCard(label, value, meta, tone = "") {
+  return `
+    <article class="metric ${tone ? `metric-${tone}` : ""}">
+      <span>${escapeHtml(label)}</span>
+      <strong>${value}</strong>
+      <small class="metric-meta">${escapeHtml(meta)}</small>
+    </article>
+  `;
+}
+
+function renderIncomeTrend(dashboard) {
+  const chart = qs("#incomeTrendChart");
+  const totalNode = qs("#incomeTrendTotal");
+  if (!chart) return;
+  const trend = dashboard.income_trend || [];
+  const total = trend.reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  if (totalNode) totalNode.textContent = total ? `Всего ${money(total)}` : "Нет поступлений";
+  if (!trend.length || !total) {
+    chart.innerHTML = `<div class="empty-state"><strong>Поступления пока не зафиксированы</strong><span>График появится после принятых оплат.</span></div>`;
+    return;
+  }
+  const peak = Math.max(...trend.map((item) => Number(item.amount || 0)), 1);
+  chart.innerHTML = `<div class="bar-chart">${trend.map((item) => {
+    const height = Math.max(3, Math.round((Number(item.amount || 0) / peak) * 100));
+    const monthLabel = formatMonth(`${item.period}-01`);
+    return `
+      <div class="bar-chart__item" title="${escapeAttr(monthLabel)}: ${escapeAttr(money(item.amount))}">
+        <div class="bar-chart__bar" style="height:${height}%"></div>
+        <small>${escapeHtml(monthLabel.slice(0, 3))}</small>
+      </div>
+    `;
+  }).join("")}</div>`;
+}
+
+function renderMonthSummary(dashboard) {
+  const node = qs("#monthSummaryCard");
+  if (!node) return;
+  const month = dashboard.month_summary || {};
+  const received = Number(month.salary_paid || 0) + Number(month.bill_payment_paid || 0) + Number(month.advance_paid || 0);
+  const expected = Number(month.salary_due || 0) + Number(month.bill_payment_due || 0) + Number(month.advance_due || 0);
+  const progress = expected > 0 ? Math.min(100, Math.round((received / expected) * 100)) : 0;
+  const occupied = Number(month.occupied || dashboard.object_summary?.occupied || 0);
+  const total = Number(month.total_apartments || dashboard.object_summary?.total || 0);
+  node.innerHTML = `
+    <div class="section-title"><div><p class="eyebrow">Текущий месяц</p><h2>Исполнение плана</h2></div><span>${progress}%</span></div>
+    <div class="month-summary">
+      <div class="month-summary__hero">
+        <span class="muted">Получено</span>
+        <strong>${money(received)}</strong>
+        <div class="progress-track"><span style="width:${progress}%"></span></div>
+      </div>
+      <div class="month-summary__rows">
+        <div class="month-summary__row"><span>Ожидается</span><strong>${money(expected)}</strong></div>
+        <div class="month-summary__row"><span>Аренда</span><strong>${money(month.salary_paid || 0)}</strong></div>
+        <div class="month-summary__row"><span>Коммунальные</span><strong>${money(month.bill_payment_paid || 0)}</strong></div>
+        <div class="month-summary__row"><span>Заполняемость</span><strong>${occupied}/${total}</strong></div>
+      </div>
+    </div>
+  `;
+}
+
 function renderDashboard() {
   const dashboard = state.bootstrap.dashboard;
+  const month = dashboard.month_summary || {};
+  const received = Number(month.salary_paid || 0) + Number(month.bill_payment_paid || 0) + Number(month.advance_paid || 0);
+  const expected = Number(month.salary_due || 0) + Number(month.bill_payment_due || 0) + Number(month.advance_due || 0);
+  const debt = dashboardDebtTotal(dashboard);
+  const occupied = Number(month.occupied || dashboard.object_summary?.occupied || 0);
+  const totalApartments = Number(month.total_apartments || dashboard.object_summary?.total || 0);
+  const occupancy = totalApartments ? Math.round((occupied / totalApartments) * 100) : 0;
+  qs("#summaryGrid").innerHTML = [
+    metricCard("Поступило", money(received), "Принятые оплаты за месяц", "success"),
+    metricCard("Ожидается", money(Math.max(0, expected - received)), "Остаток плановых поступлений", "accent"),
+    metricCard("Задолженность", money(debt), debt ? "Требует контроля" : "Просрочек нет", debt ? "danger" : "success"),
+    metricCard("Заполняемость", `${occupancy}%`, `${occupied} из ${totalApartments} квартир`, occupancy < 90 ? "accent" : "success"),
+  ].join("");
+  renderIncomeTrend(dashboard);
+  renderMonthSummary(dashboard);
   if (isGuest()) {
     const summary = dashboard.summary_counts || {};
-    const metrics = [
+    renderMonthlyReportTray(dashboard.monthly_reports || []);
+    const cards = [
       ["Просрочка аренды", Number(summary.rent_overdue || 0)],
       ["Частичная аренда", Number(summary.rent_partial || 0)],
       ["Коммуналка просрочена", Number(summary.utility_overdue || 0)],
-      ["Коммуналка выставлена", Number(summary.utility_issued || 0)],
       ["Долги поставщикам", Number(summary.provider_debts || 0)],
       ["Показания устарели", Number(summary.stale_readings || 0)],
-      ["Подозрительные чеки", Number(summary.suspicious_receipts || 0)],
-      ["Отчёты открыты", (dashboard.monthly_reports || []).length],
-    ];
-    qs("#summaryGrid").innerHTML = metrics.map(([label, value]) => `<div class="metric"><strong>${value}</strong><span>${label}</span></div>`).join("");
-    renderMonthlyReportTray(dashboard.monthly_reports || []);
-    const cards = metrics
+    ]
       .filter(([, value]) => value > 0)
       .slice(0, 6)
-      .map(([label, value]) => attentionCard("warn", label, `<p class="attention-lead">Сейчас отмечено ${value}.</p><p class="muted">Гостевой режим показывает только общую картину. Подробности и кнопки живут у owner.</p>`, "", `<span class="pill">${label}</span>`));
-    qs("#attentionList").innerHTML = cards.join("") || `<div class="card ok"><h3>Критичных задач не видно</h3><p class="muted">В гостевом режиме открытых проблем нет.</p></div>`;
+      .map(([label, value]) => attentionCard("warn", label, `<p class="attention-lead">Открыто: ${value}</p><p class="muted">Подробности доступны управляющему.</p>`, "", `<span class="pill">${label}</span>`));
+    qs("#attentionList").innerHTML = cards.join("") || `<div class="empty-state"><strong>Портфель работает штатно</strong><span>Критичных отклонений не зафиксировано.</span></div>`;
     return;
   }
-  const metrics = [
-    ["Просрочка аренды", dashboard.rent_overdue.length],
-    ["Частичная аренда", dashboard.rent_partial.length],
-    ["Коммуналка просрочена", dashboard.utility_overdue.length],
-    ["Коммуналка выставлена", (dashboard.utility_issued || []).length],
-    ["Ручные долги", (dashboard.manual_debts || []).length],
-    ["Счётчики давно", dashboard.stale_readings.length],
-    ["Подозрительные чеки", dashboard.suspicious_receipts.length],
-    ["Отчёты открыты", dashboard.monthly_reports.length],
-  ];
-  qs("#summaryGrid").innerHTML = metrics.map(([label, value]) => `<div class="metric"><strong>${value}</strong><span>${label}</span></div>`).join("");
   renderMonthlyReportTray(dashboard.monthly_reports);
 
   state.dashboardAttentionGroups = collectTenantAttentionGroups(dashboard);
@@ -1844,13 +2025,13 @@ function renderMonthlyReportTray(reports = []) {
     return;
   }
   tray.innerHTML = reports.map((report) => `
-    <div class="report-status report-${report.severity}" role="button" tabindex="0" onclick="openMonthlyReport(${report.year}, ${report.month}, '${report.kind || "full"}')">
+    <article class="report-status report-${report.severity}">
       <div class="report-status__head">
-        <strong>${report.title}</strong>
+        <button class="report-open" type="button" onclick="openMonthlyReport(${report.year}, ${report.month}, '${report.kind || "full"}')"><strong>${report.title}</strong></button>
         ${isOwner() ? `<button class="mini report-accept" title="Отчёт принят" onclick="acceptMonthlyReport(event, ${report.year}, ${report.month}, '${report.kind || "full"}')">✓</button>` : ""}
       </div>
-      <span>${monthlySeverityText(report)} · ${report.issue_count} проблем</span>
-    </div>
+      <button class="report-summary" type="button" onclick="openMonthlyReport(${report.year}, ${report.month}, '${report.kind || "full"}')">${monthlySeverityText(report)} · ${report.issue_count} проблем</button>
+    </article>
   `).join("");
 }
 function monthlySeverityText(report) {
@@ -1920,12 +2101,18 @@ function attentionCard(type, title, text, actions, badges) {
 
 function renderObjects() {
   const summary = state.bootstrap.dashboard.object_summary;
-  const objects = summary.by_object.map((item) => `<span class="pill ${item.occupied === item.total ? "ok" : "warn"}">${item.object}: ${item.occupied}/${item.total}</span>`).join("");
+  const objects = summary.by_object.map((item) => {
+    const percent = item.total ? Math.round((item.occupied / item.total) * 100) : 0;
+    return `
+      <div class="portfolio-row">
+        <div><strong>${escapeHtml(item.object)}</strong><span>${item.occupied} из ${item.total} занято</span></div>
+        <div class="occupancy-value"><strong>${percent}%</strong><div class="progress-track"><span style="width:${percent}%"></span></div></div>
+      </div>
+    `;
+  }).join("");
   qs("#objectCards").innerHTML = `
     <article class="card">
-      <h3>Заселено ${summary.occupied}/${summary.total}</h3>
-      <div class="pill-row">${objects}</div>
-      ${isOwner() ? '<button class="mini" onclick="openTenantsTab()">Подробнее</button>' : '<p class="muted">Управление доступно владельцу.</p>'}
+      ${objects || '<div class="empty-state"><strong>Объектов пока нет</strong><span>Добавьте объект и квартиры в разделе портфеля.</span></div>'}
     </article>
   `;
 }
@@ -1944,12 +2131,17 @@ function renderLeases() {
       <td>${statusPill(lease.active ? "issued" : "paid")}${lease.ignored ? '<br><span class="pill warn">только информация</span>' : ""}${lease.apartment_active ? "" : '<br><span class="pill warn">квартира выключена</span>'}</td>
       <td class="actions">
         ${contactButtons(lease)}
-        <button class="mini" onclick="startLeaseEdit(${lease.id})">Ред.</button>
-        <button class="mini" onclick="openManualDebt(${lease.id})">Др. долги</button>
-        <label class="checkbox-inline mini-checkbox"><input type="checkbox" ${lease.ignored ? "checked" : ""} onchange="toggleLeaseIgnored(${lease.id}, this.checked)" /> игнор</label>
-        ${lease.active ? `<button class="mini" onclick="transferLease(${lease.id})">Переезд</button>` : ""}
-        ${lease.active ? `<button class="mini danger-soft" onclick="moveOut(${lease.id})">Выезд</button>` : ""}
-        <button class="mini danger-soft" onclick="deleteLease(${lease.id})">Удалить</button>
+        <button class="mini" onclick="startLeaseEdit(${lease.id})">Изменить</button>
+        <button class="mini" onclick="openManualDebt(${lease.id})">Долги</button>
+        <details class="action-menu">
+          <summary>Ещё</summary>
+          <div>
+            <label class="checkbox-inline"><input type="checkbox" ${lease.ignored ? "checked" : ""} onchange="toggleLeaseIgnored(${lease.id}, this.checked)" /> Только информация</label>
+            ${lease.active ? `<button class="mini" onclick="transferLease(${lease.id})">Оформить переезд</button>` : ""}
+            ${lease.active ? `<button class="mini danger-soft" onclick="moveOut(${lease.id})">Оформить выезд</button>` : ""}
+            <button class="mini danger-soft" onclick="deleteLease(${lease.id})">Удалить договор</button>
+          </div>
+        </details>
       </td>
     </tr>
   `).join("");
@@ -2009,6 +2201,10 @@ function startLeaseEdit(leaseId) {
   form.elements.deposit_terms.value = lease.deposit_terms || "";
   form.elements.notes.value = lease.notes || "";
   form.elements.ignored.checked = Boolean(lease.ignored);
+  const tool = qs("#onboardTool");
+  if (tool) tool.open = true;
+  const title = qs("#onboardFormTitle");
+  if (title) title.textContent = "Редактирование договора";
   form.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
@@ -2016,6 +2212,8 @@ function cancelLeaseEdit() {
   state.editingLeaseId = null;
   const form = qs("#onboardForm");
   if (form) form.reset();
+  const title = qs("#onboardFormTitle");
+  if (title) title.textContent = "Заселение";
   hydrateForms();
 }
 
@@ -3443,12 +3641,6 @@ async function payUtility(id, suggested) {
   await loadAll();
 }
 
-async function issueBill(id) {
-  await api(`/api/utility-bills/${id}/issue`, { method: "POST", body: "{}" });
-  toast("Счёт выставлен жильцам");
-  await loadAll();
-}
-
 async function deleteUtilityBill(id, status = "draft") {
   const issued = status !== "draft";
   const question = issued
@@ -3850,6 +4042,10 @@ function bindEvents() {
       qsa(".panel").forEach((item) => item.classList.remove("active"));
       tab.classList.add("active");
       qs(`#${tab.dataset.tab}`)?.classList.add("active");
+      updateWorkspaceContext(tab.dataset.tab);
+      const search = qs("#globalSearch");
+      if (search) search.value = "";
+      filterActivePanel("");
       if (tab.dataset.tab === "dialogs") {
         loadBotDialogs().catch((error) => toast(error.message));
       }
@@ -3868,9 +4064,12 @@ function bindEvents() {
   });
 
   on("#refreshBtn", "click", () => loadAll({ fullScreen: true }));
+  on("#quickActionsBtn", "click", openQuickActions);
+  on("#globalSearch", "input", (event) => filterActivePanel(event.currentTarget.value));
   on("#pinLoginForm", "submit", submitPinLogin);
   on("#logoutBtn", "click", logoutPanel);
   on("#runRemindersBtn", "click", runRemindersNow);
+  on("#runRemindersInlineBtn", "click", runRemindersNow);
   on("#importBaselineBtn", "click", importBaseline);
   on("#databaseExportBtn", "click", exportDatabase);
   on("#databaseImportInspectBtn", "click", inspectDatabaseImport);
@@ -3905,9 +4104,27 @@ function bindEvents() {
       toast("Жилец заселён");
     }
     form.reset();
+    const tool = qs("#onboardTool");
+    if (tool) tool.open = false;
+    const title = qs("#onboardFormTitle");
+    if (title) title.textContent = "Заселение";
     await loadAll({ refreshSections: registryRefreshSections });
   });
   on("#cancelLeaseEditBtn", "click", cancelLeaseEdit);
+  on("#objectForm", "submit", async (event) => {
+    event.preventDefault();
+    await api("/api/objects", { method: "POST", body: JSON.stringify(formData(event.currentTarget)) });
+    event.currentTarget.reset();
+    toast("Объект создан");
+    await loadAll({ refreshSections: registryRefreshSections });
+  });
+  on("#apartmentForm", "submit", async (event) => {
+    event.preventDefault();
+    await api("/api/apartments", { method: "POST", body: JSON.stringify(formData(event.currentTarget)) });
+    event.currentTarget.reset();
+    toast("Квартира создана");
+    await loadAll({ refreshSections: registryRefreshSections });
+  });
 
   on("#readingForm", "submit", async (event) => {
     event.preventDefault();

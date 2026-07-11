@@ -27,7 +27,7 @@ final class NotificationRepository {
             connection.setReadTimeout(12000);
             connection.setRequestProperty("Accept", "application/json");
             connection.setRequestProperty("User-Agent", "RentalManagerAndroid/1.0");
-            String cookies = NotificationPrefs.prefs(context).getString(ApiClient.KEY_SESSION_COOKIE, "");
+            String cookies = new SessionStore(context).read();
             if (cookies != null && !cookies.trim().isEmpty()) {
                 connection.setRequestProperty("Cookie", cookies);
             }

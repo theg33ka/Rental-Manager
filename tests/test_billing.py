@@ -18,6 +18,7 @@ from rental_manager.database import Base
 from rental_manager.main import apartment_month_state, build_all_debts_breakdown, build_dashboard, create_manual_payment, create_move_out_utility_lines, delete_utility_bill, ensure_utility_advance_drafts_for_bills, expense_period_summary, issue_utility_bill, month_dashboard_summary, move_out, owner_charge_status_label, owner_expected_ip_for_charge, panel_role_for_pin, preview_issue_utility_bill, process_move_out_notifications, provider_reading_statuses_for_month, render_message_text, rent_report, resolve_broadcast_recipients, transfer_lease, update_payment_receipt, utility_bill_for_month
 from rental_manager.main import apply_database_import_payload, current_database_snapshot, inspect_database_import_payload, parse_database_import_bytes
 from rental_manager.main import api_performance, app_state, record_perf_request
+from rental_manager.main import dashboard_income_trend
 from rental_manager.models import AppSetting, Apartment, Expense, Lease, MessageLog, Meter, MeterReading, PaymentReceipt, RentalObject, RentCharge, Tenant, UtilityBill, UtilityBillLine, UtilityService, Tariff
 from rental_manager.services.billing import (
     IGNORE_LEASE_MARK,
@@ -137,6 +138,17 @@ class AppStatePerformanceTests(DatabaseTestCase):
         self.assertIn("routes", snapshot)
         self.assertIn("ai_summary", snapshot)
         self.assertTrue(any(item["route"] == "GET /api/app-state" for item in snapshot["routes"]))
+
+    def test_guest_bootstrap_contains_only_safe_executive_metrics(self) -> None:
+        with self.seed() as session:
+            payload = app_state(DummyRequest("guest"), sections="bootstrap", session=session)["bootstrap"]
+
+        dashboard = payload["dashboard"]
+        self.assertIn("month_summary", dashboard)
+        self.assertEqual(len(dashboard["income_trend"]), 6)
+        self.assertIn("summary_counts", dashboard)
+        self.assertNotIn("rent_overdue", dashboard)
+        self.assertEqual(payload["objects"], [])
 
     def test_parse_database_import_bytes_rejects_wrong_payload(self) -> None:
         with self.assertRaises(HTTPException):
@@ -1642,6 +1654,21 @@ class UtilityAdvanceTests(DatabaseTestCase):
         self.assertEqual(summary["advance_paid"], 500)
         self.assertEqual(summary["advance_due"], 1000)
         self.assertEqual(summary["occupied"], 1)
+
+    def test_dashboard_income_trend_uses_only_accepted_receipts(self) -> None:
+        with self.Session() as session:
+            session.add_all(
+                [
+                    PaymentReceipt(amount=1500, channel="personal", paid_at=datetime(2026, 6, 5, 12, 0), status="accepted"),
+                    PaymentReceipt(amount=9000, channel="personal", paid_at=datetime(2026, 6, 6, 12, 0), status="rejected"),
+                ]
+            )
+            session.commit()
+
+            trend = dashboard_income_trend(session, today=date(2026, 7, 11), months=3)
+
+        self.assertEqual([item["period"] for item in trend], ["2026-05", "2026-06", "2026-07"])
+        self.assertEqual([item["amount"] for item in trend], [0, 1500, 0])
 
 
     def test_auto_advance_draft_uses_apartment_history_and_current_bill(self) -> None:

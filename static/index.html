@@ -220,6 +220,7 @@
       @keyframes loading-dot { 0%, 100% { opacity: .35; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-2px); } }
     </style>
     <link rel="stylesheet" href="/static/styles.css?v=2026-07-05-dialogs" />
+    <link rel="stylesheet" href="/static/premium.css?v=2026-07-11-operational" />
   </head>
   <body class="auth-locked app-loading">
     <div id="loadingOverlay" class="loading-overlay" role="status" aria-live="polite">
@@ -229,7 +230,7 @@
             <span></span><span></span><span></span>
             <span></span><span></span><span></span>
           </div>
-          <div class="loading-word">LOADING<br />SCREEN</div>
+          <div class="loading-word">RENTAL<br />MANAGER</div>
           <div class="loading-bottom">
             <div class="loading-dots"><span></span><span></span><span></span></div>
             <div class="loading-progress" aria-hidden="true">
@@ -247,70 +248,120 @@
       </div>
     </div>
 
-    <header class="topbar">
-      <div>
-        <p class="eyebrow">Rental Manager</p>
-        <h1>Пульт аренды</h1>
-      </div>
-      <div class="top-actions">
-        <span class="pill" id="authRoleBadge">PIN не введён</span>
-        <button id="logoutBtn" type="button" hidden>Выйти</button>
-        <button class="icon-button" id="refreshBtn" title="Обновить данные">⟳</button>
-        <button id="runRemindersBtn">Прогнать напоминания</button>
-      </div>
-    </header>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Навигация приложения">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">RM</div>
+          <div>
+            <strong>Rental Manager</strong>
+            <span>Operations</span>
+          </div>
+        </div>
+        <nav class="tabs sidebar-nav" aria-label="Основные разделы">
+          <button class="nav-group active" data-group="overview"><span class="nav-icon">⌂</span><span>Центр управления</span></button>
+          <button class="nav-group" data-group="rentals"><span class="nav-icon">▦</span><span>Портфель и финансы</span></button>
+          <button class="nav-group" data-group="utilities"><span class="nav-icon">◫</span><span>Коммунальные услуги</span></button>
+          <button class="nav-group" data-group="communications"><span class="nav-icon">◌</span><span>Коммуникации</span></button>
+          <button class="nav-group" data-group="administration"><span class="nav-icon">⚙</span><span>Управление системой</span></button>
+        </nav>
+        <div class="sidebar-foot">
+          <span class="connection-dot" aria-hidden="true"></span>
+          <div><strong>Система активна</strong><span>Данные синхронизированы</span></div>
+        </div>
+      </aside>
 
-    <nav class="tabs" aria-label="Основные разделы">
-      <button class="nav-group active" data-group="overview">Обзор</button>
-      <button class="nav-group" data-group="rentals">Арендаторы и платежи</button>
-      <button class="nav-group" data-group="utilities">Коммунальные услуги</button>
-      <button class="nav-group" data-group="communications">Коммуникации</button>
-      <button class="nav-group" data-group="administration">Администрирование</button>
-    </nav>
-    <nav class="section-tabs" aria-label="Подразделы">
-      <button class="tab active" data-group="overview" data-tab="dashboard">Сводка</button>
-      <button class="tab" data-group="rentals" data-tab="tenants">Арендаторы</button>
-      <button class="tab" data-group="rentals" data-tab="rent">Начисления и оплаты</button>
-      <button class="tab" data-group="utilities" data-tab="meters">Счётчики</button>
-      <button class="tab" data-group="utilities" data-tab="utilities">Начисления</button>
-      <button class="tab" data-group="utilities" data-tab="tariffs">Тарифы</button>
-      <button class="tab" data-group="administration" data-tab="expenses">Расходы</button>
-      <button class="tab" data-group="overview" data-tab="reports">Отчёты</button>
-      <button class="tab" data-group="communications" data-tab="dialogs">Диалоги</button>
-      <button class="tab" data-group="communications" data-tab="messages">Сообщения</button>
-      <button class="tab" data-group="administration" data-tab="automation">Автоматизация</button>
-      <button class="tab" data-group="administration" data-tab="settings">Настройки</button>
-    </nav>
+      <div class="workspace">
+        <header class="topbar">
+          <div class="topbar-title">
+            <p class="eyebrow" id="pageContext">Операционный центр</p>
+            <h1 id="pageTitle">Состояние портфеля</h1>
+          </div>
+          <div class="top-actions">
+            <label class="global-search" aria-label="Поиск на текущем экране">
+              <span aria-hidden="true">⌕</span>
+              <input id="globalSearch" type="search" placeholder="Поиск на экране" autocomplete="off" />
+            </label>
+            <button id="quickActionsBtn" class="primary" type="button">+ Действие</button>
+            <button class="icon-button" id="refreshBtn" title="Обновить данные" aria-label="Обновить данные">↻</button>
+            <span class="pill role-badge" id="authRoleBadge">PIN не введён</span>
+            <button id="logoutBtn" class="quiet-button" type="button" hidden>Выйти</button>
+            <button id="runRemindersBtn" class="quiet-button">Напоминания</button>
+          </div>
+        </header>
 
-    <main>
+        <nav class="section-tabs" aria-label="Разделы рабочей области">
+          <button class="tab active" data-group="overview" data-tab="dashboard">Операционный центр</button>
+          <button class="tab" data-group="rentals" data-tab="tenants">Портфель</button>
+          <button class="tab" data-group="rentals" data-tab="rent">Финансы</button>
+          <button class="tab" data-group="utilities" data-tab="meters">Показания</button>
+          <button class="tab" data-group="utilities" data-tab="utilities">Счета</button>
+          <button class="tab" data-group="utilities" data-tab="tariffs">Тарифы</button>
+          <button class="tab" data-group="administration" data-tab="expenses">Расходы</button>
+          <button class="tab" data-group="overview" data-tab="reports">Аналитика и отчёты</button>
+          <button class="tab" data-group="communications" data-tab="dialogs">Входящие</button>
+          <button class="tab" data-group="communications" data-tab="messages">Рассылки и платежи</button>
+          <button class="tab" data-group="administration" data-tab="automation">Автоматизация</button>
+          <button class="tab" data-group="administration" data-tab="settings">Настройки</button>
+        </nav>
+
+        <main>
       <section class="panel active" id="dashboard">
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">Сегодня · операционная сводка</p>
+            <h2>Всё важное — в одном контуре</h2>
+            <p class="muted">Поступления, обязательства и задачи, требующие решения.</p>
+          </div>
+          <div class="page-heading-actions">
+            <button class="primary" type="button" onclick="openRentTab()">Открыть финансы</button>
+            <button type="button" onclick="openReportsTab()">Отчёты</button>
+          </div>
+        </div>
         <div class="summary-grid" id="summaryGrid"></div>
-        <div class="monthly-report-tray" id="monthlyReportTray"></div>
-        <section>
+        <div class="dashboard-grid">
+          <section class="dashboard-card dashboard-chart-card">
+            <div class="section-title">
+              <div><p class="eyebrow">Денежный поток</p><h2>Поступления за 6 месяцев</h2></div>
+              <span id="incomeTrendTotal"></span>
+            </div>
+            <div id="incomeTrendChart" class="chart-frame"></div>
+          </section>
+          <section class="dashboard-card" id="monthSummaryCard"></section>
+        </div>
+        <section class="dashboard-card">
           <div class="section-title">
-            <h2>Объекты кратко</h2>
-            <span>Подробные данные доступны в разделе жильцов</span>
+            <div><p class="eyebrow">Контроль периода</p><h2>Месячные отчёты</h2></div>
+            <span>Закройте вопросы до фиксации периода</span>
           </div>
-          <div id="objectCards" class="object-summary"></div>
+          <div class="monthly-report-tray" id="monthlyReportTray"></div>
         </section>
-        <section>
-          <div class="section-title">
-            <h2>Дашборд</h2>
-            <span>Основные задачи по арендаторам, коммунальным услугам и напоминаниям.</span>
-          </div>
-          <div id="attentionList" class="attention-grid"></div>
-        </section>
+        <div class="dashboard-columns">
+          <section class="dashboard-card">
+            <div class="section-title">
+              <div><p class="eyebrow">Портфель</p><h2>Заполняемость объектов</h2></div>
+              <button class="mini" type="button" onclick="openTenantsTab()">Открыть портфель</button>
+            </div>
+            <div id="objectCards" class="object-summary"></div>
+          </section>
+          <section class="dashboard-card attention-section">
+            <div class="section-title">
+              <div><p class="eyebrow">Очередь решений</p><h2>Требует внимания</h2></div>
+              <span>Сначала критичное</span>
+            </div>
+            <div id="attentionList" class="attention-grid"></div>
+          </section>
+        </div>
       </section>
 
       <section class="panel" id="tenants">
-        <div class="section-title">
-          <h2>Заселение</h2>
-          <span>Поля можно дозаполнить позже, потому что жизнь не ждёт форму</span>
+        <div class="page-heading">
+          <div><p class="eyebrow">Портфель</p><h2>Жильцы, договоры и квартиры</h2><p class="muted">Единый реестр размещения и условий аренды.</p></div>
+          <button class="primary" type="button" onclick="openOnboardTool()">+ Новый договор</button>
         </div>
-        <div class="section-title">
-          <button id="cancelLeaseEditBtn" class="mini" type="button" hidden>Отмена</button>
-        </div>
-        <form id="onboardForm" class="form-grid">
+        <details class="operational-tool" id="onboardTool">
+          <summary><span><strong>Новый договор</strong><small>Жилец, объект и финансовые условия</small></span></summary>
+          <div class="section-title"><h2 id="onboardFormTitle">Заселение</h2><button id="cancelLeaseEditBtn" class="mini" type="button" hidden>Отмена</button></div>
+          <form id="onboardForm" class="form-grid">
           <label>Квартира<select name="apartment_id" required></select></label>
           <label>ФИО<input name="full_name" placeholder="Иванов Иван Иванович" /></label>
           <label>Телефон<input name="phone" placeholder="+7..." /></label>
@@ -326,55 +377,106 @@
           <label class="checkbox-inline"><input type="checkbox" name="ignored" /> Только для информации</label>
           <label class="wide">Условия залога<textarea name="deposit_terms" rows="2"></textarea></label>
           <label class="wide">Комментарий<textarea name="notes" rows="2"></textarea></label>
-          <button id="onboardSubmitBtn" class="primary wide" type="submit">Заселить</button>
-        </form>
+            <button id="onboardSubmitBtn" class="primary wide" type="submit">Заселить</button>
+          </form>
+        </details>
+        <div class="portfolio-tools">
+          <details class="operational-tool">
+            <summary><span><strong>Добавить объект</strong><small>Новая площадка или дом</small></span></summary>
+            <form id="objectForm" class="form-grid compact">
+              <label>Название<input name="name" required placeholder="Например, Белая" /></label>
+              <label>Код<input name="short_code" maxlength="20" placeholder="BL" /></label>
+              <label class="wide">Комментарий<textarea name="notes" rows="2"></textarea></label>
+              <button class="primary wide" type="submit">Создать объект</button>
+            </form>
+          </details>
+          <details class="operational-tool">
+            <summary><span><strong>Добавить квартиру</strong><small>Расширить существующий объект</small></span></summary>
+            <form id="apartmentForm" class="form-grid compact">
+              <label>Объект<select name="object_id" id="newApartmentObjectSelect" required></select></label>
+              <label>Название<input name="name" required placeholder="Квартира 12" /></label>
+              <label>Порядок<input type="number" name="sort_order" value="0" /></label>
+              <label>Доля ОДН, %<input type="number" min="0" step="0.01" name="odn_share_percent" value="25" /></label>
+              <button class="primary wide" type="submit">Создать квартиру</button>
+            </form>
+          </details>
+        </div>
 
         <div class="section-title">
-          <h2>Активные жильцы</h2>
-          <span>Кнопки связи пока открывают стандартные ссылки</span>
+          <div><p class="eyebrow">Договоры</p><h2>Жильцы</h2></div>
+          <span>Контакты, условия, переезды и долги</span>
         </div>
         <div id="leaseList" class="table-wrap"></div>
 
         <div class="section-title">
-          <h2>Квартиры</h2>
-          <span>Неактивные квартиры исключаются из контроля, напоминаний и новых начислений.</span>
+          <div><p class="eyebrow">Реестр</p><h2>Квартиры</h2></div>
+          <span>Активность, заполняемость и коммунальные авансы</span>
         </div>
         <div id="apartmentRegistry" class="table-wrap"></div>
       </section>
 
       <section class="panel" id="rent">
-        <div class="section-title">
-          <h2>Аренда</h2>
-          <span>Две части платежа закрываются отдельно</span>
+        <div class="page-heading">
+          <div><p class="eyebrow">Финансы</p><h2>Начисления и оплаты</h2><p class="muted">Контроль аренды, каналов оплаты, чеков и задолженности.</p></div>
+          <button class="primary" type="button" onclick="openManualPaymentTool()">+ Зачесть платёж</button>
         </div>
-        <div class="filters">
+        <div class="filters command-bar">
           <label>С<input type="date" id="rentStart" /></label>
           <label>По<input type="date" id="rentEnd" /></label>
           <button id="loadRentBtn">Показать</button>
         </div>
         <div id="rentTable" class="table-wrap"></div>
         <div id="rentHistoryPanel" class="stack"></div>
+        <details class="operational-tool" id="manualPaymentTool">
+          <summary><span><strong>Добавить платёж вручную</strong><small>Наличные, перевод владельца или корректировка</small></span></summary>
+          <form id="manualPaymentForm" class="form-grid compact">
+            <label>Жилец<select name="lease_id" id="manualPaymentLeaseSelect" required></select></label>
+            <label>Тип платежа
+              <select name="kind" id="manualPaymentKindSelect">
+                <option value="rent">Аренда</option><option value="utility">Коммуналка</option><option value="utility_advance">Аванс коммуналки</option>
+              </select>
+            </label>
+            <label>Канал аренды
+              <select name="channel" id="manualPaymentChannelSelect">
+                <option value="personal">Перевод</option><option value="ip">ИП</option><option value="expense_fund">Мне на расходы</option>
+              </select>
+            </label>
+            <label>Источник
+              <select name="source"><option value="cash">Наличные</option><option value="owner_card">С моей карты</option><option value="manual">Ручная отметка</option></select>
+            </label>
+            <label>Дата и время<input type="datetime-local" name="paid_at" id="manualPaymentPaidAtInput" /></label>
+            <label id="manualPaymentTargetMonthLabel">Зачесть за месяц<select name="target_month" id="manualPaymentTargetMonthSelect"></select></label>
+            <label id="manualPaymentTargetYearLabel">Год<input type="number" min="2020" step="1" name="target_year" id="manualPaymentTargetYearInput" /></label>
+            <label>Сумма<input type="number" min="0" step="0.01" name="amount" required /></label>
+            <label class="wide">Комментарий<textarea name="notes" rows="2" placeholder="Наличные, перевод с карты, взаимозачёт"></textarea></label>
+            <button class="primary wide" type="submit">Зачесть платёж</button>
+          </form>
+        </details>
+        <div class="section-title"><div><p class="eyebrow">Контроль</p><h2>Чеки на проверке</h2></div><span>Подозрительные и нераспознанные операции</span></div>
+        <div id="suspiciousReceiptsPanel" class="stack"></div>
       </section>
 
       <section class="panel" id="meters">
-        <div class="section-title">
-          <h2>Показания</h2>
-          <span>Можно внести показание за прошлую дату</span>
+        <div class="page-heading">
+          <div><p class="eyebrow">Коммунальные услуги</p><h2>Показания счётчиков</h2><p class="muted">История значений и контроль актуальности по объектам.</p></div>
         </div>
-        <form id="readingForm" class="form-grid compact">
-          <label>Счётчик<select name="meter_id" required></select></label>
-          <label>Дата<input type="date" name="reading_date" required /></label>
-          <label>Показание<input type="number" step="0.001" name="value" required /></label>
-          <label>Комментарий<input name="note" /></label>
-          <button class="primary" type="submit">Сохранить</button>
-        </form>
+        <details class="operational-tool">
+          <summary><span><strong>Добавить показание</strong><small>Доступна любая дата учёта</small></span></summary>
+          <form id="readingForm" class="form-grid compact">
+            <label>Счётчик<select name="meter_id" required></select></label>
+            <label>Дата<input type="date" name="reading_date" required /></label>
+            <label>Показание<input type="number" step="0.001" name="value" required /></label>
+            <label>Комментарий<input name="note" /></label>
+            <button class="primary" type="submit">Сохранить</button>
+          </form>
+        </details>
         <div id="meterList" class="table-wrap"></div>
       </section>
 
       <section class="panel" id="utilities">
-        <div class="section-title">
-          <h2>Коммуналка</h2>
-          <span>Общий счётчик платишь ты, квартирные нужны для честной раскладки</span>
+        <div class="page-heading">
+          <div><p class="eyebrow">Коммунальные услуги</p><h2>Счета и распределение</h2><p class="muted">Показания, расчёт начислений, выпуск и оплата поставщикам.</p></div>
+          <button id="openTariffsBtn" type="button">Тарифы</button>
         </div>
         <form id="quickReadingsForm" class="quick-readings">
           <div class="section-title">
@@ -388,10 +490,8 @@
           <button class="primary wide" id="quickReadingsSubmit" type="submit">Передать показания</button>
         </form>
 
-        <div class="utility-actions">
-          <button id="openTariffsBtn" type="button">Открыть тарифы</button>
-        </div>
-
+        <details class="operational-tool">
+          <summary><span><strong>Рассчитать начисления</strong><small>Создать черновики по услуге или объекту</small></span></summary>
           <form id="utilityCalcForm" class="form-grid compact">
             <label>Расчёт<select name="service_id" id="utilityServiceSelect" required></select></label>
             <label>Начало периода
@@ -405,32 +505,36 @@
             <label class="check"><input type="checkbox" name="allow_estimate" /> Разрешить прогноз</label>
             <button class="primary" type="submit">Рассчитать черновик</button>
           </form>
+        </details>
 
         <div id="utilityTimeline" class="stack"></div>
         <div id="utilityBills" class="stack"></div>
       </section>
 
       <section class="panel" id="tariffs">
-        <div class="section-title">
-          <h2>Тарифы</h2>
-          <span>Электричество можно задавать ступенями: 1000:4.18; 2200:4.7; 3000:7; 9</span>
+        <div class="page-heading">
+          <div><p class="eyebrow">Коммунальные услуги</p><h2>Тарифы</h2><p class="muted">История ставок и правила расчёта по услугам.</p></div>
         </div>
-        <form id="tariffForm" class="form-grid compact">
+        <details class="operational-tool">
+          <summary><span><strong>Добавить тариф</strong><small>Обычная или ступенчатая ставка</small></span></summary>
+          <form id="tariffForm" class="form-grid compact">
           <label>Услуга<select name="service_id" required></select></label>
           <label>Действует с<input type="date" name="starts_on" required /></label>
           <label>Название<input name="name" placeholder="Тариф с июля" /></label>
           <label class="wide">Ступени<input name="tiers" placeholder="1000:4.18; 2200:4.7; 3000:7; 9" required /></label>
-          <button class="primary" type="submit">Добавить тариф</button>
-        </form>
+            <button class="primary" type="submit">Добавить тариф</button>
+          </form>
+        </details>
         <div id="tariffCards" class="tariff-grid"></div>
       </section>
 
       <section class="panel" id="expenses">
-        <div class="section-title">
-          <h2>Расходы</h2>
-          <span>Личные деньги можно потом отметить компенсированными</span>
+        <div class="page-heading">
+          <div><p class="eyebrow">Финансы</p><h2>Операционные расходы</h2><p class="muted">Затраты по объектам, источники средств и компенсации.</p></div>
         </div>
-        <form id="expenseForm" class="form-grid">
+        <details class="operational-tool">
+          <summary><span><strong>Добавить расход</strong><small>Сумма, объект и источник средств</small></span></summary>
+          <form id="expenseForm" class="form-grid">
           <label>Дата<input type="date" name="expense_date" required /></label>
           <label>Объект<select name="object_id"></select></label>
           <label>Квартира<select name="apartment_id"></select></label>
@@ -439,17 +543,17 @@
           <label>Источник<select name="source_funds"><option value="personal">личные</option><option value="rental_budget">арендный бюджет</option><option value="other">другое</option></select></label>
           <label>Способ оплаты<input name="payment_method" /></label>
           <label class="wide">Описание<textarea name="description" rows="2"></textarea></label>
-          <button class="primary wide" type="submit">Добавить расход</button>
-        </form>
+            <button class="primary wide" type="submit">Добавить расход</button>
+          </form>
+        </details>
         <div id="expenseList" class="table-wrap"></div>
       </section>
 
       <section class="panel" id="reports">
-        <div class="section-title">
-          <h2>Excel-отчёты</h2>
-          <span>Период выбирается один раз и применяется к нужному отчёту</span>
+        <div class="page-heading">
+          <div><p class="eyebrow">Аналитика</p><h2>Отчёты и документы</h2><p class="muted">Финансовые выгрузки и закрытие месячных периодов.</p></div>
         </div>
-        <div class="report-box">
+        <div class="report-box command-bar">
           <label>С<input type="date" id="reportStart" /></label>
           <label>По<input type="date" id="reportEnd" /></label>
           <a class="button" id="rentReport" href="#">Аренда</a>
@@ -463,11 +567,8 @@
       </section>
 
       <section class="panel" id="dialogs">
-        <div class="section-title">
-          <div>
-            <h2>Диалоги бота</h2>
-            <span>История Telegram-чатов и ручные ответы от имени бота.</span>
-          </div>
+        <div class="page-heading">
+          <div><p class="eyebrow">Коммуникации</p><h2>Входящие диалоги</h2><p class="muted">Telegram-чаты жильцов и ответы от имени сервиса.</p></div>
           <button id="botDialogsRefreshBtn" type="button">Обновить диалоги</button>
         </div>
         <div class="messenger-layout">
@@ -484,9 +585,8 @@
       </section>
 
       <section class="panel" id="messages">
-        <div class="section-title">
-          <h2>Сообщения</h2>
-          <span>Выборочная ручная рассылка через бота после подтверждения.</span>
+        <div class="page-heading">
+          <div><p class="eyebrow">Коммуникации</p><h2>Рассылки и шаблоны</h2><p class="muted">Сегментированные сообщения и единый тон уведомлений.</p></div>
         </div>
         <section class="card stack">
           <div class="section-title">
@@ -514,59 +614,9 @@
         </div>
         <div id="messageTargets" class="table-wrap"></div>
         <div id="messagePreviewPanel" class="stack"></div>
-        <div class="section-title">
-          <h2>Ручной контроль платежей</h2>
-          <span>Для наличных платежей, переводов с карты владельца и ручных корректировок.</span>
-        </div>
-        <form id="manualPaymentForm" class="form-grid compact">
-          <label>Жилец
-            <select name="lease_id" id="manualPaymentLeaseSelect" required></select>
-          </label>
-          <label>Тип платежа
-            <select name="kind" id="manualPaymentKindSelect">
-              <option value="rent">Аренда</option>
-              <option value="utility">Коммуналка</option>
-              <option value="utility_advance">Аванс коммуналки</option>
-            </select>
-          </label>
-          <label>Канал аренды
-            <select name="channel" id="manualPaymentChannelSelect">
-              <option value="personal">Перевод</option>
-              <option value="ip">ИП</option>
-              <option value="expense_fund">Мне на расходы</option>
-            </select>
-          </label>
-          <label>Источник
-            <select name="source">
-              <option value="cash">Наличные</option>
-              <option value="owner_card">С моей карты</option>
-              <option value="manual">Ручная отметка</option>
-            </select>
-          </label>
-          <label>Дата и время
-            <input type="datetime-local" name="paid_at" id="manualPaymentPaidAtInput" />
-          </label>
-          <label id="manualPaymentTargetMonthLabel">Зачесть за месяц
-            <select name="target_month" id="manualPaymentTargetMonthSelect"></select>
-          </label>
-          <label id="manualPaymentTargetYearLabel">Год
-            <input type="number" min="2020" step="1" name="target_year" id="manualPaymentTargetYearInput" />
-          </label>
-          <label>Сумма
-            <input type="number" min="0" step="0.01" name="amount" required />
-          </label>
-          <label class="wide">Комментарий
-            <textarea name="notes" rows="2" placeholder="Например: наличка, перевод с моей карты, взаимозачёт"></textarea>
-          </label>
-          <button class="primary wide" type="submit">Добавить платёж вручную</button>
-        </form>
-        <div id="suspiciousReceiptsPanel" class="stack"></div>
-
-        <div class="section-title">
-          <h2>Шаблоны</h2>
-          <span>Тексты основных сообщений и уведомлений для жильцов.</span>
-        </div>
-        <form id="messageTemplatesForm" class="form-grid">
+        <details class="operational-tool message-template-tool">
+          <summary><span><strong>Шаблоны сообщений</strong><small>Аренда, коммуналка и ответы на чеки</small></span></summary>
+          <form id="messageTemplatesForm" class="form-grid">
           <label class="wide">Аренда: за 3 дня
             <textarea name="message_rent_upcoming" id="messageRentUpcomingInput" rows="6"></textarea>
           </label>
@@ -600,14 +650,15 @@
           <label class="wide">Уведомление владельцу о чеке
             <textarea name="message_owner_receipt_alert" id="messageOwnerReceiptAlertInput" rows="3"></textarea>
           </label>
-          <button class="primary wide" type="submit">Сохранить шаблоны</button>
-        </form>
+            <button class="primary wide" type="submit">Сохранить шаблоны</button>
+          </form>
+        </details>
       </section>
 
       <section class="panel" id="automation">
-        <div class="section-title">
-          <h2>Автоматизация</h2>
-          <span>Частота автонапоминаний и краткая сводка отправленных сообщений.</span>
+        <div class="page-heading">
+          <div><p class="eyebrow">Управление</p><h2>Автоматизация</h2><p class="muted">Правила напоминаний, частота и исключения по договорам.</p></div>
+          <button id="runRemindersInlineBtn" type="button">Запустить сейчас</button>
         </div>
         <form id="automationSettingsForm" class="form-grid compact">
           <label>Аренда: день оплаты
@@ -635,9 +686,8 @@
       </section>
 
       <section class="panel" id="settings">
-        <div class="section-title">
-          <h2>Настройки</h2>
-          <span>Общие параметры, интеграции и безопасность</span>
+        <div class="page-heading">
+          <div><p class="eyebrow">Система</p><h2>Настройки</h2><p class="muted">Интеграции, безопасность, реквизиты и обслуживание.</p></div>
         </div>
         <div class="settings-nav" role="tablist" aria-label="Разделы настроек">
           <button type="button" class="settings-nav-btn active" data-settings-target="general">Общие</button>
@@ -654,7 +704,7 @@
             </label>
             <label>Цветовая палитра
               <select name="color_palette" id="paletteSelect">
-                <option value="classic">Классическая</option><option value="forest">Лесная</option><option value="contrast">Контрастная</option><option value="dark-classic">Тёмная классическая</option><option value="neon">Тёмная неоновая</option>
+                <option value="premium">Premium Dark</option>
               </select>
             </label>
             <label class="check wide"><input type="checkbox" name="notifications_enabled" id="notificationsEnabledInput" /> Автоматические напоминания арендаторам</label>
@@ -737,7 +787,17 @@
         </section>
         <div id="telegramStatusBox" class="card muted-box"></div>
       </section>
-    </main>
+        </main>
+      </div>
+    </div>
+
+    <nav class="mobile-nav" aria-label="Мобильная навигация">
+      <button class="nav-group active" data-group="overview"><span>⌂</span><small>Пульт</small></button>
+      <button class="nav-group" data-group="rentals"><span>▦</span><small>Портфель</small></button>
+      <button class="nav-group" data-group="utilities"><span>◫</span><small>Счета</small></button>
+      <button class="nav-group" data-group="communications"><span>◌</span><small>Связь</small></button>
+      <button class="nav-group" data-group="administration"><span>⚙</span><small>Ещё</small></button>
+    </nav>
 
     <div id="authOverlay" class="auth-overlay">
       <div class="auth-card auth-card--login">
@@ -767,6 +827,7 @@
     </div>
     <div id="manualAllocationModal" class="modal-shell" hidden></div>
     <div id="manualDebtModal" class="modal-shell" hidden></div>
+    <div id="quickActionsModal" class="modal-shell" hidden></div>
     <div id="toast" role="status" aria-live="polite"></div>
     <script type="module" src="/static/js/bootstrap.js?v=2026-07-11-security"></script>
   </body>

@@ -330,7 +330,7 @@ def performance_snapshot() -> dict[str, Any]:
 
 
 DEFAULT_SETTINGS = {
-    "color_palette": "classic",
+    "color_palette": "premium",
     "app_base_url": "",
     "telegram_owner_chat_id": "",
     "notifications_enabled": False,
@@ -2825,6 +2825,8 @@ def build_bootstrap_payload(
     if role != "owner":
         dashboard_payload = {
             "object_summary": dashboard_payload["object_summary"],
+            "month_summary": dashboard_payload["month_summary"],
+            "income_trend": dashboard_payload["income_trend"],
             "monthly_reports": dashboard_payload["monthly_reports"],
             "summary_counts": {
                 "rent_overdue": len(dashboard_payload["rent_overdue"]),
@@ -3731,6 +3733,39 @@ def month_dashboard_summary(
     }
 
 
+def dashboard_income_trend(session: Session, today: date | None = None, months: int = 6) -> list[dict[str, Any]]:
+    today = today or date.today()
+    cursor_year = today.year
+    cursor_month = today.month
+    periods: list[tuple[int, int]] = []
+    for _ in range(max(1, months)):
+        periods.append((cursor_year, cursor_month))
+        cursor_month -= 1
+        if cursor_month == 0:
+            cursor_month = 12
+            cursor_year -= 1
+    periods.reverse()
+
+    start_year, start_month = periods[0]
+    start_at = datetime(start_year, start_month, 1)
+    receipts = session.scalars(
+        select(PaymentReceipt)
+        .where(PaymentReceipt.status == "accepted", PaymentReceipt.paid_at >= start_at)
+        .order_by(PaymentReceipt.paid_at, PaymentReceipt.id)
+    ).all()
+    totals = {(year, month): 0.0 for year, month in periods}
+    for receipt in receipts:
+        if not receipt.paid_at:
+            continue
+        key = (receipt.paid_at.year, receipt.paid_at.month)
+        if key in totals:
+            totals[key] = money(totals[key] + float(receipt.amount or 0))
+    return [
+        {"period": f"{year:04d}-{month:02d}", "amount": money(totals[(year, month)])}
+        for year, month in periods
+    ]
+
+
 def build_dashboard(session: Session) -> dict[str, Any]:
     today = date.today()
     cutoff = configured_notification_cutoff_date(session)
@@ -3908,6 +3943,7 @@ def build_dashboard(session: Session) -> dict[str, Any]:
     return {
         "object_summary": build_object_summary(session),
         "month_summary": month_dashboard_summary(session, today.year, today.month, today),
+        "income_trend": dashboard_income_trend(session, today),
         "monthly_reports": build_monthly_report_shells(session, today),
         "rent_overdue": overdue_rent,
         "rent_partial": partial_rent,
