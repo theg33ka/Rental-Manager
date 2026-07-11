@@ -534,3 +534,32 @@ class AppSetting(Base):
 
     key: Mapped[str] = mapped_column(String(120), primary_key=True)
     value: Mapped[str] = mapped_column(Text, default="")
+
+
+class PanelSession(Base):
+    __tablename__ = "panel_sessions"
+
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    csrf_token_hash: Mapped[str] = mapped_column(String(64))
+    role: Mapped[str] = mapped_column(String(20))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    user_agent: Mapped[str] = mapped_column(String(240), default="")
+
+
+class PanelLoginAttempt(Base):
+    __tablename__ = "panel_login_attempts"
+
+    fingerprint: Mapped[str] = mapped_column(String(64), primary_key=True)
+    failures: Mapped[int] = mapped_column(Integer, default=0)
+    last_failed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    blocked_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+
+
+class ProcessedTelegramUpdate(Base):
+    __tablename__ = "processed_telegram_updates"
+
+    update_id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)

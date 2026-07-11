@@ -408,7 +408,7 @@ public class MainActivity extends Activity {
         servicesLoadedAt = financialLoadedAt;
         renderLoadedSnapshot("расчёты догружены");
 
-        updateLoadingCard("Догружаю тяжёлые хвосты", "Таймлайн, рассылки и подозрительные чеки.");
+        updateLoadingCard("Загружаю дополнительные данные", "Таймлайн, рассылки и подозрительные чеки.");
         try {
             applyAppState(api.getJson("/api/app-state?sections=utility_timeline,message_targets,suspicious_receipts"));
             moreLoadedAt = System.currentTimeMillis();
@@ -821,7 +821,7 @@ public class MainActivity extends Activity {
         if (count[0] == 0) {
             LinearLayout ok = premiumCard();
             ok.addView(label("Всё закрыто", 18, text, true));
-            ok.addView(label("Просрочек и срочных действий сейчас нет. Даже подозрительно спокойно, а зачем?", 13, muted, false));
+            ok.addView(label("Просрочек и срочных действий сейчас нет.", 13, muted, false));
             content.addView(ok);
         }
     }

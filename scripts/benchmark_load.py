@@ -4,6 +4,7 @@ import argparse
 import gzip
 import json
 import os
+import secrets
 import socket
 import statistics
 import subprocess
@@ -95,9 +96,10 @@ def prepare_database(db_path: Path, reset: bool) -> int:
     return service_id
 
 
-def start_server(db_path: Path, port: int) -> subprocess.Popen:
+def start_server(db_path: Path, port: int, owner_pin: str) -> subprocess.Popen:
     env = os.environ.copy()
     env["RENTAL_MANAGER_DATABASE_URL"] = f"sqlite:///{db_path.as_posix()}"
+    env["PANEL_OWNER_PIN"] = owner_pin
     return subprocess.Popen(
         [
             sys.executable,
@@ -172,13 +174,14 @@ def main() -> None:
     service_id = prepare_database(db_path, reset=not args.keep_db)
     port = args.port or free_port()
     client = Client(f"http://127.0.0.1:{port}", gzip_enabled=not args.no_gzip)
-    process = start_server(db_path, port)
+    owner_pin = secrets.token_urlsafe(12)
+    process = start_server(db_path, port, owner_pin)
     created_bill_ids: list[int] = []
     draft_offset = 0
 
     try:
         wait_for_server(client)
-        client.post("/api/auth/pin", {"pin_code": "1298", "remember_device": True})
+        client.post("/api/auth/pin", {"pin_code": owner_pin, "remember_device": True})
 
         legacy_web_paths = [
             "/api/bootstrap",

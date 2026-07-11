@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import calendar
+from contextlib import asynccontextmanager
 from collections import deque
 import hashlib
+import hmac
 import json
 import os
+import queue
 import re
 import secrets
 from datetime import date, datetime, time, timedelta, timezone
@@ -23,6 +26,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from sqlalchemy import delete, func, or_, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from rental_manager.database import Base, DATABASE_URL, ROOT_DIR, SessionLocal, get_session, init_db
@@ -56,7 +60,30 @@ from rental_manager.models import (
     UtilityService,
     utc_now,
     AppSetting,
+    ProcessedTelegramUpdate,
 )
+from rental_manager.security.pins import (
+    LEGACY_PIN_SETTING_KEYS,
+    PIN_SETTING_KEYS,
+    configured_environment_pin_hash,
+    hash_pin,
+    is_pin_hash,
+    pin_is_compromised,
+    verify_pin,
+)
+from rental_manager.security.secrets import decrypt_secret, encrypt_secret, secret_is_encrypted
+from rental_manager.security.sessions import (
+    clear_login_failures,
+    csrf_is_valid,
+    find_session,
+    issue_session,
+    login_fingerprint,
+    login_retry_after,
+    record_login_failure,
+    revoke_other_sessions,
+    revoke_session,
+)
+from rental_manager.observability.logging import get_logger, redact_log_text
 from rental_manager.services.ai_context import owner_context_text, tenant_context_text
 from rental_manager.services.ai_policy import (
     AI_BUDGET_EXCEEDED_TEXT,
@@ -145,9 +172,20 @@ from rental_manager.services.telegram_bot import (
 
 
 APP_BUILD_MARKER = "progressive-boot-2026-07-05"
+LOGGER = get_logger("rental_manager")
 
 
-app = FastAPI(title="Rental Manager", version="0.1.0")
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    startup()
+    start_telegram_workers()
+    try:
+        yield
+    finally:
+        stop_telegram_workers()
+
+
+app = FastAPI(title="Rental Manager", version="0.2.0", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.mount("/static", StaticFiles(directory=ROOT_DIR / "static"), name="static")
 
@@ -164,7 +202,7 @@ PERF_USER_AGENTS: dict[str, dict[str, Any]] = {}
 
 
 def runtime_log(area: str, message: str) -> None:
-    print(f"[{area}] {message}", flush=True)
+    LOGGER.info(redact_log_text(message), extra={"area": area})
 
 
 def normalized_perf_path(path: str) -> str:
@@ -310,15 +348,15 @@ DEFAULT_SETTINGS = {
     "hermes_model_default": "deepseek-V4",
     "hermes_model_audit": "deepseek-V4",
     "ai_monthly_budget_rub": "1000",
-    "ip_recipient_name": "ИНДИВИДУАЛЬНЫЙ ПРЕДПРИНИМАТЕЛЬ ЧАНТУРИЯ ЭРАСТ МИТРИДАТОВИЧ",
-    "ip_recipient_inn": "540506055229",
-    "ip_recipient_ogrnip": "324508100223397",
-    "ip_recipient_account": "40802810644050156191",
-    "ip_recipient_bank": "СИБИРСКИЙ БАНК ПАО СБЕРБАНК",
-    "ip_recipient_bik": "045004641",
-    "ip_recipient_correspondent_account": "30101810500000000641",
-    "ip_recipient_bank_inn": "7707083893",
-    "ip_recipient_bank_kpp": "540643001",
+    "ip_recipient_name": "",
+    "ip_recipient_inn": "",
+    "ip_recipient_ogrnip": "",
+    "ip_recipient_account": "",
+    "ip_recipient_bank": "",
+    "ip_recipient_bik": "",
+    "ip_recipient_correspondent_account": "",
+    "ip_recipient_bank_inn": "",
+    "ip_recipient_bank_kpp": "",
     "personal_recipient_name": "",
     "personal_recipient_phone": "",
     "personal_recipient_bank": "",
@@ -382,21 +420,18 @@ SECRET_SETTINGS = {
     "telegram_bot_token": "",
     "telegram_webhook_secret": "",
     "hermes_api_key": "",
-    "panel_owner_pin_code": "1298",
-    "panel_guest_pin_code": "1212",
 }
+PIN_INPUT_KEYS = {"panel_owner_pin_code", "panel_guest_pin_code"}
 ALL_SETTINGS = {**DEFAULT_SETTINGS, **SECRET_SETTINGS}
 INTERNAL_SETTINGS = {
     "telegram_tenant_links": "{}",
     "telegram_consent_chat_ids": "[]",
-    "processed_telegram_update_ids": "[]",
     "ignored_lease_ids": "[]",
     "accepted_monthly_reports": "[]",
     "notified_monthly_reports": "[]",
     "owner_due_digest_dates": "[]",
     "owner_payment_digest_dates": "[]",
     "processed_move_out_notifications": "[]",
-    "panel_auth_sessions": "{}",
 }
 BOOLEAN_SETTINGS = {
     "notifications_enabled",
@@ -444,6 +479,13 @@ REMINDER_WORKER_STARTED = False
 REMINDER_WORKER_INTERVAL_SECONDS = 900
 TELEGRAM_PROCESSED_UPDATE_LIMIT = 500
 TELEGRAM_UPDATE_LOCK = threading.Lock()
+TELEGRAM_QUEUE_MAX = max(16, int(os.environ.get("TELEGRAM_QUEUE_MAX", "256") or 256))
+TELEGRAM_WORKER_COUNT = max(1, min(8, int(os.environ.get("TELEGRAM_WORKER_COUNT", "2") or 2)))
+TELEGRAM_UPDATE_QUEUE: queue.Queue[tuple[dict[str, Any], float | None]] = queue.Queue(maxsize=TELEGRAM_QUEUE_MAX)
+TELEGRAM_WORKER_STOP = threading.Event()
+TELEGRAM_WORKERS: list[threading.Thread] = []
+TELEGRAM_RATE_LOCK = threading.Lock()
+TELEGRAM_RATE_BUCKETS: dict[str, deque[float]] = {}
 LOCAL_TZ = ZoneInfo("Asia/Novosibirsk")
 DEFAULT_FALLBACK_KEYS = {
     "ip_recipient_name",
@@ -473,7 +515,8 @@ AI_DEFAULT_USD_RUB_RATE = 100.0
 
 REPORT_START_MONTH = date(2026, 1, 1)
 PANEL_AUTH_COOKIE = "rental_manager_panel_session"
-PANEL_AUTH_MAX_AGE_SECONDS = 60 * 60 * 24 * 180
+PANEL_CSRF_COOKIE = "rental_manager_csrf"
+PANEL_AUTH_MAX_AGE_SECONDS = 60 * 60 * 24 * 30
 PANEL_ALLOWED_GUEST_TAB_PATHS = {"/api/bootstrap", "/api/app-state"}
 MOBILE_APK_PATH = ROOT_DIR / "android" / "RentalManager" / "build" / "rental-manager-mobile.apk"
 MONTH_NAMES = [
@@ -492,7 +535,6 @@ MONTH_NAMES = [
 ]
 
 
-@app.on_event("startup")
 def startup() -> None:
     started = time_module.perf_counter()
     status = "ok"
@@ -508,15 +550,13 @@ def startup() -> None:
     )
     init_db()
     with SessionLocal() as session:
-        ensure_database_schema(session)
-        ensure_performance_indexes(session)
         seeded_release = seed_release_baseline_if_empty(session)
         if not seeded_release:
             seed_if_empty(session)
         ensure_runtime_defaults(session)
+        validate_production_security(session)
         generate_rent_charges(session)
         session.commit()
-    start_reminder_worker()
     queue_startup_maintenance()
     queue_runtime_telegram_webhook_refresh()
     record_background_event(
@@ -542,7 +582,7 @@ def reminder_worker_loop() -> None:
                 session.commit()
         except Exception as exc:
             status = "failed"
-            print(f"[REMINDERS] background worker failed: {exc}")
+            runtime_log("REMINDERS", f"background worker failed error={exc!r}")
             summary = {"error": str(exc)[:300]}
         finally:
             record_background_event(
@@ -729,7 +769,6 @@ def is_public_path(path: str) -> bool:
         "/mobile-app.apk",
         "/api/auth/status",
         "/api/auth/pin",
-        "/api/auth/logout",
         "/api/integrations/telegram/webhook",
     } or path.startswith("/static/")
 
@@ -772,7 +811,13 @@ async def panel_auth_middleware(request: Request, call_next):
     if not path.startswith("/api/"):
         return await call_next(request)
     with SessionLocal() as auth_session:
-        role = panel_role_from_request(request, auth_session)
+        token = str(request.cookies.get(PANEL_AUTH_COOKIE) or "").strip()
+        panel_session = find_session(auth_session, token)
+        role = panel_session.role if panel_session else None
+        if role and request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
+            csrf_token = request.headers.get("X-CSRF-Token", "")
+            if not csrf_is_valid(panel_session, csrf_token):
+                return JSONResponse(status_code=403, content={"detail": "CSRF-проверка не пройдена."})
     request.state.panel_role = role
     if not role:
         return JSONResponse(status_code=401, content={"detail": "Введите PIN-код для доступа в пульт."})
@@ -858,6 +903,21 @@ def setting_bool_value(value: Any) -> bool:
 
 def ensure_runtime_defaults(session: Session) -> None:
     changed = False
+    for role, legacy_key in LEGACY_PIN_SETTING_KEYS.items():
+        legacy = session.get(AppSetting, legacy_key)
+        target_key = PIN_SETTING_KEYS[role]
+        target = session.get(AppSetting, target_key)
+        if legacy:
+            raw_pin = str(legacy.value or "").strip()
+            migrated_hash = ""
+            if is_pin_hash(raw_pin):
+                migrated_hash = raw_pin
+            elif raw_pin and not pin_is_compromised(raw_pin):
+                migrated_hash = hash_pin(raw_pin)
+            if migrated_hash and not target:
+                session.add(AppSetting(key=target_key, value=migrated_hash))
+            session.delete(legacy)
+            changed = True
     if not session.get(AppSetting, "notifications_enabled"):
         session.add(AppSetting(key="notifications_enabled", value="0"))
         changed = True
@@ -896,19 +956,37 @@ def ensure_runtime_defaults(session: Session) -> None:
         session.flush()
 
 
+def production_mode() -> bool:
+    return os.environ.get("RENTAL_MANAGER_ENV", "development").strip().lower() in {"prod", "production"}
+
+
+def validate_production_security(session: Session) -> None:
+    if not production_mode():
+        return
+    owner_hash = configured_environment_pin_hash("owner") or get_setting_value(session, PIN_SETTING_KEYS["owner"])
+    if not owner_hash:
+        raise RuntimeError("Production requires PANEL_OWNER_PIN or a configured owner PIN hash.")
+    if not os.environ.get("TELEGRAM_WEBHOOK_SECRET", "").strip() and get_setting_value(session, "telegram_bot_token"):
+        raise RuntimeError("Production Telegram integration requires TELEGRAM_WEBHOOK_SECRET.")
+
+
 def get_setting_value(session: Session, key: str) -> str:
     dynamic_key = key.startswith("lease_") and "_cadence_" in key
-    if key not in ALL_SETTINGS and key not in INTERNAL_SETTINGS and not dynamic_key:
+    pin_hash_key = key in PIN_SETTING_KEYS.values()
+    if key not in ALL_SETTINGS and key not in INTERNAL_SETTINGS and not dynamic_key and not pin_hash_key:
         return ""
     env_name = ENV_SETTING_KEYS.get(key)
     if env_name and env_name in os.environ:
         return str(os.environ.get(env_name) or "")
     row = session.get(AppSetting, key)
     if row:
-        return row.value
+        value = row.value
+        return decrypt_secret(value) if key in SECRET_SETTINGS else value
     if key in ALL_SETTINGS:
         return str(ALL_SETTINGS[key])
     if dynamic_key:
+        return ""
+    if pin_hash_key:
         return ""
     return str(INTERNAL_SETTINGS[key])
 
@@ -934,13 +1012,12 @@ def set_internal_json(session: Session, key: str, value: Any) -> None:
 def mark_telegram_update_seen(session: Session, update_id: Any) -> bool:
     if update_id in {None, ""}:
         return True
-    key = str(update_id)
-    raw_items = get_internal_json(session, "processed_telegram_update_ids", [])
-    items = [str(item) for item in raw_items if str(item).strip()] if isinstance(raw_items, list) else []
-    if key in items:
+    try:
+        with session.begin_nested():
+            session.add(ProcessedTelegramUpdate(update_id=str(update_id)))
+            session.flush()
+    except IntegrityError:
         return False
-    items.append(key)
-    set_internal_json(session, "processed_telegram_update_ids", items[-TELEGRAM_PROCESSED_UPDATE_LIMIT:])
     return True
 
 
@@ -953,16 +1030,30 @@ def get_settings(session: Session) -> dict[str, str | bool]:
         settings[key] = setting_bool_value(raw) if key in BOOLEAN_SETTINGS else raw
     for key in SECRET_SETTINGS:
         settings[f"{key}_configured"] = bool(get_setting_value(session, key))
+    for role, input_key in (("owner", "panel_owner_pin_code"), ("guest", "panel_guest_pin_code")):
+        settings[f"{input_key}_configured"] = bool(
+            configured_environment_pin_hash(role) or get_setting_value(session, PIN_SETTING_KEYS[role])
+        )
     return settings
 
 
 def save_settings(session: Session, payload: dict[str, Any], preserve_panel_token: str = "") -> dict[str, str | bool]:
-    allowed = set(ALL_SETTINGS)
+    allowed = set(ALL_SETTINGS) | PIN_INPUT_KEYS
     pin_changed = False
     for key, value in payload.items():
         if key not in allowed:
             continue
         if key in SECRET_SETTINGS and value in {"", None}:
+            continue
+        if key in PIN_INPUT_KEYS:
+            role = "owner" if key == "panel_owner_pin_code" else "guest"
+            target_key = PIN_SETTING_KEYS[role]
+            setting = session.get(AppSetting, target_key)
+            if not setting:
+                setting = AppSetting(key=target_key)
+                session.add(setting)
+            setting.value = hash_pin(str(value))
+            pin_changed = True
             continue
         setting = session.get(AppSetting, key)
         if not setting:
@@ -973,15 +1064,13 @@ def save_settings(session: Session, payload: dict[str, Any], preserve_panel_toke
         elif key == "notification_cutoff_date" and not value:
             setting.value = date.today().isoformat()
         elif key == "telegram_bot_token":
-            setting.value = normalize_bot_token(str(value))
+            setting.value = encrypt_secret(normalize_bot_token(str(value)))
+        elif key in SECRET_SETTINGS:
+            setting.value = encrypt_secret(str(value))
         else:
             setting.value = str(value)
-        if key in {"panel_owner_pin_code", "panel_guest_pin_code"}:
-            pin_changed = True
     if pin_changed:
-        sessions = panel_auth_sessions(session)
-        preserved = {preserve_panel_token: sessions[preserve_panel_token]} if preserve_panel_token and preserve_panel_token in sessions else {}
-        set_internal_json(session, "panel_auth_sessions", preserved)
+        revoke_other_sessions(session, preserve_panel_token)
     session.commit()
     return get_settings(session)
 
@@ -993,49 +1082,21 @@ def public_settings(session: Session) -> dict[str, str | bool]:
     }
 
 
-def panel_auth_sessions(session: Session) -> dict[str, dict[str, Any]]:
-    raw = get_internal_json(session, "panel_auth_sessions", {})
-    if not isinstance(raw, dict):
-        return {}
-    sessions: dict[str, dict[str, Any]] = {}
-    for token, payload in raw.items():
-        if not isinstance(token, str) or not token or not isinstance(payload, dict):
-            continue
-        role = str(payload.get("role") or "").strip().lower()
-        if role not in {"owner", "guest"}:
-            continue
-        sessions[token] = {
-            "role": role,
-            "created_at": str(payload.get("created_at") or ""),
-            "last_seen_at": str(payload.get("last_seen_at") or ""),
-            "user_agent": str(payload.get("user_agent") or "")[:240],
-        }
-    return sessions
-
-
-def save_panel_auth_sessions(session: Session, values: dict[str, dict[str, Any]]) -> None:
-    set_internal_json(session, "panel_auth_sessions", values)
-
-
 def panel_session_record(session: Session, token: str) -> dict[str, Any] | None:
-    if not token:
+    row = find_session(session, token)
+    if not row:
         return None
-    return panel_auth_sessions(session).get(token)
+    return {"role": row.role, "created_at": row.created_at, "last_seen_at": row.last_seen_at}
 
 
 def panel_role_from_request(request: Request, session: Session) -> str | None:
     token = str(request.cookies.get(PANEL_AUTH_COOKIE) or "").strip()
     if not token:
         return None
-    record = panel_session_record(session, token)
-    if not record:
+    row = find_session(session, token)
+    if not row:
         return None
-    sessions = panel_auth_sessions(session)
-    record["last_seen_at"] = utc_now().isoformat()
-    sessions[token] = record
-    save_panel_auth_sessions(session, sessions)
-    session.commit()
-    return str(record.get("role") or "").strip().lower() or None
+    return str(row.role or "").strip().lower() or None
 
 
 def issue_panel_session(
@@ -1043,54 +1104,30 @@ def issue_panel_session(
     role: str,
     user_agent: str = "",
 ) -> str:
-    token = secrets.token_urlsafe(24)
-    timestamp = utc_now().isoformat()
-    sessions = panel_auth_sessions(session)
-    sessions[token] = {
-        "role": role,
-        "created_at": timestamp,
-        "last_seen_at": timestamp,
-        "user_agent": user_agent[:240],
-    }
-    if len(sessions) > 128:
-        tokens_by_age = sorted(
-            sessions.items(),
-            key=lambda item: (
-                str(item[1].get("last_seen_at") or item[1].get("created_at") or ""),
-                item[0],
-            ),
-        )
-        for stale_token, _ in tokens_by_age[:-128]:
-            sessions.pop(stale_token, None)
-    save_panel_auth_sessions(session, sessions)
-    session.commit()
-    return token
+    return issue_session(session, role, user_agent).token
 
 
 def revoke_panel_session(session: Session, token: str) -> None:
-    if not token:
-        return
-    sessions = panel_auth_sessions(session)
-    if token in sessions:
-        sessions.pop(token, None)
-        save_panel_auth_sessions(session, sessions)
-        session.commit()
+    revoke_session(session, token)
 
 
 def panel_role_for_pin(session: Session, pin_code: str) -> str | None:
     pin_value = str(pin_code or "").strip()
     if not pin_value:
         return None
-    if pin_value == get_setting_value(session, "panel_owner_pin_code"):
-        return "owner"
-    if pin_value == get_setting_value(session, "panel_guest_pin_code"):
-        return "guest"
+    for role in ("owner", "guest"):
+        pin_hash = configured_environment_pin_hash(role) or get_setting_value(session, PIN_SETTING_KEYS[role])
+        if verify_pin(pin_hash, pin_value):
+            return role
     return None
 
 
 DB_EXPORT_FORMAT = "rental-manager-db-export"
-DB_EXPORT_VERSION = 1
+DB_EXPORT_VERSION = 2
 DB_IMPORT_CONFIRM_TEXT = "ИМПОРТ"
+DB_BACKUP_CONFIRM_TEXT = "ЗАЩИЩЕННАЯ КОПИЯ"
+EXPORT_ALWAYS_EXCLUDED_TABLES = {"panel_sessions", "panel_login_attempts", "processed_telegram_updates"}
+EXPORT_SECRET_SETTING_KEYS = set(SECRET_SETTINGS) | set(PIN_SETTING_KEYS.values())
 
 
 def table_model_map() -> dict[str, Any]:
@@ -1151,11 +1188,22 @@ def import_scalar(column, value: Any) -> Any:
     return value
 
 
-def current_database_snapshot(session: Session) -> dict[str, Any]:
+def current_database_snapshot(session: Session, *, include_secrets: bool = False) -> dict[str, Any]:
     tables: dict[str, list[dict[str, Any]]] = {}
     counts: dict[str, int] = {}
     for table in Base.metadata.sorted_tables:
+        if table.name in EXPORT_ALWAYS_EXCLUDED_TABLES:
+            continue
         rows = session.execute(select(table)).mappings().all()
+        if table.name == "app_settings" and not include_secrets:
+            rows = [row for row in rows if str(row.get("key") or "") not in EXPORT_SECRET_SETTING_KEYS]
+        if table.name == "app_settings" and include_secrets:
+            rows = [
+                row
+                for row in rows
+                if str(row.get("key") or "") not in SECRET_SETTINGS
+                or secret_is_encrypted(str(row.get("value") or ""))
+            ]
         serialized_rows = [
             {column.name: export_scalar(row[column.name]) for column in table.columns}
             for row in rows
@@ -1167,6 +1215,7 @@ def current_database_snapshot(session: Session) -> dict[str, Any]:
         "version": DB_EXPORT_VERSION,
         "exported_at": datetime.now(timezone.utc).isoformat(),
         "database_url_hint": "postgres" if DATABASE_URL.startswith("postgresql") else "sqlite",
+        "scope": "protected" if include_secrets else "safe",
         "tables": tables,
         "counts": counts,
     }
@@ -1174,7 +1223,7 @@ def current_database_snapshot(session: Session) -> dict[str, Any]:
 
 def parse_database_import_bytes(raw_bytes: bytes) -> dict[str, Any]:
     if not raw_bytes:
-        raise HTTPException(400, "Файл пустой. Такой импорт только философский.")
+        raise HTTPException(400, "Файл импорта пуст.")
     try:
         payload = json.loads(raw_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -1183,7 +1232,7 @@ def parse_database_import_bytes(raw_bytes: bytes) -> dict[str, Any]:
         raise HTTPException(400, "Файл импорта должен содержать JSON-объект верхнего уровня.")
     if payload.get("format") != DB_EXPORT_FORMAT:
         raise HTTPException(400, "Неузнаваемый формат импорта. Нужен экспорт именно из этого приложения.")
-    if int(payload.get("version") or 0) != DB_EXPORT_VERSION:
+    if int(payload.get("version") or 0) not in {1, DB_EXPORT_VERSION}:
         raise HTTPException(400, "Версия формата импорта не поддерживается.")
     tables = payload.get("tables")
     if not isinstance(tables, dict):
@@ -1203,7 +1252,7 @@ def inspect_database_import_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
     total_rows = sum(counts.values())
     if total_rows <= 0:
-        raise HTTPException(400, "В импорте нет данных. Переезжать не с чем.")
+        raise HTTPException(400, "В импорте нет записей для восстановления.")
     warnings: list[str] = []
     if missing_tables:
         warnings.append("В файле нет части таблиц: " + ", ".join(missing_tables))
@@ -1231,7 +1280,7 @@ def backup_export_path() -> Path:
 
 
 def save_database_backup(session: Session) -> Path:
-    snapshot = current_database_snapshot(session)
+    snapshot = current_database_snapshot(session, include_secrets=True)
     target = backup_export_path()
     target.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
     return target
@@ -1255,12 +1304,30 @@ def reset_database_sequences(session: Session) -> None:
 def apply_database_import_payload(session: Session, payload: dict[str, Any]) -> dict[str, Any]:
     table_lookup = {table.name: table for table in Base.metadata.sorted_tables}
     tables = payload.get("tables") or {}
+    protected_scope = payload.get("scope") == "protected" and int(payload.get("version") or 0) >= 2
+    preserved_secret_settings = session.execute(
+        select(AppSetting.__table__).where(AppSetting.key.in_(EXPORT_SECRET_SETTING_KEYS))
+    ).mappings().all()
     for table in reversed(Base.metadata.sorted_tables):
+        if table.name in EXPORT_ALWAYS_EXCLUDED_TABLES:
+            continue
         session.execute(table.delete())
     session.flush()
     inserted_counts: dict[str, int] = {}
     for table in Base.metadata.sorted_tables:
         rows = tables.get(table.name)
+        if table.name == "app_settings":
+            rows = [
+                row
+                for row in (rows or [])
+                if isinstance(row, dict)
+                and (
+                    str(row.get("key") or "") not in EXPORT_SECRET_SETTING_KEYS
+                    or (protected_scope and secret_is_encrypted(str(row.get("value") or "")))
+                )
+            ]
+            if not protected_scope:
+                rows.extend(dict(row) for row in preserved_secret_settings)
         if not isinstance(rows, list) or not rows:
             inserted_counts[table.name] = 0
             continue
@@ -2643,25 +2710,44 @@ def auth_with_pin(
     response: Response,
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
+    client_host = request.client.host if request.client else "unknown"
+    fingerprint = login_fingerprint(client_host, request.headers.get("user-agent", ""))
+    retry_after = login_retry_after(session, fingerprint)
+    if retry_after:
+        raise HTTPException(429, "Слишком много попыток входа. Повторите позже.", headers={"Retry-After": str(retry_after)})
     role = panel_role_for_pin(session, str(payload.get("pin_code") or ""))
     if not role:
-        raise HTTPException(401, "Неверный PIN-код.")
-    token = issue_panel_session(session, role, request.headers.get("user-agent", ""))
+        delay = record_login_failure(session, fingerprint)
+        raise HTTPException(401, "Неверный PIN-код.", headers={"Retry-After": str(delay)})
+    clear_login_failures(session, fingerprint)
+    issued = issue_session(session, role, request.headers.get("user-agent", ""))
     remember_device = payload.get("remember_device", True)
     max_age = PANEL_AUTH_MAX_AGE_SECONDS if setting_bool_value(remember_device) else None
+    secure_cookie = production_mode()
     response.set_cookie(
         PANEL_AUTH_COOKIE,
-        token,
+        issued.token,
         httponly=True,
         samesite="lax",
         max_age=max_age,
         expires=max_age,
-        secure=False,
+        secure=secure_cookie,
+        path="/",
+    )
+    response.set_cookie(
+        PANEL_CSRF_COOKIE,
+        issued.csrf_token,
+        httponly=False,
+        samesite="lax",
+        max_age=max_age,
+        expires=max_age,
+        secure=secure_cookie,
         path="/",
     )
     return {
         "authenticated": True,
         "role": role,
+        "csrf_token": issued.csrf_token,
     }
 
 
@@ -2669,7 +2755,8 @@ def auth_with_pin(
 def logout_panel(request: Request, response: Response, session: Session = Depends(get_session)) -> dict[str, bool]:
     token = str(request.cookies.get(PANEL_AUTH_COOKIE) or "")
     revoke_panel_session(session, token)
-    response.delete_cookie(PANEL_AUTH_COOKIE, path="/")
+    response.delete_cookie(PANEL_AUTH_COOKIE, path="/", secure=production_mode(), samesite="lax")
+    response.delete_cookie(PANEL_CSRF_COOKIE, path="/", secure=production_mode(), samesite="lax")
     return {"ok": True}
 
 
@@ -2960,7 +3047,6 @@ def api_month_progress(year: int, month: int, session: Session = Depends(get_ses
 
 @app.get("/api/admin/database-export")
 def export_database(session: Session = Depends(get_session)) -> Response:
-    ensure_database_schema(session)
     snapshot = current_database_snapshot(session)
     raw = json.dumps(snapshot, ensure_ascii=False, indent=2).encode("utf-8")
     filename = f"rental-manager-db-export-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
@@ -2970,6 +3056,28 @@ def export_database(session: Session = Depends(get_session)) -> Response:
         headers={
             "Content-Disposition": f'attachment; filename="{filename}"',
             "Content-Length": str(len(raw)),
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@app.post("/api/admin/database-backup")
+def export_protected_database_backup(
+    payload: dict[str, Any],
+    session: Session = Depends(get_session),
+) -> Response:
+    if str(payload.get("confirmation_text") or "").strip().upper() != DB_BACKUP_CONFIRM_TEXT:
+        raise HTTPException(400, f'Для защищённой копии введите "{DB_BACKUP_CONFIRM_TEXT}".')
+    snapshot = current_database_snapshot(session, include_secrets=True)
+    raw = json.dumps(snapshot, ensure_ascii=False, indent=2).encode("utf-8")
+    filename = f"rental-manager-protected-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+    return Response(
+        content=raw,
+        media_type="application/json; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(len(raw)),
+            "Cache-Control": "no-store",
             "X-Content-Type-Options": "nosniff",
         },
     )
@@ -2998,8 +3106,12 @@ async def import_database(
     backup_path = ""
     if create_backup:
         backup_path = str(save_database_backup(session))
-    result = apply_database_import_payload(session, payload)
-    session.commit()
+    try:
+        result = apply_database_import_payload(session, payload)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
     return {
         "ok": True,
         "inspection": inspection,
@@ -3254,7 +3366,7 @@ def monthly_report_status(session: Session, year: int, month: int, today: date |
     critical_rent = [charge for charge in rent_charges if charge.status in {"overdue", "pending", "partial"}]
     deferred_rent = [charge for charge in rent_charges if charge.status == "deferred"]
     add_report_issue(issues, "danger", "не закрыта аренда", len(critical_rent), "Есть платежи аренды без полного закрытия.")
-    add_report_issue(issues, "warn", "есть отсрочки по аренде", len(deferred_rent), "Отсрочка не пожар, но забыть её легко. А зачем?")
+    add_report_issue(issues, "warn", "есть отсрочки по аренде", len(deferred_rent), "Проверьте актуальность сроков отсрочки.")
 
     utility_lines = session.scalars(
         select(UtilityBillLine)
@@ -5369,7 +5481,7 @@ def notify_owner_about_move_out(
     if lines:
         utility_rows = "\n".join(f"- {utility_message_line(line)}" for line in lines)
     else:
-        utility_rows = "- коммуналка не создана: либо нулевой хвост, либо не хватило данных."
+        utility_rows = "- коммунальные начисления не созданы: сумма равна нулю или недостаточно данных."
     warning_text = ""
     if warnings:
         warning_text = "\nПредупреждения:\n" + "\n".join(f"- {item}" for item in warnings)
@@ -9400,7 +9512,7 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
                 tenant_keyboard(),
             )
         elif is_owner:
-            send_telegram_text(session, chat_id, "Команда /debts работает для привязанного чата жильца. У тебя для этого есть пульт, а зачем ещё кружить.")
+            send_telegram_text(session, chat_id, "Команда /debts доступна только в привязанном чате жильца. Сводка владельца доступна в пульте.")
         else:
             send_telegram_text(session, chat_id, "Сначала привяжи чат через @username в базе и /start.")
         return
@@ -9598,14 +9710,59 @@ def process_telegram_update_background(payload: dict[str, Any], received_at: flo
         )
 
 
-def queue_telegram_update(payload: dict[str, Any], received_at: float | None = None) -> None:
-    thread = threading.Thread(
-        target=process_telegram_update_background,
-        args=(dict(payload), received_at),
-        name=f"telegram-update-{payload.get('update_id') or 'unknown'}",
-        daemon=True,
-    )
-    thread.start()
+def telegram_worker_loop() -> None:
+    while not TELEGRAM_WORKER_STOP.is_set():
+        try:
+            payload, received_at = TELEGRAM_UPDATE_QUEUE.get(timeout=0.5)
+        except queue.Empty:
+            continue
+        try:
+            process_telegram_update_background(payload, received_at)
+        finally:
+            TELEGRAM_UPDATE_QUEUE.task_done()
+
+
+def start_telegram_workers() -> None:
+    if TELEGRAM_WORKERS:
+        return
+    TELEGRAM_WORKER_STOP.clear()
+    for index in range(TELEGRAM_WORKER_COUNT):
+        worker = threading.Thread(target=telegram_worker_loop, name=f"telegram-worker-{index + 1}", daemon=True)
+        worker.start()
+        TELEGRAM_WORKERS.append(worker)
+
+
+def stop_telegram_workers() -> None:
+    TELEGRAM_WORKER_STOP.set()
+    for worker in TELEGRAM_WORKERS:
+        worker.join(timeout=2)
+    TELEGRAM_WORKERS.clear()
+
+
+def queue_telegram_update(payload: dict[str, Any], received_at: float | None = None) -> bool:
+    try:
+        TELEGRAM_UPDATE_QUEUE.put_nowait((dict(payload), received_at))
+        return True
+    except queue.Full:
+        return False
+
+
+def telegram_webhook_rate_allowed(client_host: str, *, limit: int = 60, window_seconds: int = 60) -> bool:
+    now = time_module.monotonic()
+    cutoff = now - window_seconds
+    key = hashlib.sha256(str(client_host or "unknown").encode("utf-8")).hexdigest()
+    with TELEGRAM_RATE_LOCK:
+        bucket = TELEGRAM_RATE_BUCKETS.setdefault(key, deque())
+        while bucket and bucket[0] < cutoff:
+            bucket.popleft()
+        if len(bucket) >= limit:
+            return False
+        bucket.append(now)
+        if len(TELEGRAM_RATE_BUCKETS) > 2048:
+            stale = [item_key for item_key, values in TELEGRAM_RATE_BUCKETS.items() if not values or values[-1] < cutoff]
+            for item_key in stale:
+                TELEGRAM_RATE_BUCKETS.pop(item_key, None)
+        return True
 
 
 @app.post("/api/integrations/telegram/webhook")
@@ -9613,13 +9770,20 @@ async def telegram_webhook(request: Request, payload: dict[str, Any]) -> dict[st
     received_at = time_module.perf_counter()
     update_types = ",".join(sorted(key for key in payload if key != "update_id")) or "-"
     runtime_log("TELEGRAM", f"webhook update_id={payload.get('update_id')} types={update_types}")
-    secret = str(os.environ.get("TELEGRAM_WEBHOOK_SECRET") or "").strip()
-    if secret:
-        provided = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-        if provided != secret:
-            runtime_log("TELEGRAM", f"webhook rejected update_id={payload.get('update_id')} reason=bad_secret")
-            raise HTTPException(403, "Неверный Telegram secret token")
-    queue_telegram_update(payload, received_at)
+    client_host = request.client.host if request.client else "unknown"
+    if not telegram_webhook_rate_allowed(client_host):
+        raise HTTPException(429, "Слишком много webhook-запросов.")
+    with SessionLocal() as settings_session:
+        secret = str(os.environ.get("TELEGRAM_WEBHOOK_SECRET") or telegram_secret(settings_session) or "").strip()
+    if production_mode() and not secret:
+        runtime_log("TELEGRAM", f"webhook rejected update_id={payload.get('update_id')} reason=secret_missing")
+        raise HTTPException(503, "Telegram webhook secret не настроен")
+    provided = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if secret and not hmac.compare_digest(provided, secret):
+        runtime_log("TELEGRAM", f"webhook rejected update_id={payload.get('update_id')} reason=bad_secret")
+        raise HTTPException(403, "Неверный Telegram secret token")
+    if not queue_telegram_update(payload, received_at):
+        raise HTTPException(503, "Очередь Telegram временно заполнена")
     return {"ok": True}
 
 
@@ -10163,7 +10327,7 @@ def transfer_lease(lease_id: int, payload: dict[str, Any], session: Session = De
     if not target_apartment.active:
         raise HTTPException(400, "Квартира выключена из учёта")
     if target_apartment.id == lease.apartment_id:
-        raise HTTPException(400, "Новая квартира совпадает с текущей. Переезд на месте — это уже философия, не операция.")
+        raise HTTPException(400, "Новая квартира совпадает с текущей.")
 
     try:
         transfer_date = parse_date(payload.get("transfer_date") or payload.get("move_date"), date.today())
@@ -10359,6 +10523,8 @@ def rent_charges_payload(
     include_payments: bool = True,
     include_reminder: bool = True,
     generate_missing: bool = True,
+    limit: int | None = None,
+    offset: int = 0,
 ) -> list[dict[str, Any]]:
     if session is None:
         return []
@@ -10383,6 +10549,10 @@ def rent_charges_payload(
     )
     if include_payments:
         query = query.options(selectinload(RentCharge.receipts))
+    if offset:
+        query = query.offset(max(0, int(offset)))
+    if limit is not None:
+        query = query.limit(max(1, min(int(limit), 500)))
     charges = session.scalars(query).all()
     charges = [charge for charge in charges if not lease_ignored(session, charge.lease_id)]
     if include_reminder:
@@ -10397,6 +10567,8 @@ def rent_charges_payload(
 def list_rent_charges(
     start: str | None = None,
     end: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
     session: Session = Depends(get_session),
 ) -> list[dict[str, Any]]:
     result = rent_charges_payload(
@@ -10406,6 +10578,8 @@ def list_rent_charges(
         include_payments=False,
         include_reminder=False,
         generate_missing=True,
+        limit=limit,
+        offset=offset,
     )
     session.commit()
     return result
@@ -11978,18 +12152,23 @@ def add_utility_payment(line_id: int, payload: dict[str, Any], session: Session 
     return serialize_bill_line(line, session)
 
 
-def expenses_payload(session: Session) -> list[dict[str, Any]]:
-    expenses = session.scalars(
+def expenses_payload(session: Session, *, limit: int | None = None, offset: int = 0) -> list[dict[str, Any]]:
+    query = (
         select(Expense)
         .options(joinedload(Expense.object), joinedload(Expense.apartment))
         .order_by(Expense.expense_date.desc(), Expense.id.desc())
-    ).all()
+    )
+    if offset:
+        query = query.offset(max(0, int(offset)))
+    if limit is not None:
+        query = query.limit(max(1, min(int(limit), 500)))
+    expenses = session.scalars(query).all()
     return [serialize_expense(expense) for expense in expenses]
 
 
 @app.get("/api/expenses")
-def list_expenses(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
-    return expenses_payload(session)
+def list_expenses(limit: int | None = None, offset: int = 0, session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    return expenses_payload(session, limit=limit, offset=offset)
 
 
 @app.post("/api/expenses")

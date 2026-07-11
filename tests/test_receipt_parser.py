@@ -16,10 +16,10 @@ OZON_IP_RECEIPT_TEXT = """\
 Банк-
 получатель
 СИБИРСКИЙ БАНК ПАО СБЕРБАНК, г. Новосибирск
-БИК 045004641
-Корреспондентский счет 30101810500000000641
-Счёт получателя 40802810644050156191
-Получатель ИП Чантурия Эраст Митридатович
+БИК 000000000
+Корреспондентский счет 00000000000000000000
+Счёт получателя 00000000000000000000
+Получатель ИП Тестовый Получатель
 Назначение платежа ЧД2 Без НДС
 По вопросам зачисления обращайтесь к получателю
 Служба поддержки Ozon Банка: 8 (800) 555-89-82
@@ -36,7 +36,7 @@ TBANK_PHONE_RECEIPT_TEXT = """\
 7 620 iСумма
 Комиссия Без комиссии
 Денис ЧасовскихОтправитель
-Телефон получателя +7 (913) 385-44-41
+Телефон получателя +7 (000) 000-00-00
 Получатель Эрнест К.
 Банк получателя Сбербанк
 Счет списания 423018103000****2261
@@ -55,8 +55,8 @@ TBANK_IP_RECEIPT_TEXT = """\
 Статус Успешно
 20 000 iСумма
 Банк получателя СИБИРСКИЙ БАНК ПАО СБЕРБАНК
-Счет получателя 40802810644050156191
-Получатель ИП Чантурия Эраст Митридатович
+Счет получателя 00000000000000000000
+Получатель ИП Тестовый Получатель
 Назначение перевода БД 3
 Служба поддержки fb@tbank.ru
 По вопросам зачисления обращайтесь к получателю
@@ -76,13 +76,13 @@ SBER_IP_RECEIPT_TEXT = """\
 Итого
 20 200,00 ₽
 Плательщик
-Эраст Митридатович Чантурия
+Тестов Тест Тестович
 Получатель
-ИНДИВИДУАЛЬНЫЙ ПРЕДПРИНИМАТЕЛЬ ЧАНТУРИЯ ЭРАСТ МИТРИДАТОВИЧ
+ИНДИВИДУАЛЬНЫЙ ПРЕДПРИНИМАТЕЛЬ ТЕСТОВ ТЕСТ ТЕСТОВИЧ
 БИК
-045004641
+000000000
 Счёт получателя
-40802810644050156191
+00000000000000000000
 Назначение платежа
 КАВ 3
 """
@@ -95,7 +95,7 @@ SBER_PHONE_RECEIPT_TEXT = """\
 ФИО получателя
 Марьяна Сергеевна С
 Телефон получателя
-+7(913) 206-02-94
++7(000) 000-00-00
 Сумма перевода
 765,00 ₽
 Номер документа
@@ -111,7 +111,7 @@ OZON_PHONE_RECEIPT_TEXT = """\
 Сумма 15 000 ₽
 Комиссия Без комиссии
 Получатель Эрнест Игоревич К.
-Телефон получателя +7 (913) 385-44-41
+Телефон получателя +7 (000) 000-00-00
 Банк получателя Сбербанк
 Отправитель Евгений Викторович С.
 ID операции B61180242138760B0G10100011750501
@@ -119,8 +119,8 @@ Cooбщение Коммунальные
 По вопросам зачисления обращайтесь к получателю
 Служба поддержки Ozon Банка: 8 (800) 555-89-82
 ООО «ОЗОН БАНК»
-БИК 044525068 ИНН 9703077050
-К/С 30101810645374525068
+БИК 000000000 ИНН 0000000000
+К/С 00000000000000000000
 """
 
 
@@ -133,7 +133,7 @@ VTB_PHONE_RECEIPT_TEXT = """\
 Имя плательщика Евгений Викторович С.
 Сообщение электроэнергия
 Получатель Эрнест Игоревич К.
-Телефон получателя +7 (913) 385‑44‑41
+Телефон получателя +7 (000) 000‑00‑00
 Банк получателя Сбербанк
 ID операции в СБП B61501721253400A0B1014001
 1770901
@@ -151,8 +151,8 @@ class ReceiptParserTests(unittest.TestCase):
         self.assertEqual(parsed["amount"], 20000.0)
         self.assertEqual(parsed["paid_at"], "2026-03-14T09:10")
         self.assertEqual(parsed["payer_name"], "Сажин Евгений Викторович")
-        self.assertEqual(parsed["recipient_name"], "ИП Чантурия Эраст Митридатович")
-        self.assertEqual(parsed["recipient_account"], "40802810644050156191")
+        self.assertEqual(parsed["recipient_name"], "ИП Тестовый Получатель")
+        self.assertEqual(parsed["recipient_account"], "00000000000000000000")
         self.assertEqual(parsed["purpose"], "ЧД2 Без НДС")
         self.assertTrue(parsed["is_success"])
 
@@ -164,7 +164,7 @@ class ReceiptParserTests(unittest.TestCase):
         self.assertEqual(parsed["paid_at"], "2026-03-13T15:03")
         self.assertEqual(parsed["transfer_type"], "По номеру телефона")
         self.assertEqual(parsed["payer_name"], "Денис Часовских")
-        self.assertEqual(parsed["recipient_phone"], "+7 (913) 385-44-41")
+        self.assertEqual(parsed["recipient_phone"], "+7 (000) 000-00-00")
         self.assertEqual(parsed["recipient_name"], "Эрнест К")
         self.assertEqual(parsed["recipient_bank"], "Сбербанк")
         self.assertEqual(parsed["receipt_number"], "1-130-088-396-459")
@@ -177,8 +177,8 @@ class ReceiptParserTests(unittest.TestCase):
         self.assertEqual(parsed["amount"], 20000.0)
         self.assertEqual(parsed["paid_at"], "2026-03-01T15:46")
         self.assertEqual(parsed["transfer_type"], "Юридическому лицу")
-        self.assertEqual(parsed["recipient_name"], "ИП Чантурия Эраст Митридатович")
-        self.assertEqual(parsed["recipient_account"], "40802810644050156191")
+        self.assertEqual(parsed["recipient_name"], "ИП Тестовый Получатель")
+        self.assertEqual(parsed["recipient_account"], "00000000000000000000")
         self.assertEqual(parsed["purpose"], "БД 3")
         self.assertEqual(parsed["receipt_number"], "1-103-296-522-804")
         self.assertTrue(parsed["is_success"])
@@ -190,9 +190,9 @@ class ReceiptParserTests(unittest.TestCase):
         self.assertEqual(parsed["amount"], 20000.0)
         self.assertEqual(parsed["paid_at"], "2026-03-16T09:03")
         self.assertEqual(parsed["transfer_type"], "По реквизитам")
-        self.assertEqual(parsed["recipient_name"], "ИНДИВИДУАЛЬНЫЙ ПРЕДПРИНИМАТЕЛЬ ЧАНТУРИЯ ЭРАСТ МИТРИДАТОВИЧ")
-        self.assertEqual(parsed["recipient_account"], "40802810644050156191")
-        self.assertEqual(parsed["recipient_bik"], "045004641")
+        self.assertEqual(parsed["recipient_name"], "ИНДИВИДУАЛЬНЫЙ ПРЕДПРИНИМАТЕЛЬ ТЕСТОВ ТЕСТ ТЕСТОВИЧ")
+        self.assertEqual(parsed["recipient_account"], "00000000000000000000")
+        self.assertEqual(parsed["recipient_bik"], "000000000")
         self.assertEqual(parsed["purpose"], "КАВ 3")
 
     def test_parses_sber_phone_receipt(self) -> None:
@@ -203,7 +203,7 @@ class ReceiptParserTests(unittest.TestCase):
         self.assertEqual(parsed["paid_at"], "2026-04-16T17:57")
         self.assertEqual(parsed["transfer_type"], "По номеру телефона")
         self.assertEqual(parsed["recipient_name"], "Марьяна Сергеевна С")
-        self.assertEqual(parsed["recipient_phone"], "+7(913) 206-02-94")
+        self.assertEqual(parsed["recipient_phone"], "+7(000) 000-00-00")
         self.assertEqual(parsed["receipt_number"], "1000000004706610066")
 
     def test_parses_ozon_phone_receipt_with_sender_and_message(self) -> None:
@@ -215,7 +215,7 @@ class ReceiptParserTests(unittest.TestCase):
         self.assertEqual(parsed["transfer_type"], "По номеру телефона")
         self.assertEqual(parsed["payer_name"], "Евгений Викторович С")
         self.assertEqual(parsed["recipient_name"], "Эрнест Игоревич К")
-        self.assertEqual(parsed["recipient_phone"], "+7 (913) 385-44-41")
+        self.assertEqual(parsed["recipient_phone"], "+7 (000) 000-00-00")
         self.assertEqual(parsed["recipient_bank"], "Сбербанк")
         self.assertEqual(parsed["purpose"], "Коммунальные")
         self.assertEqual(parsed["receipt_number"], "B61180242138760B0G10100011750501")
@@ -231,7 +231,7 @@ class ReceiptParserTests(unittest.TestCase):
         self.assertEqual(parsed["status"], "Выполнено")
         self.assertEqual(parsed["payer_name"], "Евгений Викторович С")
         self.assertEqual(parsed["recipient_name"], "Эрнест Игоревич К")
-        self.assertEqual(parsed["recipient_phone"], "+7 (913) 385-44-41")
+        self.assertEqual(parsed["recipient_phone"], "+7 (000) 000-00-00")
         self.assertEqual(parsed["recipient_bank"], "Сбербанк")
         self.assertEqual(parsed["purpose"], "электроэнергия")
         self.assertEqual(parsed["receipt_number"], "B61501721253400A0B10140011770901")

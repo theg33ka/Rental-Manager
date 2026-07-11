@@ -12,7 +12,7 @@ from rental_manager.services.receipt_matching import (
 
 class ReceiptMatchingTests(unittest.TestCase):
     def test_detects_ip_receipt_by_account(self) -> None:
-        parsed = {"recipient_account": "40802810644050156191"}
+        parsed = {"recipient_account": "00000000000000000000"}
 
         self.assertEqual(detect_receipt_channel(parsed), "ip")
 
@@ -29,9 +29,9 @@ class ReceiptMatchingTests(unittest.TestCase):
                 "recipient_bik": "999",
             },
             {
-                "ip_recipient_name": "ИП Чантурия Эраст Митридатович",
-                "ip_recipient_account": "40802810644050156191",
-                "ip_recipient_bik": "045004641",
+                "ip_recipient_name": "ИП Тестовый Получатель",
+                "ip_recipient_account": "00000000000000000000",
+                "ip_recipient_bik": "000000000",
             },
             "ip",
         )
@@ -43,12 +43,12 @@ class ReceiptMatchingTests(unittest.TestCase):
         issues = receipt_validation_issues(
             {
                 "recipient_name": "Кто-то другой",
-                "recipient_phone": "+7 999 000-00-00",
+                "recipient_phone": "+7 000 000-00-00",
                 "recipient_bank": "Т-Банк",
             },
             {
                 "personal_recipient_name": "Эрнест К.",
-                "personal_recipient_phone": "+7 913 385-44-41",
+                "personal_recipient_phone": "+7 000 000-00-01",
                 "personal_recipient_bank": "Сбербанк",
             },
             "personal",
@@ -59,14 +59,14 @@ class ReceiptMatchingTests(unittest.TestCase):
     def test_ip_validation_accepts_sber_legal_form_prefix(self) -> None:
         issues = receipt_validation_issues(
             {
-                "recipient_name": "ИНДИВИДУАЛЬНЫЙ ПРЕДПРИНИМАТЕЛЬ ЧАНТУРИЯ ЭРАСТ МИТРИДАТОВИЧ",
-                "recipient_account": "40802810644050156191",
-                "recipient_bik": "045004641",
+                "recipient_name": "ИНДИВИДУАЛЬНЫЙ ПРЕДПРИНИМАТЕЛЬ ТЕСТОВЫЙ ПОЛУЧАТЕЛЬ",
+                "recipient_account": "00000000000000000000",
+                "recipient_bik": "000000000",
             },
             {
-                "ip_recipient_name": "ИП Чантурия Эраст Митридатович",
-                "ip_recipient_account": "40802810644050156191",
-                "ip_recipient_bik": "045004641",
+                "ip_recipient_name": "ИП Тестовый Получатель",
+                "ip_recipient_account": "00000000000000000000",
+                "ip_recipient_bik": "000000000",
             },
             "ip",
         )
@@ -77,12 +77,12 @@ class ReceiptMatchingTests(unittest.TestCase):
         issues = receipt_validation_issues(
             {
                 "recipient_name": "Марьяна Сергеевна С",
-                "recipient_phone": "+7(913)206-02-94",
+                "recipient_phone": "+7(000)000-00-00",
                 "recipient_bank": "",
             },
             {
                 "personal_recipient_name": "Марьяна С.",
-                "personal_recipient_phone": "+7 913 206-02-94",
+                "personal_recipient_phone": "+7 000 000-00-00",
                 "personal_recipient_bank": "Сбербанк",
             },
             "personal",
@@ -93,8 +93,8 @@ class ReceiptMatchingTests(unittest.TestCase):
     def test_name_matching_understands_ip_long_form(self) -> None:
         self.assertTrue(
             names_loosely_match(
-                "ИНДИВИДУАЛЬНЫЙ ПРЕДПРИНИМАТЕЛЬ ЧАНТУРИЯ ЭРАСТ МИТРИДАТОВИЧ",
-                "ИП Чантурия Эраст Митридатович",
+                "ИНДИВИДУАЛЬНЫЙ ПРЕДПРИНИМАТЕЛЬ ТЕСТОВЫЙ ПОЛУЧАТЕЛЬ",
+                "ИП Тестовый Получатель",
             )
         )
 

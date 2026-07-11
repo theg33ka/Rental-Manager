@@ -260,19 +260,26 @@
       </div>
     </header>
 
-    <nav class="tabs" aria-label="Разделы">
-      <button class="tab active" data-tab="dashboard">Дашборд</button>
-      <button class="tab" data-tab="tenants">Жильцы</button>
-      <button class="tab" data-tab="rent">Аренда</button>
-      <button class="tab" data-tab="meters">Счётчики</button>
-      <button class="tab" data-tab="utilities">Коммуналка</button>
-      <button class="tab" data-tab="tariffs">Тарифы</button>
-      <button class="tab" data-tab="expenses">Расходы</button>
-      <button class="tab" data-tab="reports">Отчёты</button>
-      <button class="tab" data-tab="dialogs">Диалоги</button>
-      <button class="tab" data-tab="messages">Сообщения</button>
-      <button class="tab" data-tab="automation">Автоматизация</button>
-      <button class="tab" data-tab="settings">Настройки</button>
+    <nav class="tabs" aria-label="Основные разделы">
+      <button class="nav-group active" data-group="overview">Обзор</button>
+      <button class="nav-group" data-group="rentals">Арендаторы и платежи</button>
+      <button class="nav-group" data-group="utilities">Коммунальные услуги</button>
+      <button class="nav-group" data-group="communications">Коммуникации</button>
+      <button class="nav-group" data-group="administration">Администрирование</button>
+    </nav>
+    <nav class="section-tabs" aria-label="Подразделы">
+      <button class="tab active" data-group="overview" data-tab="dashboard">Сводка</button>
+      <button class="tab" data-group="rentals" data-tab="tenants">Арендаторы</button>
+      <button class="tab" data-group="rentals" data-tab="rent">Начисления и оплаты</button>
+      <button class="tab" data-group="utilities" data-tab="meters">Счётчики</button>
+      <button class="tab" data-group="utilities" data-tab="utilities">Начисления</button>
+      <button class="tab" data-group="utilities" data-tab="tariffs">Тарифы</button>
+      <button class="tab" data-group="administration" data-tab="expenses">Расходы</button>
+      <button class="tab" data-group="overview" data-tab="reports">Отчёты</button>
+      <button class="tab" data-group="communications" data-tab="dialogs">Диалоги</button>
+      <button class="tab" data-group="communications" data-tab="messages">Сообщения</button>
+      <button class="tab" data-group="administration" data-tab="automation">Автоматизация</button>
+      <button class="tab" data-group="administration" data-tab="settings">Настройки</button>
     </nav>
 
     <main>
@@ -282,14 +289,14 @@
         <section>
           <div class="section-title">
             <h2>Объекты кратко</h2>
-            <span>Подробности уехали в жильцов, им там спокойнее</span>
+            <span>Подробные данные доступны в разделе жильцов</span>
           </div>
           <div id="objectCards" class="object-summary"></div>
         </section>
         <section>
           <div class="section-title">
             <h2>Дашборд</h2>
-            <span>Главные проблемы по жильцам, коммуналке и напоминаниям. Пёстро, наглядно, без археологии.</span>
+            <span>Основные задачи по арендаторам, коммунальным услугам и напоминаниям.</span>
           </div>
           <div id="attentionList" class="attention-grid"></div>
         </section>
@@ -459,7 +466,7 @@
         <div class="section-title">
           <div>
             <h2>Диалоги бота</h2>
-            <span>История Telegram-чатов и ручной ответ от лица бота. А зачем искать телефон, если чат уже тут?</span>
+            <span>История Telegram-чатов и ручные ответы от имени бота.</span>
           </div>
           <button id="botDialogsRefreshBtn" type="button">Обновить диалоги</button>
         </div>
@@ -484,7 +491,7 @@
         <section class="card stack">
           <div class="section-title">
             <h3>Массовая рассылка</h3>
-            <span>Для техработ, общих объявлений и прочих «всем срочно прочитать», а зачем руками по одному?</span>
+            <span>Общие объявления и сообщения выбранным арендаторам.</span>
           </div>
           <form id="broadcastForm" class="form-grid">
             <label class="wide">Текст сообщения
@@ -630,78 +637,63 @@
       <section class="panel" id="settings">
         <div class="section-title">
           <h2>Настройки</h2>
-          <span>Цвет, спокойствие и чуть меньше хаоса</span>
+          <span>Общие параметры, интеграции и безопасность</span>
         </div>
-        <form id="settingsForm" class="form-grid compact">
-          <label>Публичный URL приложения
-            <input name="app_base_url" id="appBaseUrlInput" placeholder="https://your-app.example.com" />
-          </label>
-          <label>Telegram owner chat id
-            <input name="telegram_owner_chat_id" id="telegramOwnerChatIdInput" placeholder="123456789" />
-          </label>
-          <label>Telegram bot token
-            <input type="password" name="telegram_bot_token" id="telegramBotTokenInput" placeholder="Оставь пустым, чтобы не менять" />
-          </label>
-          <label>Telegram webhook secret
-            <input type="password" name="telegram_webhook_secret" id="telegramWebhookSecretInput" placeholder="Оставь пустым, чтобы не менять" />
-          </label>
-          <label class="check wide"><input type="checkbox" name="ai_enabled" id="aiEnabledInput" /> Hermes AI enabled</label>
-          <label class="check wide"><input type="checkbox" name="ai_tenant_free_text_enabled" id="aiTenantFreeTextEnabledInput" /> Tenant free-text AI replies enabled</label>
-          <label>Hermes API URL
-            <input name="hermes_api_base_url" id="hermesApiBaseUrlInput" placeholder="http://127.0.0.1:8642" />
-          </label>
-          <label>Hermes API key
-            <input type="password" name="hermes_api_key" id="hermesApiKeyInput" placeholder="Leave empty to keep current" />
-          </label>
-          <label>Default AI model
-            <input name="hermes_model_default" id="hermesModelDefaultInput" placeholder="deepseek-V4" />
-          </label>
-          <label>Audit AI model
-            <input name="hermes_model_audit" id="hermesModelAuditInput" placeholder="deepseek-V4" />
-          </label>
-          <label>AI budget, RUB/month
-            <input type="number" min="0" step="1" name="ai_monthly_budget_rub" id="aiMonthlyBudgetRubInput" placeholder="1000" />
-          </label>
-          <label>PIN owner
-            <input type="password" inputmode="numeric" name="panel_owner_pin_code" id="panelOwnerPinCodeInput" placeholder="Оставь пустым, чтобы не менять" />
-          </label>
-          <label>PIN guest
-            <input type="password" inputmode="numeric" name="panel_guest_pin_code" id="panelGuestPinCodeInput" placeholder="Оставь пустым, чтобы не менять" />
-          </label>
-          <label>Цветовая палитра
-            <select name="color_palette" id="paletteSelect">
-              <option value="classic">Классическая</option>
-              <option value="forest">Лесная</option>
-              <option value="contrast">Контрастная</option>
-              <option value="dark-classic">Тёмная классическая</option>
-              <option value="neon">Тёмная неоновая</option>
-            </select>
-          </label>
-          <label class="check wide"><input type="checkbox" name="notifications_enabled" id="notificationsEnabledInput" /> Автоматические напоминания жильцам включены</label>
-          <label>Игнорировать старые долги до
-            <input type="date" name="notification_cutoff_date" id="notificationCutoffDateInput" />
-          </label>
-          <label class="wide">Получатель ИП
-            <input name="ip_recipient_name" id="ipRecipientNameInput" placeholder="ИП Чантурия Эраст Митридатович" />
-          </label>
-          <label>Счёт ИП
-            <input name="ip_recipient_account" id="ipRecipientAccountInput" placeholder="4080..." />
-          </label>
-          <label>БИК ИП
-            <input name="ip_recipient_bik" id="ipRecipientBikInput" placeholder="045004641" />
-          </label>
-          <label class="wide">Получатель перевода
-            <input name="personal_recipient_name" id="personalRecipientNameInput" placeholder="Эрнест К." />
-          </label>
-          <label>Телефон получателя
-            <input name="personal_recipient_phone" id="personalRecipientPhoneInput" placeholder="+7 913 385-44-41" />
-          </label>
-          <label>Банк получателя
-            <input name="personal_recipient_bank" id="personalRecipientBankInput" placeholder="Сбербанк" />
-          </label>
+        <div class="settings-nav" role="tablist" aria-label="Разделы настроек">
+          <button type="button" class="settings-nav-btn active" data-settings-target="general">Общие</button>
+          <button type="button" class="settings-nav-btn" data-settings-target="integrations">Интеграции</button>
+          <button type="button" class="settings-nav-btn" data-settings-target="ai">AI</button>
+          <button type="button" class="settings-nav-btn" data-settings-target="security">Безопасность</button>
+          <button type="button" class="settings-nav-btn" data-settings-target="payments">Платёжные реквизиты</button>
+        </div>
+        <form id="settingsForm" class="stack">
+          <fieldset class="settings-pane form-grid compact" data-settings-panel="general">
+            <legend>Общие настройки</legend>
+            <label>Публичный URL приложения
+              <input name="app_base_url" id="appBaseUrlInput" placeholder="https://your-app.example.com" />
+            </label>
+            <label>Цветовая палитра
+              <select name="color_palette" id="paletteSelect">
+                <option value="classic">Классическая</option><option value="forest">Лесная</option><option value="contrast">Контрастная</option><option value="dark-classic">Тёмная классическая</option><option value="neon">Тёмная неоновая</option>
+              </select>
+            </label>
+            <label class="check wide"><input type="checkbox" name="notifications_enabled" id="notificationsEnabledInput" /> Автоматические напоминания арендаторам</label>
+            <label>Не учитывать долги до даты<input type="date" name="notification_cutoff_date" id="notificationCutoffDateInput" /></label>
+          </fieldset>
+          <fieldset class="settings-pane form-grid compact" data-settings-panel="integrations" hidden>
+            <legend>Telegram</legend>
+            <label>Идентификатор чата владельца<input name="telegram_owner_chat_id" id="telegramOwnerChatIdInput" placeholder="Введите идентификатор" /></label>
+            <label>Токен Telegram-бота<input type="password" name="telegram_bot_token" id="telegramBotTokenInput" placeholder="Оставьте пустым, чтобы не менять" /></label>
+            <label>Секрет Telegram webhook<input type="password" name="telegram_webhook_secret" id="telegramWebhookSecretInput" placeholder="Оставьте пустым, чтобы не менять" /></label>
+          </fieldset>
+          <fieldset class="settings-pane form-grid compact" data-settings-panel="ai" hidden>
+            <legend>AI-интеграция</legend>
+            <label class="check wide"><input type="checkbox" name="ai_enabled" id="aiEnabledInput" /> Включить AI-функции</label>
+            <label class="check wide"><input type="checkbox" name="ai_tenant_free_text_enabled" id="aiTenantFreeTextEnabledInput" /> Ответы на свободный текст арендаторов</label>
+            <label>URL Hermes API<input name="hermes_api_base_url" id="hermesApiBaseUrlInput" placeholder="http://127.0.0.1:8642" /></label>
+            <label>Ключ Hermes API<input type="password" name="hermes_api_key" id="hermesApiKeyInput" placeholder="Оставьте пустым, чтобы не менять" /></label>
+            <label>Основная модель<input name="hermes_model_default" id="hermesModelDefaultInput" placeholder="deepseek-V4" /></label>
+            <label>Модель аудита<input name="hermes_model_audit" id="hermesModelAuditInput" placeholder="deepseek-V4" /></label>
+            <label>Месячный бюджет, ₽<input type="number" min="0" step="1" name="ai_monthly_budget_rub" id="aiMonthlyBudgetRubInput" placeholder="1000" /></label>
+          </fieldset>
+          <fieldset class="settings-pane form-grid compact" data-settings-panel="security" hidden>
+            <legend>Безопасность</legend>
+            <label>PIN владельца<input type="password" inputmode="numeric" name="panel_owner_pin_code" id="panelOwnerPinCodeInput" autocomplete="new-password" /></label>
+            <label>Гостевой PIN<input type="password" inputmode="numeric" name="panel_guest_pin_code" id="panelGuestPinCodeInput" autocomplete="new-password" /></label>
+            <p class="muted wide">Изменение PIN завершит остальные активные сессии.</p>
+          </fieldset>
+          <fieldset class="settings-pane form-grid compact" data-settings-panel="payments" hidden>
+            <legend>Платёжные реквизиты</legend>
+            <label class="wide">Получатель ИП<input name="ip_recipient_name" id="ipRecipientNameInput" placeholder="Введите наименование получателя" /></label>
+            <label>Счёт ИП<input name="ip_recipient_account" id="ipRecipientAccountInput" placeholder="Введите расчётный счёт" /></label>
+            <label>БИК ИП<input name="ip_recipient_bik" id="ipRecipientBikInput" placeholder="Введите БИК" /></label>
+            <label class="wide">Получатель перевода<input name="personal_recipient_name" id="personalRecipientNameInput" placeholder="Введите имя получателя" /></label>
+            <label>Телефон получателя<input name="personal_recipient_phone" id="personalRecipientPhoneInput" placeholder="Введите номер телефона" /></label>
+            <label>Банк получателя<input name="personal_recipient_bank" id="personalRecipientBankInput" placeholder="Введите название банка" /></label>
+          </fieldset>
           <button class="primary" type="submit">Сохранить настройки</button>
         </form>
-        <p class="muted">PIN-коды сохраняются на сервере. Пустое поле значит «не трогай, оно и так живое».</p>
+        <p class="muted">PIN-коды хранятся в виде защищённых хешей. Оставьте поле пустым, чтобы сохранить текущее значение.</p>
         <div class="settings-actions">
           <button id="telegramWebhookBtn" type="button">Подключить Telegram webhook</button>
           <button id="telegramTestBtn" type="button">Отправить тест в Telegram</button>
@@ -712,7 +704,7 @@
         <section class="card stack">
           <div class="section-title">
             <h3>Импорт и экспорт базы</h3>
-            <span>Переезд хостинга без ритуалов. Но с защитой от случайного «ой».</span>
+            <span>Проверка файла, резервная копия и подтверждение перед заменой данных.</span>
           </div>
           <div class="settings-actions">
             <button id="databaseExportBtn" type="button" class="primary">Экспортировать базу целиком</button>
@@ -736,7 +728,7 @@
         <section class="card stack">
           <div class="section-title">
             <h3>Внутренний мониторинг</h3>
-            <span>Смотрим медленные места без постоянного автоопроса. А зачем будить сервер просто так?</span>
+            <span>Показатели запросов и фоновых операций без постоянного автоопроса.</span>
           </div>
           <div class="settings-actions">
             <button id="performanceRefreshBtn" type="button" class="primary">Обновить мониторинг</button>
@@ -776,7 +768,7 @@
     <div id="manualAllocationModal" class="modal-shell" hidden></div>
     <div id="manualDebtModal" class="modal-shell" hidden></div>
     <div id="toast" role="status" aria-live="polite"></div>
-    <script src="/static/app.js?v=2026-07-05-dialogs"></script>
+    <script type="module" src="/static/js/bootstrap.js?v=2026-07-11-security"></script>
   </body>
 </html>
 

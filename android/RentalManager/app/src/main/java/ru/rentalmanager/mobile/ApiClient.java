@@ -1,7 +1,6 @@
 package ru.rentalmanager.mobile;
 
 import android.content.Context;
-import android.content.SharedPreferences;
 
 import org.json.JSONObject;
 import org.json.JSONArray;
@@ -18,8 +17,6 @@ import java.util.List;
 import java.util.Map;
 
 final class ApiClient {
-    static final String KEY_SESSION_COOKIE = "panel_session_cookie";
-
     static final class ApiException extends Exception {
         final int statusCode;
 
@@ -30,9 +27,11 @@ final class ApiClient {
     }
 
     private final Context context;
+    private final SessionStore sessionStore;
 
     ApiClient(Context context) {
         this.context = context.getApplicationContext();
+        this.sessionStore = new SessionStore(this.context);
     }
 
     String baseUrl() {
@@ -68,11 +67,11 @@ final class ApiClient {
 
     void logout() throws Exception {
         postJson("/api/auth/logout", new JSONObject());
-        prefs().edit().remove(KEY_SESSION_COOKIE).apply();
+        sessionStore.clear();
     }
 
     String cookieHeader() {
-        return prefs().getString(KEY_SESSION_COOKIE, "");
+        return sessionStore.read();
     }
 
     private JSONObject request(String method, String path, JSONObject body) throws Exception {
@@ -127,6 +126,10 @@ final class ApiClient {
             String cookie = cookieHeader();
             if (!cookie.isEmpty()) {
                 connection.setRequestProperty("Cookie", cookie);
+            }
+            if (!("GET".equals(method) || "HEAD".equals(method) || "OPTIONS".equals(method))) {
+                String csrfToken = cookiePart(cookie, "rental_manager_csrf");
+                if (!csrfToken.isEmpty()) connection.setRequestProperty("X-CSRF-Token", csrfToken);
             }
             if (body != null) {
                 byte[] raw = body.toString().getBytes(StandardCharsets.UTF_8);
@@ -207,10 +210,18 @@ final class ApiClient {
             if (value.length() > 0) value.append("; ");
             value.append(first);
         }
-        prefs().edit().putString(KEY_SESSION_COOKIE, value.toString()).apply();
+        sessionStore.write(value.toString());
     }
 
-    private SharedPreferences prefs() {
-        return NotificationPrefs.prefs(context);
+    private String cookiePart(String header, String name) {
+        if (header == null || header.isEmpty()) return "";
+        for (String part : header.split(";")) {
+            String trimmed = part.trim();
+            int separator = trimmed.indexOf('=');
+            if (separator > 0 && name.equals(trimmed.substring(0, separator))) {
+                return trimmed.substring(separator + 1);
+            }
+        }
+        return "";
     }
 }

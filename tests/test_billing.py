@@ -34,6 +34,7 @@ from rental_manager.services.billing import (
     update_rent_charge_status,
 )
 from rental_manager.services.seed import seed_if_empty
+from rental_manager.security.pins import PIN_SETTING_KEYS, hash_pin
 
 
 class DatabaseTestCase(unittest.TestCase):
@@ -141,10 +142,15 @@ class AppStatePerformanceTests(DatabaseTestCase):
         with self.assertRaises(HTTPException):
             parse_database_import_bytes(b'{"format":"nope","version":1,"tables":{}}')
 
-    def test_panel_pin_defaults_resolve_owner_and_guest_roles(self) -> None:
+    def test_panel_pin_hashes_resolve_owner_and_guest_roles(self) -> None:
         with self.Session() as session:
-            self.assertEqual(panel_role_for_pin(session, "1298"), "owner")
-            self.assertEqual(panel_role_for_pin(session, "1212"), "guest")
+            session.add_all([
+                AppSetting(key=PIN_SETTING_KEYS["owner"], value=hash_pin("735194")),
+                AppSetting(key=PIN_SETTING_KEYS["guest"], value=hash_pin("846205")),
+            ])
+            session.commit()
+            self.assertEqual(panel_role_for_pin(session, "735194"), "owner")
+            self.assertEqual(panel_role_for_pin(session, "846205"), "guest")
             self.assertIsNone(panel_role_for_pin(session, "0000"))
 
 

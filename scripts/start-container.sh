@@ -17,6 +17,9 @@ if [ -z "$AI_PROVIDER_VALUE" ]; then
 fi
 echo "[BOOT] ai_provider=${AI_PROVIDER_VALUE} fallback=${AI_FALLBACK_PROVIDER:-none} yandex_key_configured=$([ -n "${YANDEX_AI_API_KEY:-}${YANDEX_API_KEY:-}" ] && echo true || echo false) amvera_llm_key_configured=$([ -n "${AMVERA_LLM_API_KEY:-}" ] && echo true || echo false)"
 
+echo "[BOOT] applying database migrations"
+alembic upgrade head
+
 HERMES_ENABLED_VALUE="$(printf '%s' "${HERMES_ENABLED:-true}" | tr '[:upper:]' '[:lower:]')"
 if [ "$AI_PROVIDER_VALUE" = "hermes" ] && [ "$HERMES_ENABLED_VALUE" != "0" ] && [ "$HERMES_ENABLED_VALUE" != "false" ] && [ "$HERMES_ENABLED_VALUE" != "off" ]; then
   if [ -z "${HERMES_API_KEY:-}" ]; then

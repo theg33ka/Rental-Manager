@@ -1,3 +1,5 @@
+const { api, configureApiClient, downloadFile, triggerNativeDownload } = window.RentalApi;
+
 const state = {
   auth: { authenticated: false, role: null },
   bootstrap: null,
@@ -29,6 +31,7 @@ const state = {
 
 const ownerTabs = ["dashboard", "tenants", "rent", "meters", "utilities", "tariffs", "expenses", "reports", "dialogs", "messages", "automation", "settings"];
 const guestTabs = ["dashboard", "reports"];
+let activeNavGroup = "overview";
 const appStateLoadGroups = [
   {
     sections: ["bootstrap"],
@@ -46,13 +49,13 @@ const appStateLoadGroups = [
     sections: ["rent_charges", "utility_bills", "expenses", "tariffs"],
     percent: 86,
     title: "Подтягиваю расчёты",
-    detail: "Аренда, коммуналка, расходы и тарифы идут одним спокойным пакетом.",
+    detail: "Загружаю аренду, коммунальные услуги, расходы и тарифы.",
   },
   {
     sections: ["utility_timeline", "message_targets", "suspicious_receipts"],
     percent: 94,
-    title: "Догружаю тяжёлые хвосты",
-    detail: "Таймлайн, рассылки и чеки. Если тут тормозит, мониторинг покажет виновника.",
+    title: "Загружаю дополнительные данные",
+    detail: "Таймлайн, рассылки и чеки загружаются последними.",
   },
 ];
 const appStateSectionOrder = [...new Set(appStateLoadGroups.flatMap((group) => group.sections))];
@@ -60,6 +63,7 @@ const mutationRefreshSections = appStateSectionOrder.filter((section) => section
 const registryRefreshSections = [...appStateSectionOrder];
 let silentRefreshPromise = null;
 const silentRefreshSections = new Set();
+const modalReturnFocus = new Map();
 
 function markFrontendPerf(name, detail = {}) {
   try {
@@ -67,7 +71,7 @@ function markFrontendPerf(name, detail = {}) {
     window.performance?.mark?.(markName);
     console.info("[PERF]", name, detail);
   } catch {
-    // Диагностика не должна ломать пульт. Было бы неловко, да.
+    // Сбой диагностической метки не должен мешать работе интерфейса.
   }
 }
 
@@ -161,6 +165,45 @@ function on(selector, eventName, handler) {
   node.addEventListener(eventName, handler);
 }
 
+function openAccessibleModal(root, closeHandler) {
+  if (!modalReturnFocus.has(root.id)) modalReturnFocus.set(root.id, document.activeElement);
+  root.setAttribute("role", "dialog");
+  root.setAttribute("aria-modal", "true");
+  const heading = root.querySelector("h3");
+  if (heading) {
+    heading.id = `${root.id}Title`;
+    root.setAttribute("aria-labelledby", heading.id);
+  }
+  const focusable = () => qsa('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])', root).filter((item) => !item.hidden);
+  root.onkeydown = (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeHandler();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const items = focusable();
+    if (!items.length) return;
+    const first = items[0];
+    const last = items[items.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+  window.setTimeout(() => focusable()[0]?.focus(), 0);
+}
+
+function restoreModalFocus(root) {
+  const target = modalReturnFocus.get(root.id);
+  modalReturnFocus.delete(root.id);
+  root.onkeydown = null;
+  if (target instanceof HTMLElement && document.contains(target)) window.setTimeout(() => target.focus(), 0);
+}
+
 function showAuthOverlay() {
   hideLoadingOverlay();
   document.body.classList.add("auth-locked");
@@ -188,7 +231,7 @@ function setLoadingStep(percent, title, detail = "") {
   if (bar) bar.style.width = `${safePercent}%`;
   if (percentNode) percentNode.textContent = `${safePercent}%`;
   if (titleNode) titleNode.textContent = title || "Загружаю";
-  if (detailNode) detailNode.textContent = detail || "Сервер шуршит базой, сейчас покажу результат.";
+  if (detailNode) detailNode.textContent = detail || "Получаю данные с сервера.";
 }
 
 function hideLoadingOverlay() {
@@ -202,14 +245,19 @@ function applyAccessUi() {
   document.body.dataset.role = role || "anonymous";
   const allowedTabs = role === "owner" ? ownerTabs : guestTabs;
   qsa(".tab").forEach((tab) => {
-    const allowed = allowedTabs.includes(tab.dataset.tab);
+    const allowed = allowedTabs.includes(tab.dataset.tab) && tab.dataset.group === activeNavGroup;
     tab.hidden = !allowed;
     tab.disabled = !allowed;
   });
+  qsa(".nav-group").forEach((group) => {
+    const hasAllowedTab = qsa(`.tab[data-group="${group.dataset.group}"]`).some((tab) => allowedTabs.includes(tab.dataset.tab));
+    group.hidden = !hasAllowedTab;
+    group.classList.toggle("active", group.dataset.group === activeNavGroup);
+  });
   const activeTab = qs(".tab.active");
   if (!activeTab || activeTab.hidden) {
-    const dashboardTab = qs('.tab[data-tab="dashboard"]');
-    if (dashboardTab) dashboardTab.click();
+    const firstAvailableTab = qsa(".tab").find((tab) => !tab.hidden && !tab.disabled);
+    if (firstAvailableTab) firstAvailableTab.click();
   }
   const remindersButton = qs("#runRemindersBtn");
   if (remindersButton) remindersButton.hidden = !isOwner();
@@ -222,76 +270,23 @@ function applyAccessUi() {
   }
 }
 
-async function api(path, options = {}) {
-  const headers = { ...(options.headers || {}) };
-  const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData;
-  if (!isFormData && !headers["Content-Type"]) {
-    headers["Content-Type"] = "application/json";
-  }
-  let response;
-  try {
-    response = await fetch(path, {
-      credentials: "same-origin",
-      headers,
-      ...options,
-    });
-  } catch (error) {
-    throw new Error("Сервер не ответил на запрос. Обычно это долгий ответ API или оборванное соединение, не магия.");
-  }
-  const rawText = await response.text();
-  const parseJson = () => {
-    if (!rawText) return null;
-    try {
-      return JSON.parse(rawText);
-    } catch {
-      return null;
-    }
-  };
-  if (!response.ok) {
-    let message = "Ошибка запроса";
-    const data = parseJson();
-    message = data?.detail || rawText || message;
-    if (response.status === 401 && !path.startsWith("/api/auth/")) {
-      state.auth = { authenticated: false, role: null };
-      applyAccessUi();
-      showAuthOverlay();
-    }
-    throw new Error(message);
-  }
-  const data = parseJson();
-  return data ?? rawText;
+function activateNavGroup(groupName, selectDefault = true) {
+  activeNavGroup = groupName;
+  applyAccessUi();
+  if (!selectDefault) return;
+  const firstAvailable = qsa(`.tab[data-group="${groupName}"]`).find((tab) => !tab.hidden && !tab.disabled);
+  if (firstAvailable) firstAvailable.click();
 }
 
-async function downloadFile(path, fallbackFilename = "download") {
-  const response = await fetch(path, { credentials: "same-origin" });
-  if (!response.ok) {
-    const rawText = await response.text();
-    throw new Error(rawText || "Не удалось скачать файл");
-  }
-  const blob = await response.blob();
-  const contentDisposition = response.headers.get("Content-Disposition") || "";
-  const match = contentDisposition.match(/filename=\"?([^\";]+)\"?/i);
-  const filename = (match && match[1]) || fallbackFilename;
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.append(link);
-  link.click();
-  link.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
+configureApiClient({
+  onUnauthorized: () => {
+    state.auth = { authenticated: false, role: null };
+    applyAccessUi();
+    showAuthOverlay();
+  },
+});
 
 window.downloadFile = downloadFile;
-
-function triggerNativeDownload(path, fallbackFilename = "download") {
-  const link = document.createElement("a");
-  link.href = path;
-  link.download = fallbackFilename;
-  document.body.append(link);
-  link.click();
-  link.remove();
-}
 
 function toast(message) {
   const node = qs("#toast");
@@ -604,8 +599,8 @@ function applySettings(settings = {}) {
   if (token) token.placeholder = state.settings.telegram_bot_token_configured ? "Токен сохранён, пусто = не менять" : "Вставь bot token";
   if (secret) secret.placeholder = state.settings.telegram_webhook_secret_configured ? "Secret сохранён, пусто = не менять" : "Вставь webhook secret";
   if (hermesApiKey) hermesApiKey.placeholder = state.settings.hermes_api_key_configured ? "Hermes key saved, empty = keep" : "Hermes API key";
-  if (ownerPin) ownerPin.placeholder = state.settings.panel_owner_pin_code_configured ? "PIN owner сохранён, пусто = не менять" : "По умолчанию 1298";
-  if (guestPin) guestPin.placeholder = state.settings.panel_guest_pin_code_configured ? "PIN guest сохранён, пусто = не менять" : "По умолчанию 1212";
+  if (ownerPin) ownerPin.placeholder = state.settings.panel_owner_pin_code_configured ? "PIN владельца настроен" : "Задайте PIN владельца";
+  if (guestPin) guestPin.placeholder = state.settings.panel_guest_pin_code_configured ? "Гостевой PIN настроен" : "Задайте гостевой PIN";
   if (ipRecipientName) ipRecipientName.value = state.settings.ip_recipient_name || "";
   if (ipRecipientAccount) ipRecipientAccount.value = state.settings.ip_recipient_account || "";
   if (ipRecipientBik) ipRecipientBik.value = state.settings.ip_recipient_bik || "";
@@ -672,7 +667,7 @@ function renderPerformanceMonitor() {
   if (!box) return;
   const perf = state.performance;
   if (!perf) {
-    box.innerHTML = `<p class="muted">Нажмите «Обновить мониторинг», чтобы посмотреть, кто ел серверную кашу. Автоопроса нет, чтобы мониторинг не стал новым тормозом.</p>`;
+    box.innerHTML = `<p class="muted">Нажмите «Обновить мониторинг», чтобы получить актуальные показатели. Автоматический опрос отключён для снижения нагрузки.</p>`;
     return;
   }
   const routes = (perf.routes || []).slice(0, 10).map((route) => `
@@ -1427,6 +1422,7 @@ function renderManualAllocationModal() {
   const root = qs("#manualAllocationModal");
   if (!root) return;
   if (!state.manualAllocation) {
+    restoreModalFocus(root);
     root.hidden = true;
     root.innerHTML = "";
     return;
@@ -1484,6 +1480,7 @@ function renderManualAllocationModal() {
       </form>
     </div>
   `;
+  openAccessibleModal(root, closeManualAllocation);
 }
 
 async function submitManualAllocation(event) {
@@ -1582,6 +1579,7 @@ function renderManualDebtModal() {
   const root = qs("#manualDebtModal");
   if (!root) return;
   if (!state.manualDebt) {
+    restoreModalFocus(root);
     root.hidden = true;
     root.innerHTML = "";
     return;
@@ -1673,6 +1671,7 @@ function renderManualDebtModal() {
       </form>
     </div>
   `;
+  openAccessibleModal(root, closeManualDebt);
 }
 
 async function submitManualDebt(event) {
@@ -1926,7 +1925,7 @@ function renderObjects() {
     <article class="card">
       <h3>Заселено ${summary.occupied}/${summary.total}</h3>
       <div class="pill-row">${objects}</div>
-      ${isOwner() ? '<button class="mini" onclick="openTenantsTab()">Подробнее</button>' : '<p class="muted">Гостевой режим без телепорта в управление.</p>'}
+      ${isOwner() ? '<button class="mini" onclick="openTenantsTab()">Подробнее</button>' : '<p class="muted">Управление доступно владельцу.</p>'}
     </article>
   `;
 }
@@ -2265,7 +2264,7 @@ function renderSuspiciousReceipts() {
   const root = qs("#suspiciousReceiptsPanel");
   if (!root) return;
   if (!state.suspiciousReceipts.length) {
-    root.innerHTML = `<article class="card"><h3>Подозрительных чеков нет</h3><p class="muted">Тихо. Даже бот перестал драматизировать.</p></article>`;
+    root.innerHTML = `<article class="card"><h3>Подозрительных чеков нет</h3><p class="muted">Все полученные чеки обработаны.</p></article>`;
     return;
   }
   root.innerHTML = state.suspiciousReceipts.map((receipt) => `
@@ -2704,7 +2703,7 @@ function renderUtilityTimeline() {
   const root = qs("#utilityTimeline");
   if (!root) return;
   if (!state.utilityTimeline.length) {
-    root.innerHTML = `<article class="card"><h3>Таймлайн коммуналки</h3><p class="muted">Пока пусто. Сними показания, создай период, и жизнь станет чуть менее хаотичной. Или нет, но шанс есть.</p></article>`;
+    root.innerHTML = `<article class="card"><h3>Таймлайн коммунальных услуг</h3><p class="muted">Добавьте показания и создайте расчётный период, чтобы увидеть события.</p></article>`;
     return;
   }
   root.innerHTML = `
@@ -3846,6 +3845,7 @@ async function initApp() {
 function bindEvents() {
   qsa(".tab").forEach((tab) => {
     tab.addEventListener("click", () => {
+      if (tab.dataset.group !== activeNavGroup) activateNavGroup(tab.dataset.group, false);
       qsa(".tab").forEach((item) => item.classList.remove("active"));
       qsa(".panel").forEach((item) => item.classList.remove("active"));
       tab.classList.add("active");
@@ -3853,6 +3853,17 @@ function bindEvents() {
       if (tab.dataset.tab === "dialogs") {
         loadBotDialogs().catch((error) => toast(error.message));
       }
+    });
+  });
+  qsa(".nav-group").forEach((group) => {
+    group.addEventListener("click", () => activateNavGroup(group.dataset.group));
+  });
+  qsa(".settings-nav-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      qsa(".settings-nav-btn").forEach((item) => item.classList.toggle("active", item === button));
+      qsa(".settings-pane").forEach((pane) => {
+        pane.hidden = pane.dataset.settingsPanel !== button.dataset.settingsTarget;
+      });
     });
   });
 

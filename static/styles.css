@@ -293,7 +293,8 @@ button:hover,
   font-size: 20px;
 }
 
-.tabs {
+.tabs,
+.section-tabs {
   display: flex;
   gap: 6px;
   padding: 12px clamp(16px, 4vw, 44px);
@@ -302,17 +303,20 @@ button:hover,
   scrollbar-width: none;
 }
 
-.tabs::-webkit-scrollbar {
+.tabs::-webkit-scrollbar,
+.section-tabs::-webkit-scrollbar {
   display: none;
 }
 
-.tab {
+.tab,
+.nav-group {
   min-width: max-content;
   border-color: transparent;
   background: transparent;
 }
 
-.tab.active {
+.tab.active,
+.nav-group.active {
   background: var(--tab-active-bg);
   color: var(--tab-active-ink);
 }
@@ -325,6 +329,38 @@ body.app-loading main,
 body.app-loading nav,
 body.app-loading .topbar {
   visibility: hidden;
+}
+
+.settings-nav {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  margin-bottom: 16px;
+}
+
+.settings-nav-btn {
+  min-width: max-content;
+}
+
+.settings-nav-btn.active {
+  background: var(--tab-active-bg);
+  color: var(--tab-active-ink);
+}
+
+.settings-pane {
+  width: 100%;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.settings-pane[hidden] {
+  display: none;
+}
+
+.settings-pane legend {
+  padding: 0 8px;
+  font-weight: 700;
 }
 
 body.auth-locked:not(.app-loading) main,
@@ -1163,6 +1199,22 @@ td.actions .button {
 #toast.show {
   opacity: 1;
   transform: translateY(0);
+}
+
+:where(button, input, select, textarea, a, [tabindex]):focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent) 70%, white);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 .loading-overlay {
@@ -2021,6 +2073,24 @@ td.actions .button {
   .attention-card__footer-actions > *,
   .attention-card__footer-primary > * {
     flex: 1 1 100%;
+  }
+
+  .section-tabs {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .section-tabs .tab {
+    min-height: 38px;
+    min-width: max-content;
+  }
+
+  .nav-group {
+    min-width: 0;
+    flex: 1;
+    min-height: 48px;
+    padding: 6px 4px;
+    font-size: 11px;
   }
 
   .messenger-layout {

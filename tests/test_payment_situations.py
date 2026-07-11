@@ -87,8 +87,8 @@ class PaymentSituationTests(unittest.TestCase):
             AppSetting(key="notifications_enabled", value="1"),
             AppSetting(key="notification_cutoff_date", value=(today - timedelta(days=30)).isoformat()),
             AppSetting(key="ip_recipient_name", value="ИП Петров Пётр Петрович"),
-            AppSetting(key="ip_recipient_account", value="40802810000000000001"),
-            AppSetting(key="personal_recipient_phone", value="+7 999 111-22-33"),
+            AppSetting(key="ip_recipient_account", value="00000000000000000000"),
+            AppSetting(key="personal_recipient_phone", value="+7 000 000-00-00"),
             AppSetting(key="personal_recipient_bank", value="Сбербанк"),
         ]
         if with_owner:
@@ -141,10 +141,10 @@ class PaymentSituationTests(unittest.TestCase):
             utility_text = render_message_text(session, "message_utility_bill", lease, line=line)
 
         self.assertIn("ИП Петров Пётр Петрович", rent_text)
-        self.assertIn("40802810000000000001", rent_text)
-        self.assertIn("+7 999 111-22-33", rent_text)
+        self.assertIn("00000000000000000000", rent_text)
+        self.assertIn("+7 000 000-00-00", rent_text)
         self.assertIn("отправьте оба чека", rent_text)
-        self.assertIn("Коммуналка оплачивается переводом по номеру +7 999 111-22-33", utility_text)
+        self.assertIn("Коммуналка оплачивается переводом по номеру +7 000 000-00-00", utility_text)
         self.assertIn("Учтённые авансы уже вычтены", utility_text)
 
     def test_tenant_paid_button_pauses_reminders_until_receipt(self) -> None:

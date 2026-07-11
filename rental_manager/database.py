@@ -10,6 +10,11 @@ from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
+from rental_manager.observability.logging import get_logger
+
+
+LOGGER = get_logger("rental_manager.database")
+
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT_DIR / "data"
@@ -75,9 +80,9 @@ def ensure_postgres_database_exists(database_url: str) -> None:
             if exists:
                 return
             connection.execute(text(f"CREATE DATABASE {quote_postgres_identifier(target_database)}"))
-            print(f"[DB] created postgres database {target_database}", flush=True)
+            LOGGER.info("postgres database created", extra={"event": "database_created"})
     except SQLAlchemyError as exc:
-        print(f"[DB] postgres database bootstrap skipped: {exc}", flush=True)
+        LOGGER.warning("postgres database bootstrap skipped: %s", exc, extra={"event": "database_bootstrap_skipped"})
     finally:
         maintenance_engine.dispose()
 
@@ -117,7 +122,11 @@ def install_query_timing(target_engine) -> None:
             return
         duration_ms = int((time.perf_counter() - started) * 1000)
         if duration_ms >= slow_ms:
-            print(f"[DB-SLOW] duration_ms={duration_ms} sql={compact_sql_statement(statement)}", flush=True)
+            LOGGER.warning(
+                "slow query sql=%s",
+                compact_sql_statement(statement),
+                extra={"event": "slow_query", "duration_ms": duration_ms},
+            )
 
 
 install_query_timing(engine)
@@ -130,8 +139,14 @@ class Base(DeclarativeBase):
 def init_db() -> None:
     from rental_manager import models  # noqa: F401
 
-    ensure_postgres_database_exists(DATABASE_URL)
-    Base.metadata.create_all(bind=engine)
+    parsed = make_url(DATABASE_URL)
+    bootstrap_requested = os.environ.get("RENTAL_MANAGER_BOOTSTRAP_SCHEMA", "").strip().lower() in {"1", "true", "yes"}
+    sqlite_missing = False
+    if parsed.get_backend_name() == "sqlite":
+        database_name = parsed.database or ""
+        sqlite_missing = database_name == ":memory:" or not Path(database_name).exists()
+    if bootstrap_requested or sqlite_missing:
+        Base.metadata.create_all(bind=engine)
 
 
 def get_session():
