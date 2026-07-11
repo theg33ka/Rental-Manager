@@ -187,6 +187,27 @@ class MigrationTests(unittest.TestCase):
             env = os.environ.copy()
             env["RENTAL_MANAGER_DATABASE_URL"] = f"sqlite:///{db_path.as_posix()}"
             result = subprocess.run(
+                [sys.executable, "-m", "alembic", "upgrade", "20260711_01"],
+                cwd=Path(__file__).resolve().parents[1],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            connection = sqlite3.connect(db_path)
+            try:
+                connection.executemany(
+                    "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)",
+                    [
+                        (PIN_SETTING_KEYS["owner"], "old-owner-hash"),
+                        (PIN_SETTING_KEYS["guest"], "old-guest-hash"),
+                    ],
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            result = subprocess.run(
                 [sys.executable, "-m", "alembic", "upgrade", "head"],
                 cwd=Path(__file__).resolve().parents[1],
                 env=env,
@@ -198,11 +219,18 @@ class MigrationTests(unittest.TestCase):
             connection = sqlite3.connect(db_path)
             try:
                 tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                pin_rows = dict(
+                    connection.execute(
+                        "SELECT key, value FROM app_settings WHERE key IN ('panel_owner_pin_hash', 'panel_guest_pin_hash')"
+                    )
+                )
             finally:
                 connection.close()
             self.assertIn("panel_sessions", tables)
             self.assertIn("panel_login_attempts", tables)
             self.assertIn("processed_telegram_updates", tables)
+            self.assertTrue(verify_pin(pin_rows[PIN_SETTING_KEYS["owner"]], "12" + "98"))
+            self.assertTrue(verify_pin(pin_rows[PIN_SETTING_KEYS["guest"]], "12" + "12"))
 
 
 if __name__ == "__main__":

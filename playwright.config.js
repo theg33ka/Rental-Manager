@@ -15,7 +15,6 @@ module.exports = defineConfig({
         reuseExistingServer: true,
         env: {
           RENTAL_MANAGER_DATABASE_URL: "sqlite:///data/playwright.db",
-          PANEL_OWNER_PIN: "735194",
           RENTAL_MANAGER_ENV: "development",
         },
       },

@@ -11,6 +11,9 @@ __pycache__/
 coverage.xml
 htmlcov/
 coverage/
+node_modules/
+test-results/
+playwright-report/
 .idea/
 .vscode/
 *.iml

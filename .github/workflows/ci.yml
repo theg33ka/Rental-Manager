@@ -33,8 +33,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RENTAL_MANAGER_DATABASE_URL: sqlite:///data/e2e.db
-      PANEL_OWNER_PIN: "735194"
-      E2E_OWNER_PIN: "735194"
       RENTAL_MANAGER_ENV: development
       CI: "true"
     steps:
