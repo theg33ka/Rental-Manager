@@ -16,9 +16,9 @@ from rental_manager.main import (
     ai_budget_exceeded,
     ai_estimated_cost_rub,
     app_base_url,
-    call_hermes_ai,
+    call_deepseek_ai,
     handle_telegram_message,
-    hermes_client_for_settings,
+    deepseek_client_for_settings,
     increment_ai_usage_row,
     process_telegram_update_background,
     resolve_ai_model,
@@ -38,7 +38,7 @@ from rental_manager.services.ai_policy import (
     clean_ai_response,
     tenant_question_needs_owner,
 )
-from rental_manager.services.hermes_client import HermesClient, HermesClientError, HermesResult, YandexOpenAIClient
+from rental_manager.services.deepseek_client import DeepSeekClient, DeepSeekClientError, DeepSeekResult
 from rental_manager.services.telegram_bot import TelegramApiError, normalize_bot_token, telegram_api_request
 
 
@@ -116,13 +116,13 @@ class AiBudgetTests(AiAgentDatabaseTestCase):
     def test_budget_cap_blocks_ai_calls(self) -> None:
         with self.Session() as session:
             session.add(AppSetting(key="ai_monthly_budget_rub", value="1000"))
-            session.add(AiUsageDaily(usage_date=date.today(), provider="hermes", model="yandexgpt-lite", cost_rub=1000, calls=1))
+            session.add(AiUsageDaily(usage_date=date.today(), provider="deepseek", model="deepseek-v4-flash", cost_rub=1000, calls=1))
             session.flush()
 
             self.assertTrue(ai_budget_exceeded(session))
 
     def test_add_ai_usage_treats_null_counters_as_zero(self) -> None:
-        usage = AiUsageDaily(usage_date=date.today(), provider="hermes", model="yandexgpt-lite")
+        usage = AiUsageDaily(usage_date=date.today(), provider="deepseek", model="deepseek-v4-flash")
         usage.prompt_tokens = None
         usage.completion_tokens = None
         usage.total_tokens = None
@@ -131,7 +131,7 @@ class AiBudgetTests(AiAgentDatabaseTestCase):
 
         increment_ai_usage_row(
             usage,
-            HermesResult(content="ok", model="yandexgpt-lite", prompt_tokens=10, completion_tokens=5),
+            DeepSeekResult(content="ok", model="deepseek-v4-flash", prompt_tokens=10, completion_tokens=5),
             0.12,
         )
 
@@ -143,26 +143,31 @@ class AiBudgetTests(AiAgentDatabaseTestCase):
 
 
 class AiModelTests(unittest.TestCase):
-    def test_yandex_model_alias_includes_folder_id(self) -> None:
-        with patch.dict("os.environ", {"YANDEX_FOLDER_ID": "folder-123"}, clear=False):
-            self.assertEqual(resolve_ai_model("yandexgpt-lite"), "gpt://folder-123/yandexgpt-lite/latest")
+    def test_deepseek_model_is_validated(self) -> None:
+        self.assertEqual(resolve_ai_model("deepseek-v4-pro"), "deepseek-v4-pro")
+        self.assertEqual(resolve_ai_model("unsupported-model"), "deepseek-v4-flash")
 
-    def test_yandex_cost_uses_rub_pricing(self) -> None:
-        self.assertEqual(ai_estimated_cost_rub("gpt://folder-123/yandexgpt-lite/latest", 1000, 1000), 0.41)
+    def test_deepseek_cost_uses_model_pricing(self) -> None:
+        flash_cost = ai_estimated_cost_rub("deepseek-v4-flash", 1000, 1000)
+        pro_cost = ai_estimated_cost_rub("deepseek-v4-pro", 1000, 1000)
+
+        self.assertGreater(flash_cost, 0)
+        self.assertGreater(pro_cost, flash_cost)
 
 
-class HermesFallbackTests(AiAgentDatabaseTestCase):
-    def test_hermes_error_returns_fallback_text(self) -> None:
+class DeepSeekFallbackTests(AiAgentDatabaseTestCase):
+    def test_deepseek_error_returns_fallback_text(self) -> None:
         with self.Session() as session:
             leases = self.create_two_leases(session)
             session.add(AppSetting(key="ai_enabled", value="1"))
-            session.add(AppSetting(key="hermes_model_default", value="yandexgpt-lite"))
+            session.add(AppSetting(key="deepseek_model", value="deepseek-v4-flash"))
+            session.add(AppSetting(key="deepseek_api_key", value="test-key"))
             session.flush()
 
-            with patch.dict("os.environ", {"YANDEX_API_KEY": "", "AI_DIRECT_YANDEX": "0"}, clear=False), patch.object(
-                HermesClient, "chat_completions", side_effect=HermesClientError("down")
+            with patch.dict("os.environ", {}, clear=True), patch.object(
+                DeepSeekClient, "chat_completions", side_effect=DeepSeekClientError("down")
             ):
-                answer = call_hermes_ai(
+                answer = call_deepseek_ai(
                     session,
                     chat_id=100,
                     actor_role="tenant",
@@ -170,29 +175,27 @@ class HermesFallbackTests(AiAgentDatabaseTestCase):
                     system_prompt=TENANT_SYSTEM_PROMPT,
                     context="context",
                     user_text="Когда платить?",
-                    model="yandexgpt-lite",
+                    model="deepseek-v4-flash",
                 )
 
         self.assertEqual(answer, AI_UNAVAILABLE_TEXT)
 
-    def test_yandex_env_uses_direct_client(self) -> None:
+    def test_deepseek_settings_use_direct_client(self) -> None:
         with self.Session() as session:
-            with patch.dict(
-                "os.environ",
-                {
-                    "YANDEX_API_KEY": "test-yandex-key",
-                    "YANDEX_FOLDER_ID": "folder-123",
-                    "AI_DIRECT_YANDEX": "1",
-                },
-                clear=False,
-            ):
-                client = hermes_client_for_settings(session)
+            session.add(AppSetting(key="deepseek_model", value="deepseek-v4-pro"))
+            session.add(AppSetting(key="deepseek_api_key", value="settings-key"))
+            session.flush()
+            with patch.dict("os.environ", {}, clear=True):
+                client = deepseek_client_for_settings(session)
 
-        self.assertIsInstance(client, YandexOpenAIClient)
+        self.assertIsInstance(client, DeepSeekClient)
+        self.assertEqual(client.base_url, "https://api.deepseek.com")
+        self.assertEqual(client.api_key, "settings-key")
+        self.assertEqual(client.provider_name, "deepseek")
 
 
-class YandexOpenAIClientTests(unittest.TestCase):
-    def test_chat_completions_sends_yandex_headers(self) -> None:
+class DeepSeekClientTests(unittest.TestCase):
+    def test_chat_completions_sends_deepseek_bearer_token(self) -> None:
         class Response:
             def __enter__(self):
                 return self
@@ -201,54 +204,23 @@ class YandexOpenAIClientTests(unittest.TestCase):
                 return False
 
             def read(self):
-                return b'{"model":"gpt://folder-123/yandexgpt-lite/latest","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":2}}'
+                return b'{"model":"deepseek-v4-flash","choices":[{"message":{"content":"ok"}}]}'
 
-        with patch("rental_manager.services.hermes_client.urllib.request.urlopen", return_value=Response()) as mocked_urlopen:
-            result = YandexOpenAIClient(
-                "https://ai.api.cloud.yandex.net/v1",
-                "test-yandex-key",
-                "folder-123",
-            ).chat_completions(
-                model="gpt://folder-123/yandexgpt-lite/latest",
-                messages=[{"role": "user", "content": "test"}],
-            )
-
-        request = mocked_urlopen.call_args.args[0]
-        headers = {key.lower(): value for key, value in request.header_items()}
-        self.assertEqual(request.full_url, "https://ai.api.cloud.yandex.net/v1/chat/completions")
-        self.assertEqual(headers["authorization"], "Api-Key test-yandex-key")
-        self.assertEqual(headers["openai-project"], "folder-123")
-        self.assertEqual(result.content, "ok")
-        self.assertEqual(result.prompt_tokens, 1)
-        self.assertEqual(result.completion_tokens, 2)
-
-
-class HermesClientTests(unittest.TestCase):
-    def test_chat_completions_sends_stable_session_header(self) -> None:
-        class Response:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
-
-            def read(self):
-                return b'{"model":"hermes-agent","choices":[{"message":{"content":"ok"}}]}'
-
-        with patch("rental_manager.services.hermes_client.urllib.request.urlopen", return_value=Response()) as mocked_urlopen:
-            result = HermesClient(
-                "http://127.0.0.1:8642",
-                "test-hermes-key",
+        with patch("rental_manager.services.deepseek_client.urllib.request.urlopen", return_value=Response()) as mocked_urlopen:
+            result = DeepSeekClient(
+                "https://api.deepseek.com",
+                "test-deepseek-key",
                 timeout_seconds=60,
+                provider_name="deepseek",
             ).chat_completions(
-                model="hermes-agent",
+                model="deepseek-v4-flash",
                 messages=[{"role": "user", "content": "test"}],
-                session_id="rental-manager-owner-42",
             )
 
         request = mocked_urlopen.call_args.args[0]
         headers = {key.lower(): value for key, value in request.header_items()}
-        self.assertEqual(headers["x-hermes-session-id"], "rental-manager-owner-42")
+        self.assertEqual(request.full_url, "https://api.deepseek.com/chat/completions")
+        self.assertEqual(headers["authorization"], "Bearer test-deepseek-key")
         self.assertEqual(mocked_urlopen.call_args.kwargs["timeout"], 60)
         self.assertEqual(result.content, "ok")
 
@@ -261,21 +233,21 @@ class HermesClientTests(unittest.TestCase):
                 return False
 
             def read(self):
-                return b'{"model":"deepseek-ai/DeepSeek-V4-Pro","choices":[{"message":{"content":"ok"}}]}'
+                return b'{"model":"deepseek-v4-pro","choices":[{"message":{"content":"ok"}}]}'
 
-        with patch("rental_manager.services.hermes_client.urllib.request.urlopen", return_value=Response()) as mocked_urlopen:
-            result = HermesClient(
-                "https://inference.waw0.amvera.ru/v1",
-                "test-amvera-key",
-                provider_name="amvera_llm",
+        with patch("rental_manager.services.deepseek_client.urllib.request.urlopen", return_value=Response()) as mocked_urlopen:
+            result = DeepSeekClient(
+                "https://api.deepseek.com/v1",
+                "test-deepseek-key",
+                provider_name="deepseek",
             ).chat_completions(
-                model="deepseek-V4",
+                model="deepseek-v4-pro",
                 messages=[{"role": "user", "content": "test"}],
             )
 
         request = mocked_urlopen.call_args.args[0]
-        self.assertEqual(request.full_url, "https://inference.waw0.amvera.ru/v1/chat/completions")
-        self.assertEqual(result.provider, "amvera_llm")
+        self.assertEqual(request.full_url, "https://api.deepseek.com/v1/chat/completions")
+        self.assertEqual(result.provider, "deepseek")
         self.assertEqual(result.content, "ok")
 
 

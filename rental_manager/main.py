@@ -106,7 +106,7 @@ from rental_manager.services.ai_providers import (
     AiProvider,
     AiProviderConfigError,
     build_provider_runtime,
-    primary_provider,
+    normalize_deepseek_model,
     provider_chain,
 )
 from rental_manager.services.billing import (
@@ -126,8 +126,8 @@ from rental_manager.services.billing import (
     update_rent_charge_status,
     update_utility_line_status,
 )
-from rental_manager.services.hermes_client import HermesClient, HermesClientError, HermesResult
-from rental_manager.services.hermes_tools import build_owner_read_tools_context
+from rental_manager.services.deepseek_client import DeepSeekClient, DeepSeekClientError, DeepSeekResult
+from rental_manager.services.owner_ai_tools import build_owner_read_tools_context
 from rental_manager.services.owner_operations import (
     OWNER_OPERATION_SPECS,
     owner_operation_label,
@@ -344,9 +344,7 @@ DEFAULT_SETTINGS = {
     "ai_supervisor_enabled": True,
     "ai_supervisor_hour": "10",
     "ai_action_confirmation_ttl_hours": "48",
-    "hermes_api_base_url": "http://127.0.0.1:8642",
-    "hermes_model_default": "deepseek-V4",
-    "hermes_model_audit": "deepseek-V4",
+    "deepseek_model": "deepseek-v4-flash",
     "ai_monthly_budget_rub": "1000",
     "ip_recipient_name": "",
     "ip_recipient_inn": "",
@@ -419,7 +417,7 @@ DEFAULT_SETTINGS = {
 SECRET_SETTINGS = {
     "telegram_bot_token": "",
     "telegram_webhook_secret": "",
-    "hermes_api_key": "",
+    "deepseek_api_key": "",
 }
 PIN_INPUT_KEYS = {"panel_owner_pin_code", "panel_guest_pin_code"}
 ALL_SETTINGS = {**DEFAULT_SETTINGS, **SECRET_SETTINGS}
@@ -451,11 +449,9 @@ ENV_SETTING_KEYS = {
     "ai_supervisor_enabled": "AI_SUPERVISOR_ENABLED",
     "ai_supervisor_hour": "AI_SUPERVISOR_HOUR",
     "ai_action_confirmation_ttl_hours": "AI_ACTION_CONFIRMATION_TTL_HOURS",
-    "hermes_api_base_url": "HERMES_API_BASE_URL",
-    "hermes_model_default": "HERMES_MODEL_DEFAULT",
-    "hermes_model_audit": "HERMES_MODEL_AUDIT",
+    "deepseek_model": "DEEPSEEK_MODEL",
     "ai_monthly_budget_rub": "AI_MONTHLY_BUDGET_RUB",
-    "hermes_api_key": "HERMES_API_KEY",
+    "deepseek_api_key": "DEEPSEEK_API_KEY",
 }
 VALID_REMINDER_CADENCES = {"twice_daily", "daily_evening", "every_two_days", "never"}
 REMINDER_CADENCE_KEYS = {
@@ -498,18 +494,9 @@ DEFAULT_FALLBACK_KEYS = {
     "ip_recipient_bank_inn",
     "ip_recipient_bank_kpp",
 }
-AI_MODEL_PRICES_RUB_PER_1K = {
-    "yandexgpt-lite": (0.2033, 0.2033),
-    "yandexgpt": (0.61, 0.61),
-}
 AI_MODEL_PRICES_USD_PER_M = {
     "deepseek-v4-flash": (0.14, 0.28),
     "deepseek-v4-pro": (0.435, 0.87),
-}
-YANDEX_MODEL_ALIASES = {
-    "yandexgpt-lite": "yandexgpt-lite/latest",
-    "yandexgpt": "yandexgpt/latest",
-    "yandexgpt-pro": "yandexgpt/latest",
 }
 AI_DEFAULT_USD_RUB_RATE = 100.0
 
@@ -546,7 +533,7 @@ def startup() -> None:
         "BOOT",
         "app_marker="
         f"{APP_BUILD_MARKER} ai_providers={providers} "
-        f"yandex_key_configured={str(bool(os.environ.get('YANDEX_API_KEY', '').strip())).lower()}",
+        f"deepseek_env_key_configured={str(bool(os.environ.get('DEEPSEEK_API_KEY', '').strip())).lower()}",
     )
     init_db()
     with SessionLocal() as session:
@@ -741,7 +728,7 @@ def healthz() -> dict[str, str]:
     return {
         "status": "ok",
         "build_marker": APP_BUILD_MARKER,
-        "ai_direct_yandex": str(yandex_direct_ai_enabled()).lower(),
+        "ai_provider": "deepseek",
     }
 
 
@@ -924,15 +911,16 @@ def ensure_runtime_defaults(session: Session) -> None:
     if not session.get(AppSetting, "notification_cutoff_date"):
         session.add(AppSetting(key="notification_cutoff_date", value=date.today().isoformat()))
         changed = True
-    old_model_defaults = {
-        "hermes_model_default": {"yandexgpt-lite", "yandexgpt", "deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat"},
-        "hermes_model_audit": {"yandexgpt-lite", "yandexgpt", "deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat"},
-    }
-    for key, old_values in old_model_defaults.items():
-        env_name = ENV_SETTING_KEYS.get(key)
-        setting = session.get(AppSetting, key)
-        if setting and str(setting.value or "").strip().lower() in old_values and not (env_name and env_name in os.environ):
-            setting.value = "deepseek-V4"
+    deepseek_model = session.get(AppSetting, "deepseek_model")
+    legacy_model = session.get(AppSetting, "hermes_model_default")
+    if not deepseek_model and legacy_model:
+        model = "deepseek-v4-pro" if "pro" in str(legacy_model.value or "").lower() else "deepseek-v4-flash"
+        session.add(AppSetting(key="deepseek_model", value=model))
+        changed = True
+    for legacy_key in ("hermes_api_base_url", "hermes_model_default", "hermes_model_audit", "hermes_api_key"):
+        legacy_setting = session.get(AppSetting, legacy_key)
+        if legacy_setting:
+            session.delete(legacy_setting)
             changed = True
     old_owner_receipt_alert = "Новый чек от {tenant_name}. Квартира: {apartment}. Сумма: {amount}. Канал: {channel}. Статус: {receipt_status}. {receipt_summary}"
     owner_receipt_setting = session.get(AppSetting, "message_owner_receipt_alert")
@@ -977,7 +965,9 @@ def get_setting_value(session: Session, key: str) -> str:
         return ""
     env_name = ENV_SETTING_KEYS.get(key)
     if env_name and env_name in os.environ:
-        return str(os.environ.get(env_name) or "")
+        env_value = str(os.environ.get(env_name) or "")
+        if env_value or key not in SECRET_SETTINGS:
+            return env_value
     row = session.get(AppSetting, key)
     if row:
         value = row.value
@@ -1045,6 +1035,8 @@ def save_settings(session: Session, payload: dict[str, Any], preserve_panel_toke
             continue
         if key in SECRET_SETTINGS and value in {"", None}:
             continue
+        if key in PIN_INPUT_KEYS and value in {"", None}:
+            continue
         if key in PIN_INPUT_KEYS:
             role = "owner" if key == "panel_owner_pin_code" else "guest"
             target_key = PIN_SETTING_KEYS[role]
@@ -1065,6 +1057,11 @@ def save_settings(session: Session, payload: dict[str, Any], preserve_panel_toke
             setting.value = date.today().isoformat()
         elif key == "telegram_bot_token":
             setting.value = encrypt_secret(normalize_bot_token(str(value)))
+        elif key == "deepseek_model":
+            try:
+                setting.value = normalize_deepseek_model(str(value))
+            except AiProviderConfigError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
         elif key in SECRET_SETTINGS:
             setting.value = encrypt_secret(str(value))
         else:
@@ -6129,7 +6126,7 @@ def run_tenant_rent_dialogue(
             f"Просрочка: {overdue_days} дн. Текущий долг: {money_text(debt)}.",
         ]
     )
-    answer = call_hermes_ai(
+    answer = call_deepseek_ai(
         session,
         chat_id=lease_chat_id(session, lease) or f"lease:{lease.id}",
         actor_role="tenant_automation",
@@ -6137,7 +6134,7 @@ def run_tenant_rent_dialogue(
         system_prompt=TENANT_DEBT_FOLLOWUP_SYSTEM_PROMPT,
         context=context,
         user_text="Сформулируй следующее сообщение жильцу по текущей просрочке.",
-        model=resolve_ai_model(get_setting_value(session, "hermes_model_default")),
+        model=resolve_ai_model(get_setting_value(session, "deepseek_model")),
         max_tokens=350,
     )
     if answer in {AI_UNAVAILABLE_TEXT, AI_DISABLED_TEXT, AI_BUDGET_EXCEEDED_TEXT}:
@@ -6404,7 +6401,7 @@ def run_owner_supervisor_digest(
         system_prompt=configured_owner_agent_system_prompt() + "\n" + SUPERVISOR_SYSTEM_PROMPT,
         context=context,
         user_text="Проведи сегодняшнюю строгую ревизию. Предложи безопасные действия только там, где данных достаточно.",
-        model=resolve_ai_model(get_setting_value(session, "hermes_model_default")),
+        model=resolve_ai_model(get_setting_value(session, "deepseek_model")),
         max_tokens=1200,
     )
     store_agent_memories(
@@ -7225,55 +7222,25 @@ def ai_budget_exceeded(session: Session, today: date | None = None) -> bool:
     return bool(budget > 0 and ai_monthly_spent_rub(session, today) >= budget)
 
 
-def yandex_folder_id() -> str:
-    return (
-        os.environ.get("YANDEX_FOLDER_ID")
-        or os.environ.get("YANDEX_CLOUD_FOLDER")
-        or os.environ.get("OPENAI_PROJECT")
-        or ""
-    ).strip()
-
-
 def resolve_ai_model(model: str) -> str:
-    value = (model or "").strip() or str(DEFAULT_SETTINGS["hermes_model_default"])
-    normalized = value.lower()
-    if normalized.startswith("gpt://"):
-        return value
-    if normalized in YANDEX_MODEL_ALIASES:
-        folder_id = yandex_folder_id()
-        if folder_id:
-            return f"gpt://{folder_id}/{YANDEX_MODEL_ALIASES[normalized]}"
-    return value
+    value = (model or "").strip() or str(DEFAULT_SETTINGS["deepseek_model"])
+    try:
+        return normalize_deepseek_model(value)
+    except AiProviderConfigError:
+        return str(DEFAULT_SETTINGS["deepseek_model"])
 
 
 def ai_model_price_key(model: str) -> str:
     normalized = (model or "").strip().lower()
-    if "yandexgpt-lite" in normalized:
-        return "yandexgpt-lite"
-    if "yandexgpt" in normalized:
-        return "yandexgpt"
     if "deepseek-v4-flash" in normalized:
         return "deepseek-v4-flash"
-    if "deepseek-ai/deepseek-v4-pro" in normalized or "deepseek-v4-pro" in normalized or "deepseek-v4" in normalized or "deepseek_v4" in normalized:
+    if "deepseek-v4-pro" in normalized:
         return "deepseek-v4-pro"
-    if normalized in {"hermes", "hermes-agent"}:
-        upstream = (
-            os.environ.get("AMVERA_LLM_MODEL")
-            or os.environ.get("DEEPSEEK_MODEL")
-            or os.environ.get("OPENAI_COMPATIBLE_MODEL")
-            or ""
-        )
-        if upstream:
-            return ai_model_price_key(upstream)
-    return "deepseek-v4-pro"
+    return "deepseek-v4-flash"
 
 
 def ai_estimated_cost_rub(model: str, prompt_tokens: int, completion_tokens: int) -> float:
     price_key = ai_model_price_key(model)
-    if price_key in AI_MODEL_PRICES_RUB_PER_1K:
-        input_rub, output_rub = AI_MODEL_PRICES_RUB_PER_1K[price_key]
-        return money((prompt_tokens / 1_000) * input_rub + (completion_tokens / 1_000) * output_rub)
-
     input_usd, output_usd = AI_MODEL_PRICES_USD_PER_M.get(
         price_key,
         AI_MODEL_PRICES_USD_PER_M["deepseek-v4-flash"],
@@ -7584,7 +7551,7 @@ def tenant_message_without_name(lease: Lease, text: str) -> str:
     return value
 
 
-def increment_ai_usage_row(usage: AiUsageDaily, result: HermesResult, cost_rub: float) -> None:
+def increment_ai_usage_row(usage: AiUsageDaily, result: DeepSeekResult, cost_rub: float) -> None:
     prompt_tokens = int(result.prompt_tokens or 0)
     completion_tokens = int(result.completion_tokens or 0)
     usage.prompt_tokens = int(usage.prompt_tokens or 0) + prompt_tokens
@@ -7594,9 +7561,9 @@ def increment_ai_usage_row(usage: AiUsageDaily, result: HermesResult, cost_rub: 
     usage.calls = int(usage.calls or 0) + 1
 
 
-def add_ai_usage(session: Session, result: HermesResult, cost_rub: float, today: date | None = None) -> None:
+def add_ai_usage(session: Session, result: DeepSeekResult, cost_rub: float, today: date | None = None) -> None:
     usage_date = today or date.today()
-    provider = (result.provider or "hermes").strip()
+    provider = (result.provider or "deepseek").strip()
     usage = session.scalar(
         select(AiUsageDaily).where(
             AiUsageDaily.usage_date == usage_date,
@@ -7610,20 +7577,11 @@ def add_ai_usage(session: Session, result: HermesResult, cost_rub: float, today:
     increment_ai_usage_row(usage, result, cost_rub)
 
 
-def yandex_direct_ai_enabled() -> bool:
-    try:
-        return primary_provider() == AiProvider.YANDEX
-    except AiProviderConfigError:
-        return False
-
-
-def hermes_client_for_settings(session: Session) -> HermesClient:
-    provider = primary_provider()
+def deepseek_client_for_settings(session: Session) -> DeepSeekClient:
     return build_provider_runtime(
-        provider,
-        requested_model=get_setting_value(session, "hermes_model_default"),
-        hermes_base_url=get_setting_value(session, "hermes_api_base_url"),
-        hermes_api_key=get_setting_value(session, "hermes_api_key"),
+        AiProvider.DEEPSEEK,
+        requested_model=get_setting_value(session, "deepseek_model"),
+        deepseek_api_key=get_setting_value(session, "deepseek_api_key"),
     ).client
 
 
@@ -7637,7 +7595,7 @@ def invoke_ai_completion(
     model: str,
     max_tokens: int,
     temperature: float = 0.2,
-) -> HermesResult | None:
+) -> DeepSeekResult | None:
     result = None
     try:
         configured_providers = provider_chain()
@@ -7661,8 +7619,7 @@ def invoke_ai_completion(
             runtime = build_provider_runtime(
                 provider,
                 requested_model=model,
-                hermes_base_url=get_setting_value(session, "hermes_api_base_url"),
-                hermes_api_key=get_setting_value(session, "hermes_api_key"),
+                deepseek_api_key=get_setting_value(session, "deepseek_api_key"),
             )
             runtime_model = runtime.model
             runtime_log(
@@ -7691,7 +7648,7 @@ def invoke_ai_completion(
                 detail={"provider": provider.value, "role": actor_role, "model": runtime.model},
             )
             break
-        except (AiProviderConfigError, HermesClientError) as exc:
+        except (AiProviderConfigError, DeepSeekClientError) as exc:
             duration_ms = int((time_module.perf_counter() - provider_started) * 1000)
             runtime_log(
                 "AI",
@@ -7725,7 +7682,7 @@ def invoke_ai_completion(
 
     prompt_tokens = result.prompt_tokens or estimate_tokens("\n".join(item["content"] for item in messages))
     completion_tokens = result.completion_tokens or estimate_tokens(result.content)
-    normalized = HermesResult(
+    normalized = DeepSeekResult(
         content=result.content,
         model=result.model,
         prompt_tokens=prompt_tokens,
@@ -7739,7 +7696,7 @@ def invoke_ai_completion(
 
 
 def configured_owner_agent_system_prompt() -> str:
-    configured_path = os.environ.get("HERMES_SYSTEM_PROMPT_PATH", "").strip()
+    configured_path = os.environ.get("AI_SYSTEM_PROMPT_PATH", "").strip()
     if not configured_path:
         return OWNER_AGENT_SYSTEM_PROMPT
     prompt_path = Path(configured_path)
@@ -7756,7 +7713,7 @@ def configured_owner_agent_system_prompt() -> str:
     return prompt[:20_000]
 
 
-def call_hermes_ai(
+def call_deepseek_ai(
     session: Session,
     *,
     chat_id: int | str,
@@ -8530,7 +8487,7 @@ def handle_tenant_ai_message(session: Session, chat_id: int | str, lease: Lease,
         system_prompt=TENANT_AGENT_SYSTEM_PROMPT,
         context=context,
         user_text=text,
-        model=resolve_ai_model(get_setting_value(session, "hermes_model_default")),
+        model=resolve_ai_model(get_setting_value(session, "deepseek_model")),
         max_tokens=850,
     )
     store_agent_memories(
@@ -8608,7 +8565,7 @@ def handle_owner_ai_message(session: Session, chat_id: int | str, text: str, *, 
         send_telegram_text(session, chat_id, answer)
         return True
 
-    model_key = "hermes_model_audit" if audit_deep else "hermes_model_default"
+    model_key = "deepseek_model"
     action_policy = (
         "Владелец разрешил подготовить предложения действий: actions допустимы."
         if allows_actions

@@ -9,13 +9,12 @@ RUN addgroup --system rental && adduser --system --ingroup rental rental
 
 COPY requirements.txt constraints.txt /app/
 RUN pip install --no-cache-dir -r /app/requirements.txt -c /app/constraints.txt
-RUN python -c "import importlib.metadata as md; import aiohttp, cron.scheduler_provider; print('hermes-agent', md.version('hermes-agent'), 'runtime deps ok')"
 
 COPY alembic.ini /app/alembic.ini
 COPY migrations /app/migrations
 COPY rental_manager /app/rental_manager
 COPY static /app/static
-COPY scripts/start-container.sh scripts/run-hermes-gateway.py /app/scripts/
+COPY scripts/start-container.sh /app/scripts/
 
 RUN mkdir -p /app/data && chown -R rental:rental /app
 

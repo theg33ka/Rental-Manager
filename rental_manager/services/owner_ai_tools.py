@@ -407,7 +407,7 @@ def build_owner_read_tools_context(
             "Execution is possible exclusively through the Telegram confirmation button."
         ),
     }
-    return "Hermes internal read/propose tool snapshot:\n" + json.dumps(
+    return "Rental Manager AI internal read/propose tool snapshot:\n" + json.dumps(
         snapshot,
         ensure_ascii=False,
         default=str,

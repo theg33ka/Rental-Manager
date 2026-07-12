@@ -717,14 +717,18 @@
             <label>Секрет Telegram webhook<input type="password" name="telegram_webhook_secret" id="telegramWebhookSecretInput" placeholder="Оставьте пустым, чтобы не менять" /></label>
           </fieldset>
           <fieldset class="settings-pane form-grid compact" data-settings-panel="ai" hidden>
-            <legend>AI-интеграция</legend>
+            <legend>DeepSeek API</legend>
             <label class="check wide"><input type="checkbox" name="ai_enabled" id="aiEnabledInput" /> Включить AI-функции</label>
             <label class="check wide"><input type="checkbox" name="ai_tenant_free_text_enabled" id="aiTenantFreeTextEnabledInput" /> Ответы на свободный текст арендаторов</label>
-            <label>URL Hermes API<input name="hermes_api_base_url" id="hermesApiBaseUrlInput" placeholder="http://127.0.0.1:8642" /></label>
-            <label>Ключ Hermes API<input type="password" name="hermes_api_key" id="hermesApiKeyInput" placeholder="Оставьте пустым, чтобы не менять" /></label>
-            <label>Основная модель<input name="hermes_model_default" id="hermesModelDefaultInput" placeholder="deepseek-V4" /></label>
-            <label>Модель аудита<input name="hermes_model_audit" id="hermesModelAuditInput" placeholder="deepseek-V4" /></label>
+            <label class="wide">API-ключ DeepSeek<input type="password" name="deepseek_api_key" id="deepseekApiKeyInput" autocomplete="new-password" placeholder="Оставьте пустым, чтобы не менять" /></label>
+            <label>Модель
+              <select name="deepseek_model" id="deepseekModelSelect">
+                <option value="deepseek-v4-flash">DeepSeek V4 Flash — быстрее и дешевле</option>
+                <option value="deepseek-v4-pro">DeepSeek V4 Pro — точнее для сложных задач</option>
+              </select>
+            </label>
             <label>Месячный бюджет, ₽<input type="number" min="0" step="1" name="ai_monthly_budget_rub" id="aiMonthlyBudgetRubInput" placeholder="1000" /></label>
+            <p class="muted wide">Запросы идут напрямую в DeepSeek API. Ключ хранится в зашифрованном виде и не возвращается в интерфейс.</p>
           </fieldset>
           <fieldset class="settings-pane form-grid compact" data-settings-panel="security" hidden>
             <legend>Безопасность</legend>

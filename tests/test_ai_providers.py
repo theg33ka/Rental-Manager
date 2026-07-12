@@ -3,122 +3,95 @@ from __future__ import annotations
 import unittest
 
 from rental_manager.services.ai_providers import (
+    DEEPSEEK_BASE_URL,
     AiProvider,
     AiProviderConfigError,
     build_provider_runtime,
     provider_chain,
 )
-from rental_manager.services.hermes_client import HermesClient, YandexOpenAIClient
+from rental_manager.services.deepseek_client import DeepSeekClient
 
 
 class AiProviderConfigTests(unittest.TestCase):
-    def test_explicit_provider_and_fallback_are_ordered(self) -> None:
+    def test_provider_chain_only_contains_deepseek(self) -> None:
         chain = provider_chain(
             {
                 "AI_PROVIDER": "hermes",
-                "AI_FALLBACK_PROVIDER": "yandex",
+                "AMVERA_LLM_API_KEY": "legacy-key",
+                "YANDEX_API_KEY": "legacy-key",
             }
         )
 
-        self.assertEqual(chain, [AiProvider.HERMES, AiProvider.YANDEX])
+        self.assertEqual(chain, [AiProvider.DEEPSEEK])
 
-    def test_legacy_yandex_selection_remains_compatible(self) -> None:
-        chain = provider_chain(
-            {
-                "YANDEX_API_KEY": "key",
-                "AI_DIRECT_YANDEX": "1",
-            }
+    def test_runtime_uses_saved_key_and_selected_model(self) -> None:
+        runtime = build_provider_runtime(
+            AiProvider.DEEPSEEK,
+            requested_model="deepseek-v4-flash",
+            deepseek_api_key="settings-key",
+            environ={},
         )
 
-        self.assertEqual(chain, [AiProvider.YANDEX])
+        self.assertIsInstance(runtime.client, DeepSeekClient)
+        self.assertEqual(runtime.provider, AiProvider.DEEPSEEK)
+        self.assertEqual(runtime.model, "deepseek-v4-flash")
+        self.assertEqual(runtime.client.base_url, DEEPSEEK_BASE_URL)
+        self.assertEqual(runtime.client.api_key, "settings-key")
+        self.assertEqual(runtime.client.provider_name, "deepseek")
 
-    def test_amvera_llm_config_prefers_hermes_with_yandex_fallback(self) -> None:
-        chain = provider_chain(
-            {
-                "AMVERA_LLM_API_KEY": "amvera-key",
-                "YANDEX_API_KEY": "yandex-key",
-                "AI_FALLBACK_PROVIDER": "yandex",
-            }
+    def test_environment_overrides_saved_key_and_model(self) -> None:
+        runtime = build_provider_runtime(
+            AiProvider.DEEPSEEK,
+            requested_model="deepseek-v4-flash",
+            deepseek_api_key="settings-key",
+            environ={
+                "DEEPSEEK_API_KEY": "environment-key",
+                "DEEPSEEK_MODEL": "deepseek-v4-pro",
+            },
         )
 
-        self.assertEqual(chain, [AiProvider.HERMES, AiProvider.YANDEX])
+        self.assertEqual(runtime.model, "deepseek-v4-pro")
+        self.assertEqual(runtime.client.api_key, "environment-key")
 
-    def test_unknown_provider_is_rejected(self) -> None:
+    def test_missing_api_key_is_rejected(self) -> None:
         with self.assertRaises(AiProviderConfigError):
-            provider_chain({"AI_PROVIDER": "mystery"})
+            build_provider_runtime(
+                AiProvider.DEEPSEEK,
+                requested_model="deepseek-v4-flash",
+                environ={},
+            )
 
-    def test_yandex_runtime_uses_new_env_aliases(self) -> None:
-        runtime = build_provider_runtime(
-            AiProvider.YANDEX,
-            requested_model="ignored",
-            hermes_base_url="",
-            hermes_api_key="",
-            environ={
-                "YANDEX_AI_API_KEY": "key",
-                "YANDEX_AI_FOLDER_ID": "folder",
-                "YANDEX_AI_MODEL": "yandexgpt-lite",
-            },
-        )
+    def test_unknown_model_is_rejected(self) -> None:
+        with self.assertRaises(AiProviderConfigError):
+            build_provider_runtime(
+                AiProvider.DEEPSEEK,
+                requested_model="deepseek-chat",
+                deepseek_api_key="key",
+                environ={},
+            )
 
-        self.assertIsInstance(runtime.client, YandexOpenAIClient)
-        self.assertEqual(runtime.model, "gpt://folder/yandexgpt-lite/latest")
-
-    def test_amvera_llm_runtime_defaults_to_deepseek_v4(self) -> None:
-        runtime = build_provider_runtime(
-            AiProvider.AMVERA_LLM,
-            requested_model="",
-            hermes_base_url="",
-            hermes_api_key="",
-            environ={
-                "AMVERA_LLM_API_KEY": "key",
-            },
-        )
-
-        self.assertIsInstance(runtime.client, HermesClient)
-        self.assertEqual(runtime.model, "deepseek-V4")
-        self.assertEqual(runtime.client.base_url, "https://inference.waw0.amvera.ru")
-
-    def test_amvera_llm_model_alias_is_normalized(self) -> None:
-        runtime = build_provider_runtime(
-            AiProvider.AMVERA_LLM,
-            requested_model="ignored",
-            hermes_base_url="",
-            hermes_api_key="",
-            environ={
-                "AMVERA_LLM_API_KEY": "key",
-                "AMVERA_LLM_MODEL": "deepseek-v4",
-            },
-        )
-
-        self.assertEqual(runtime.model, "deepseek-V4")
-
-    def test_hermes_runtime_uses_longer_configurable_timeout(self) -> None:
+    def test_timeout_is_configurable(self) -> None:
         default_runtime = build_provider_runtime(
-            AiProvider.HERMES,
-            requested_model="hermes-agent",
-            hermes_base_url="http://127.0.0.1:8642",
-            hermes_api_key="key",
+            AiProvider.DEEPSEEK,
+            requested_model="deepseek-v4-flash",
+            deepseek_api_key="key",
             environ={},
         )
         overridden_runtime = build_provider_runtime(
-            AiProvider.HERMES,
-            requested_model="hermes-agent",
-            hermes_base_url="http://127.0.0.1:8642",
-            hermes_api_key="key",
-            environ={"HERMES_REQUEST_TIMEOUT_SECONDS": "90"},
+            AiProvider.DEEPSEEK,
+            requested_model="deepseek-v4-flash",
+            deepseek_api_key="key",
+            environ={"DEEPSEEK_REQUEST_TIMEOUT_SECONDS": "90"},
         )
 
-        self.assertIsInstance(default_runtime.client, HermesClient)
-        self.assertEqual(default_runtime.model, "hermes-agent")
         self.assertEqual(default_runtime.client.timeout_seconds, 60)
         self.assertEqual(overridden_runtime.client.timeout_seconds, 90)
 
-    def test_invalid_hermes_timeout_is_rejected(self) -> None:
+    def test_invalid_timeout_is_rejected(self) -> None:
         with self.assertRaises(AiProviderConfigError):
             build_provider_runtime(
-                AiProvider.HERMES,
-                requested_model="hermes-agent",
-                hermes_base_url="http://127.0.0.1:8642",
-                hermes_api_key="key",
-                environ={"HERMES_REQUEST_TIMEOUT_SECONDS": "долго"},
+                AiProvider.DEEPSEEK,
+                requested_model="deepseek-v4-flash",
+                deepseek_api_key="key",
+                environ={"DEEPSEEK_REQUEST_TIMEOUT_SECONDS": "long"},
             )

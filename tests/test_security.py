@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from cryptography.fernet import Fernet
 from fastapi import HTTPException, Response
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -106,6 +107,57 @@ class SecurityTestCase(unittest.TestCase):
             self.assertEqual(safe_keys, {"color_palette"})
             self.assertIn("telegram_bot_token", protected_keys)
             self.assertIn(PIN_SETTING_KEYS["owner"], protected_keys)
+
+    def test_deepseek_settings_encrypt_api_key_and_hide_its_value(self) -> None:
+        encryption_key = Fernet.generate_key().decode("ascii")
+        with self.Session() as session, patch.dict(
+            os.environ,
+            {"RENTAL_MANAGER_SETTINGS_ENCRYPTION_KEY": encryption_key},
+            clear=False,
+        ):
+            settings = main.save_settings(
+                session,
+                {
+                    "deepseek_api_key": "sk-test-secret",
+                    "deepseek_model": "deepseek-v4-pro",
+                },
+            )
+            stored = session.get(AppSetting, "deepseek_api_key")
+
+        self.assertTrue(settings["deepseek_api_key_configured"])
+        self.assertNotIn("deepseek_api_key", settings)
+        self.assertEqual(settings["deepseek_model"], "deepseek-v4-pro")
+        self.assertIsNotNone(stored)
+        self.assertTrue(stored.value.startswith("enc:v1:"))
+        self.assertNotIn("sk-test-secret", stored.value)
+
+    def test_empty_environment_key_does_not_hide_saved_deepseek_key(self) -> None:
+        with self.Session() as session, patch.dict(os.environ, {"DEEPSEEK_API_KEY": ""}, clear=False):
+            session.add(AppSetting(key="deepseek_api_key", value="settings-key"))
+            session.commit()
+
+            self.assertEqual(main.get_setting_value(session, "deepseek_api_key"), "settings-key")
+
+    def test_deepseek_settings_reject_unknown_model(self) -> None:
+        with self.Session() as session, self.assertRaises(HTTPException) as raised:
+            main.save_settings(session, {"deepseek_model": "deepseek-chat"})
+
+        self.assertEqual(raised.exception.status_code, 400)
+
+    def test_empty_pin_fields_do_not_block_deepseek_model_save(self) -> None:
+        with self.Session() as session:
+            settings = main.save_settings(
+                session,
+                {
+                    "deepseek_model": "deepseek-v4-pro",
+                    "panel_owner_pin_code": "",
+                    "panel_guest_pin_code": "",
+                },
+            )
+
+        self.assertEqual(settings["deepseek_model"], "deepseek-v4-pro")
+        self.assertFalse(settings["panel_owner_pin_code_configured"])
+        self.assertFalse(settings["panel_guest_pin_code_configured"])
 
     def test_telegram_update_id_is_unique(self) -> None:
         with self.Session() as session:

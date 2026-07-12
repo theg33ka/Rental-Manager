@@ -314,7 +314,7 @@ class AiUsageDaily(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     usage_date: Mapped[date] = mapped_column(Date)
-    provider: Mapped[str] = mapped_column(String(40), default="hermes")
+    provider: Mapped[str] = mapped_column(String(40), default="deepseek")
     model: Mapped[str] = mapped_column(String(120), default="")
     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
