@@ -32,6 +32,7 @@ from rental_manager.main import (
 )
 from rental_manager.models import AppSetting, Expense, PanelSession
 from rental_manager.security.pins import PIN_SETTING_KEYS, hash_pin, is_pin_hash, verify_pin
+from rental_manager.security.secrets import ENCRYPTION_ENV, ENCRYPTION_KEY_FILE_ENV, decrypt_secret
 from rental_manager.security.sessions import (
     csrf_is_valid,
     find_session,
@@ -130,6 +131,40 @@ class SecurityTestCase(unittest.TestCase):
         self.assertIsNotNone(stored)
         self.assertTrue(stored.value.startswith("enc:v1:"))
         self.assertNotIn("sk-test-secret", stored.value)
+
+    def test_deepseek_api_key_uses_persistent_file_when_environment_key_is_missing(self) -> None:
+        key_path = Path(self.tmp.name) / "settings.key"
+        with self.Session() as session, patch.dict(
+            os.environ,
+            {
+                ENCRYPTION_ENV: "",
+                ENCRYPTION_KEY_FILE_ENV: str(key_path),
+            },
+            clear=False,
+        ):
+            settings = main.save_settings(session, {"deepseek_api_key": "sk-file-secret"})
+            stored = session.get(AppSetting, "deepseek_api_key")
+            decrypted = decrypt_secret(stored.value)
+
+        self.assertTrue(settings["deepseek_api_key_configured"])
+        self.assertTrue(key_path.is_file())
+        self.assertEqual(decrypted, "sk-file-secret")
+        self.assertNotIn(b"sk-file-secret", key_path.read_bytes())
+
+    def test_unavailable_key_storage_returns_service_error_instead_of_internal_error(self) -> None:
+        blocked_parent = Path(self.tmp.name) / "blocked"
+        blocked_parent.write_text("not a directory", encoding="utf-8")
+        with self.Session() as session, patch.dict(
+            os.environ,
+            {
+                ENCRYPTION_ENV: "",
+                ENCRYPTION_KEY_FILE_ENV: str(blocked_parent / "settings.key"),
+            },
+            clear=False,
+        ), self.assertRaises(HTTPException) as raised:
+            main.save_settings(session, {"deepseek_api_key": "sk-test-secret"})
+
+        self.assertEqual(raised.exception.status_code, 503)
 
     def test_empty_environment_key_does_not_hide_saved_deepseek_key(self) -> None:
         with self.Session() as session, patch.dict(os.environ, {"DEEPSEEK_API_KEY": ""}, clear=False):

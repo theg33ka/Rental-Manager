@@ -1056,14 +1056,20 @@ def save_settings(session: Session, payload: dict[str, Any], preserve_panel_toke
         elif key == "notification_cutoff_date" and not value:
             setting.value = date.today().isoformat()
         elif key == "telegram_bot_token":
-            setting.value = encrypt_secret(normalize_bot_token(str(value)))
+            try:
+                setting.value = encrypt_secret(normalize_bot_token(str(value)))
+            except RuntimeError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
         elif key == "deepseek_model":
             try:
                 setting.value = normalize_deepseek_model(str(value))
             except AiProviderConfigError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
         elif key in SECRET_SETTINGS:
-            setting.value = encrypt_secret(str(value))
+            try:
+                setting.value = encrypt_secret(str(value))
+            except RuntimeError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
         else:
             setting.value = str(value)
     if pin_changed:
