@@ -194,6 +194,72 @@ class SecurityTestCase(unittest.TestCase):
         self.assertFalse(settings["panel_owner_pin_code_configured"])
         self.assertFalse(settings["panel_guest_pin_code_configured"])
 
+    def test_ai_operational_settings_are_saved_and_normalized(self) -> None:
+        with self.Session() as session:
+            settings = main.save_settings(
+                session,
+                {
+                    "ai_supervisor_enabled": False,
+                    "ai_supervisor_cadence": "weekly",
+                    "ai_supervisor_weekday": "4",
+                    "ai_supervisor_time": "09:30",
+                    "ai_supervisor_model": "deepseek-v4-pro",
+                    "ai_supervisor_max_tokens": "900",
+                    "ai_daily_call_limit": "25",
+                    "ai_max_output_tokens": "1400",
+                    "ai_usd_rub_rate": "92,5",
+                    "ai_action_confirmation_ttl_hours": "24",
+                    "ai_owner_instructions": "Сначала покажи финансовый итог.",
+                    "ai_tenant_instructions": "Не используй эмодзи.",
+                    "ai_audit_instructions": "Проверяй просрочки старше трёх дней.",
+                },
+            )
+
+        self.assertFalse(settings["ai_supervisor_enabled"])
+        self.assertEqual(settings["ai_supervisor_cadence"], "weekly")
+        self.assertEqual(settings["ai_supervisor_weekday"], "4")
+        self.assertEqual(settings["ai_supervisor_time"], "09:30")
+        self.assertEqual(settings["ai_supervisor_model"], "deepseek-v4-pro")
+        self.assertEqual(settings["ai_supervisor_max_tokens"], "900")
+        self.assertEqual(settings["ai_daily_call_limit"], "25")
+        self.assertEqual(settings["ai_max_output_tokens"], "1400")
+        self.assertEqual(settings["ai_usd_rub_rate"], "92.5")
+        self.assertEqual(settings["ai_action_confirmation_ttl_hours"], "24")
+        self.assertIn("финансовый итог", settings["ai_owner_instructions"])
+
+    def test_ai_operational_settings_reject_invalid_values(self) -> None:
+        invalid_settings = {
+            "ai_supervisor_cadence": "hourly",
+            "ai_supervisor_weekday": "7",
+            "ai_supervisor_time": "25:70",
+            "ai_supervisor_max_tokens": "99",
+            "ai_daily_call_limit": "-1",
+            "ai_max_output_tokens": "9000",
+            "ai_usd_rub_rate": "0",
+            "ai_action_confirmation_ttl_hours": "169",
+            "ai_owner_instructions": "x" * 6001,
+        }
+        for key, value in invalid_settings.items():
+            with self.subTest(key=key), self.Session() as session, self.assertRaises(HTTPException) as raised:
+                main.save_settings(session, {key: value})
+            self.assertEqual(raised.exception.status_code, 400)
+
+    def test_legacy_ai_schedule_is_migrated_and_dead_flag_is_removed(self) -> None:
+        with self.Session() as session, patch.dict(os.environ, {"AI_SUPERVISOR_HOUR": ""}, clear=False):
+            session.add_all(
+                [
+                    AppSetting(key="ai_supervisor_hour", value="7"),
+                    AppSetting(key="ai_dialog_reminders_enabled", value="1"),
+                ]
+            )
+            session.flush()
+
+            main.ensure_runtime_defaults(session)
+
+            self.assertEqual(session.get(AppSetting, "ai_supervisor_time").value, "07:00")
+            self.assertIsNone(session.get(AppSetting, "ai_supervisor_hour"))
+            self.assertIsNone(session.get(AppSetting, "ai_dialog_reminders_enabled"))
+
     def test_telegram_update_id_is_unique(self) -> None:
         with self.Session() as session:
             self.assertTrue(mark_telegram_update_seen(session, 1001))

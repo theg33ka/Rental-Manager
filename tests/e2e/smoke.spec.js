@@ -41,7 +41,7 @@ test("основной экран не содержит критичных ош�
 });
 
 
-test("AI settings save the DeepSeek key and selected model", async ({ page }) => {
+test("AI settings save models, limits, auto audit and prompt adaptations", async ({ page }) => {
   await page.locator('.sidebar .nav-group[data-group="administration"]').click();
   await page.locator('.section-tabs .tab[data-tab="settings"]').click();
   await page.locator('.settings-nav-btn[data-settings-target="ai"]').click();
@@ -53,10 +53,24 @@ test("AI settings save the DeepSeek key and selected model", async ({ page }) =>
   const targetModel = currentModel === "deepseek-v4-flash" ? "deepseek-v4-pro" : "deepseek-v4-flash";
 
   await modelSelect.selectOption(targetModel);
+  await page.locator("#aiSupervisorEnabledInput").check();
+  await page.locator("#aiSupervisorCadenceSelect").selectOption("weekly");
+  await page.locator("#aiSupervisorWeekdaySelect").selectOption("4");
+  await page.locator("#aiSupervisorTimeInput").fill("09:30");
+  await page.locator("#aiSupervisorModelSelect").selectOption("deepseek-v4-pro");
+  await page.locator("#aiSupervisorMaxTokensInput").fill("900");
+  await page.locator("#aiDailyCallLimitInput").fill("25");
+  await page.locator("#aiMaxOutputTokensInput").fill("1400");
+  await page.locator("#aiUsdRubRateInput").fill("92.5");
+  await page.locator("#aiActionConfirmationTtlInput").fill("24");
+  await page.locator("#aiOwnerInstructionsInput").fill("Сначала покажи финансовый итог.");
+  await page.locator("#aiTenantInstructionsInput").fill("Не используй эмодзи.");
+  await page.locator("#aiAuditInstructionsInput").fill("Проверяй просрочки старше трёх дней.");
   await page.locator("#deepseekApiKeyInput").fill("sk-e2e-deepseek-key");
   await page.locator('#settingsForm button[type="submit"]').click();
   await expect(page.locator("#telegramStatusBox")).toContainText(targetModel);
   await expect(page.locator("#telegramStatusBox")).toContainText("DeepSeek key сохранён");
+  await expect(page.locator("#telegramStatusBox")).toContainText("автоаудит раз в неделю · 09:30");
   await expect(page.locator("#deepseekApiKeyInput")).toHaveValue("");
 
   await page.reload();
@@ -65,4 +79,13 @@ test("AI settings save the DeepSeek key and selected model", async ({ page }) =>
   await page.locator('.section-tabs .tab[data-tab="settings"]').click();
   await page.locator('.settings-nav-btn[data-settings-target="ai"]').click();
   await expect(page.locator("#deepseekModelSelect")).toHaveValue(targetModel);
+  await expect(page.locator("#aiSupervisorEnabledInput")).toBeChecked();
+  await expect(page.locator("#aiSupervisorCadenceSelect")).toHaveValue("weekly");
+  await expect(page.locator("#aiSupervisorWeekdaySelect")).toHaveValue("4");
+  await expect(page.locator("#aiSupervisorTimeInput")).toHaveValue("09:30");
+  await expect(page.locator("#aiSupervisorModelSelect")).toHaveValue("deepseek-v4-pro");
+  await expect(page.locator("#aiDailyCallLimitInput")).toHaveValue("25");
+  await expect(page.locator("#aiOwnerInstructionsInput")).toHaveValue("Сначала покажи финансовый итог.");
+  await expect(page.locator("#aiTenantInstructionsInput")).toHaveValue("Не используй эмодзи.");
+  await expect(page.locator("#aiAuditInstructionsInput")).toHaveValue("Проверяй просрочки старше трёх дней.");
 });

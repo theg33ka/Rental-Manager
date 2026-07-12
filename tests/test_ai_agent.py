@@ -14,7 +14,9 @@ from sqlalchemy.orm import sessionmaker
 from rental_manager.database import Base
 from rental_manager.main import (
     ai_budget_exceeded,
+    ai_daily_call_limit_exceeded,
     ai_estimated_cost_rub,
+    api_test_ai_connection,
     app_base_url,
     call_deepseek_ai,
     handle_telegram_message,
@@ -141,6 +143,21 @@ class AiBudgetTests(AiAgentDatabaseTestCase):
         self.assertEqual(usage.cost_rub, 0.12)
         self.assertEqual(usage.calls, 1)
 
+    def test_daily_call_limit_blocks_additional_ai_calls(self) -> None:
+        with self.Session() as session:
+            session.add(AppSetting(key="ai_daily_call_limit", value="5"))
+            session.add(
+                AiUsageDaily(
+                    usage_date=date.today(),
+                    provider="deepseek",
+                    model="deepseek-v4-flash",
+                    calls=5,
+                )
+            )
+            session.flush()
+
+            self.assertTrue(ai_daily_call_limit_exceeded(session))
+
 
 class AiModelTests(unittest.TestCase):
     def test_deepseek_model_is_validated(self) -> None:
@@ -153,6 +170,12 @@ class AiModelTests(unittest.TestCase):
 
         self.assertGreater(flash_cost, 0)
         self.assertGreater(pro_cost, flash_cost)
+
+    def test_cost_estimate_uses_configured_exchange_rate(self) -> None:
+        default_cost = ai_estimated_cost_rub("deepseek-v4-flash", 1000, 1000)
+        lower_rate_cost = ai_estimated_cost_rub("deepseek-v4-flash", 1000, 1000, 50)
+
+        self.assertEqual(lower_rate_cost, default_cost / 2)
 
 
 class DeepSeekFallbackTests(AiAgentDatabaseTestCase):
@@ -192,6 +215,62 @@ class DeepSeekFallbackTests(AiAgentDatabaseTestCase):
         self.assertEqual(client.base_url, "https://api.deepseek.com")
         self.assertEqual(client.api_key, "settings-key")
         self.assertEqual(client.provider_name, "deepseek")
+
+    def test_global_output_limit_clamps_every_ai_request(self) -> None:
+        with self.Session() as session:
+            leases = self.create_two_leases(session)
+            session.add_all(
+                [
+                    AppSetting(key="ai_enabled", value="1"),
+                    AppSetting(key="deepseek_model", value="deepseek-v4-flash"),
+                    AppSetting(key="deepseek_api_key", value="settings-key"),
+                    AppSetting(key="ai_max_output_tokens", value="100"),
+                ]
+            )
+            session.flush()
+            with patch.dict("os.environ", {}, clear=True), patch.object(
+                DeepSeekClient,
+                "chat_completions",
+                return_value=DeepSeekResult(content="ok", model="deepseek-v4-flash", provider="deepseek"),
+            ) as mocked_completion:
+                call_deepseek_ai(
+                    session,
+                    chat_id=100,
+                    actor_role="tenant",
+                    lease=leases[0],
+                    system_prompt=TENANT_SYSTEM_PROMPT,
+                    context="context",
+                    user_text="Когда платить?",
+                    model="deepseek-v4-flash",
+                    max_tokens=850,
+                )
+
+        self.assertEqual(mocked_completion.call_args.kwargs["max_tokens"], 100)
+
+    def test_connection_check_uses_saved_key_and_records_usage(self) -> None:
+        with self.Session() as session:
+            session.add(AppSetting(key="deepseek_model", value="deepseek-v4-flash"))
+            session.add(AppSetting(key="deepseek_api_key", value="settings-key"))
+            session.flush()
+            result = DeepSeekResult(
+                content="OK",
+                model="deepseek-v4-flash",
+                prompt_tokens=5,
+                completion_tokens=1,
+                provider="deepseek",
+            )
+            with patch.dict("os.environ", {}, clear=True), patch.object(
+                DeepSeekClient,
+                "chat_completions",
+                return_value=result,
+            ):
+                response = api_test_ai_connection(session)
+            usage = session.query(AiUsageDaily).one()
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["model"], "deepseek-v4-flash")
+        self.assertEqual(usage.calls, 1)
+        self.assertEqual(usage.total_tokens, 6)
 
 
 class DeepSeekClientTests(unittest.TestCase):

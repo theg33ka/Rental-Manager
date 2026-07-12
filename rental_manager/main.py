@@ -87,6 +87,7 @@ from rental_manager.observability.logging import get_logger, redact_log_text
 from rental_manager.services.ai_context import owner_context_text, tenant_context_text
 from rental_manager.services.ai_policy import (
     AI_BUDGET_EXCEEDED_TEXT,
+    AI_DAILY_LIMIT_EXCEEDED_TEXT,
     AI_DISABLED_TEXT,
     AI_UNAVAILABLE_TEXT,
     AUDIT_USER_PROMPT,
@@ -340,10 +341,19 @@ DEFAULT_SETTINGS = {
     "automation_utility_cadence": "daily_evening",
     "ai_enabled": False,
     "ai_tenant_free_text_enabled": True,
-    "ai_dialog_reminders_enabled": True,
     "ai_supervisor_enabled": True,
-    "ai_supervisor_hour": "10",
+    "ai_supervisor_cadence": "daily",
+    "ai_supervisor_weekday": "0",
+    "ai_supervisor_time": "10:00",
+    "ai_supervisor_model": "deepseek-v4-flash",
+    "ai_supervisor_max_tokens": "1200",
     "ai_action_confirmation_ttl_hours": "48",
+    "ai_daily_call_limit": "100",
+    "ai_max_output_tokens": "1500",
+    "ai_usd_rub_rate": "100",
+    "ai_owner_instructions": "",
+    "ai_tenant_instructions": "",
+    "ai_audit_instructions": "",
     "deepseek_model": "deepseek-v4-flash",
     "ai_monthly_budget_rub": "1000",
     "ip_recipient_name": "",
@@ -435,7 +445,6 @@ BOOLEAN_SETTINGS = {
     "notifications_enabled",
     "ai_enabled",
     "ai_tenant_free_text_enabled",
-    "ai_dialog_reminders_enabled",
     "ai_supervisor_enabled",
 }
 ENV_SETTING_KEYS = {
@@ -445,15 +454,38 @@ ENV_SETTING_KEYS = {
     "telegram_webhook_secret": "TELEGRAM_WEBHOOK_SECRET",
     "ai_enabled": "AI_ENABLED",
     "ai_tenant_free_text_enabled": "AI_TENANT_FREE_TEXT_ENABLED",
-    "ai_dialog_reminders_enabled": "AI_DIALOG_REMINDERS_ENABLED",
     "ai_supervisor_enabled": "AI_SUPERVISOR_ENABLED",
-    "ai_supervisor_hour": "AI_SUPERVISOR_HOUR",
+    "ai_supervisor_cadence": "AI_SUPERVISOR_CADENCE",
+    "ai_supervisor_weekday": "AI_SUPERVISOR_WEEKDAY",
+    "ai_supervisor_time": "AI_SUPERVISOR_TIME",
+    "ai_supervisor_model": "AI_SUPERVISOR_MODEL",
+    "ai_supervisor_max_tokens": "AI_SUPERVISOR_MAX_TOKENS",
     "ai_action_confirmation_ttl_hours": "AI_ACTION_CONFIRMATION_TTL_HOURS",
+    "ai_daily_call_limit": "AI_DAILY_CALL_LIMIT",
+    "ai_max_output_tokens": "AI_MAX_OUTPUT_TOKENS",
+    "ai_usd_rub_rate": "AI_USD_RUB_RATE",
     "deepseek_model": "DEEPSEEK_MODEL",
     "ai_monthly_budget_rub": "AI_MONTHLY_BUDGET_RUB",
     "deepseek_api_key": "DEEPSEEK_API_KEY",
 }
 VALID_REMINDER_CADENCES = {"twice_daily", "daily_evening", "every_two_days", "never"}
+VALID_AI_SUPERVISOR_CADENCES = {"daily", "weekdays", "weekly"}
+AI_INTEGER_SETTING_LIMITS = {
+    "ai_supervisor_weekday": (0, 6, "День автоаудита"),
+    "ai_supervisor_max_tokens": (100, 4000, "Лимит ответа автоаудита"),
+    "ai_action_confirmation_ttl_hours": (1, 168, "Срок подтверждения действия"),
+    "ai_daily_call_limit": (0, 100000, "Дневной лимит AI-запросов"),
+    "ai_max_output_tokens": (100, 8000, "Общий лимит ответа AI"),
+}
+AI_DECIMAL_SETTING_LIMITS = {
+    "ai_monthly_budget_rub": (0.0, 10_000_000.0, "Месячный AI-бюджет"),
+    "ai_usd_rub_rate": (1.0, 1000.0, "Курс доллара для оценки AI"),
+}
+AI_INSTRUCTION_SETTING_KEYS = {
+    "ai_owner_instructions",
+    "ai_tenant_instructions",
+    "ai_audit_instructions",
+}
 REMINDER_CADENCE_KEYS = {
     "message_rent_due": "automation_rent_due_cadence",
     "message_rent_overdue": "automation_rent_overdue_cadence",
@@ -917,7 +949,23 @@ def ensure_runtime_defaults(session: Session) -> None:
         model = "deepseek-v4-pro" if "pro" in str(legacy_model.value or "").lower() else "deepseek-v4-flash"
         session.add(AppSetting(key="deepseek_model", value=model))
         changed = True
+    legacy_supervisor_hour = session.get(AppSetting, "ai_supervisor_hour")
+    if not session.get(AppSetting, "ai_supervisor_time") and (
+        legacy_supervisor_hour or os.environ.get("AI_SUPERVISOR_HOUR", "").strip()
+    ):
+        raw_hour = os.environ.get("AI_SUPERVISOR_HOUR", "") or str(legacy_supervisor_hour.value or "10")
+        try:
+            hour = min(23, max(0, int(raw_hour)))
+        except ValueError:
+            hour = 10
+        session.add(AppSetting(key="ai_supervisor_time", value=f"{hour:02d}:00"))
+        changed = True
     for legacy_key in ("hermes_api_base_url", "hermes_model_default", "hermes_model_audit", "hermes_api_key"):
+        legacy_setting = session.get(AppSetting, legacy_key)
+        if legacy_setting:
+            session.delete(legacy_setting)
+            changed = True
+    for legacy_key in ("ai_supervisor_hour", "ai_dialog_reminders_enabled"):
         legacy_setting = session.get(AppSetting, legacy_key)
         if legacy_setting:
             session.delete(legacy_setting)
@@ -1027,6 +1075,48 @@ def get_settings(session: Session) -> dict[str, str | bool]:
     return settings
 
 
+def normalize_ai_setting(key: str, value: Any) -> str:
+    if key in {"deepseek_model", "ai_supervisor_model"}:
+        try:
+            return normalize_deepseek_model(str(value))
+        except AiProviderConfigError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if key == "ai_supervisor_cadence":
+        cadence = str(value or "").strip().lower()
+        if cadence not in VALID_AI_SUPERVISOR_CADENCES:
+            raise HTTPException(status_code=400, detail="Периодичность автоаудита задана некорректно.")
+        return cadence
+    if key == "ai_supervisor_time":
+        match = re.fullmatch(r"([01]\d|2[0-3]):([0-5]\d)", str(value or "").strip())
+        if not match:
+            raise HTTPException(status_code=400, detail="Время автоаудита должно быть в формате ЧЧ:ММ.")
+        return f"{match.group(1)}:{match.group(2)}"
+    if key in AI_INTEGER_SETTING_LIMITS:
+        minimum, maximum, label = AI_INTEGER_SETTING_LIMITS[key]
+        try:
+            number = int(str(value).strip())
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"{label}: требуется целое число.") from exc
+        if number < minimum or number > maximum:
+            raise HTTPException(status_code=400, detail=f"{label}: допустимо от {minimum} до {maximum}.")
+        return str(number)
+    if key in AI_DECIMAL_SETTING_LIMITS:
+        minimum, maximum, label = AI_DECIMAL_SETTING_LIMITS[key]
+        try:
+            number = float(str(value).strip().replace(",", "."))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"{label}: требуется число.") from exc
+        if number < minimum or number > maximum:
+            raise HTTPException(status_code=400, detail=f"{label}: допустимо от {minimum:g} до {maximum:g}.")
+        return f"{number:g}"
+    if key in AI_INSTRUCTION_SETTING_KEYS:
+        instructions = str(value or "").strip()
+        if len(instructions) > 6000:
+            raise HTTPException(status_code=400, detail="Дополнительные инструкции AI не должны превышать 6000 символов.")
+        return instructions
+    return str(value)
+
+
 def save_settings(session: Session, payload: dict[str, Any], preserve_panel_token: str = "") -> dict[str, str | bool]:
     allowed = set(ALL_SETTINGS) | PIN_INPUT_KEYS
     pin_changed = False
@@ -1060,11 +1150,8 @@ def save_settings(session: Session, payload: dict[str, Any], preserve_panel_toke
                 setting.value = encrypt_secret(normalize_bot_token(str(value)))
             except RuntimeError as exc:
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
-        elif key == "deepseek_model":
-            try:
-                setting.value = normalize_deepseek_model(str(value))
-            except AiProviderConfigError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        elif key.startswith("ai_") or key == "deepseek_model":
+            setting.value = normalize_ai_setting(key, value)
         elif key in SECRET_SETTINGS:
             try:
                 setting.value = encrypt_secret(str(value))
@@ -2983,8 +3070,15 @@ def api_performance(session: Session = Depends(get_session)) -> dict[str, Any]:
         "enabled": setting_bool_value(get_setting_value(session, "ai_enabled")),
         "tenant_free_text_enabled": setting_bool_value(get_setting_value(session, "ai_tenant_free_text_enabled")),
         "supervisor_enabled": setting_bool_value(get_setting_value(session, "ai_supervisor_enabled")),
+        "supervisor_cadence": get_setting_value(session, "ai_supervisor_cadence"),
+        "supervisor_weekday": int(get_setting_value(session, "ai_supervisor_weekday") or 0),
+        "supervisor_time": get_setting_value(session, "ai_supervisor_time"),
+        "supervisor_model": get_setting_value(session, "ai_supervisor_model"),
         "today_calls": sum(int(row.calls or 0) for row in today_usage),
         "today_cost_rub": money(sum(float(row.cost_rub or 0) for row in today_usage)),
+        "daily_call_limit": ai_daily_call_limit(session),
+        "monthly_spent_rub": ai_monthly_spent_rub(session),
+        "monthly_budget_rub": ai_monthly_budget_rub(session),
         "open_agent_tasks": int(session.scalar(select(func.count(AgentTask.id)).where(AgentTask.status == "open")) or 0),
         "pending_action_proposals": int(
             session.scalar(select(func.count(AgentActionProposal.id)).where(AgentActionProposal.status == "pending")) or 0
@@ -3003,6 +3097,52 @@ def api_performance(session: Session = Depends(get_session)) -> dict[str, Any]:
 def api_save_settings(request: Request, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, str | bool]:
     current_token = str(request.cookies.get(PANEL_AUTH_COOKIE) or "")
     return save_settings(session, payload, preserve_panel_token=current_token)
+
+
+@app.post("/api/ai/test")
+def api_test_ai_connection(session: Session = Depends(get_session)) -> dict[str, Any]:
+    if ai_budget_exceeded(session):
+        raise HTTPException(status_code=409, detail=AI_BUDGET_EXCEEDED_TEXT)
+    if ai_daily_call_limit_exceeded(session):
+        raise HTTPException(status_code=409, detail=AI_DAILY_LIMIT_EXCEEDED_TEXT)
+    try:
+        runtime = build_provider_runtime(
+            AiProvider.DEEPSEEK,
+            requested_model=get_setting_value(session, "deepseek_model"),
+            deepseek_api_key=get_setting_value(session, "deepseek_api_key"),
+        )
+        result = runtime.client.chat_completions(
+            model=runtime.model,
+            messages=[{"role": "user", "content": "Ответь только словом OK."}],
+            temperature=0,
+            max_tokens=16,
+        )
+    except AiProviderConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except DeepSeekClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    normalized = DeepSeekResult(
+        content=result.content,
+        model=result.model,
+        prompt_tokens=result.prompt_tokens or estimate_tokens("Ответь только словом OK."),
+        completion_tokens=result.completion_tokens or estimate_tokens(result.content),
+        raw=result.raw,
+        provider=result.provider,
+    )
+    cost = ai_estimated_cost_rub(
+        normalized.model,
+        normalized.prompt_tokens,
+        normalized.completion_tokens,
+        ai_usd_rub_rate(session),
+    )
+    add_ai_usage(session, normalized, cost)
+    session.commit()
+    return {
+        "ok": True,
+        "provider": normalized.provider,
+        "model": normalized.model,
+        "cost_rub": cost,
+    }
 
 
 @app.get("/api/month-progress")
@@ -6137,13 +6277,22 @@ def run_tenant_rent_dialogue(
         chat_id=lease_chat_id(session, lease) or f"lease:{lease.id}",
         actor_role="tenant_automation",
         lease=lease,
-        system_prompt=TENANT_DEBT_FOLLOWUP_SYSTEM_PROMPT,
+        system_prompt=append_ai_instructions(
+            TENANT_DEBT_FOLLOWUP_SYSTEM_PROMPT,
+            get_setting_value(session, "ai_tenant_instructions"),
+            "автоматических сообщений арендаторам",
+        ),
         context=context,
         user_text="Сформулируй следующее сообщение жильцу по текущей просрочке.",
         model=resolve_ai_model(get_setting_value(session, "deepseek_model")),
         max_tokens=350,
     )
-    if answer in {AI_UNAVAILABLE_TEXT, AI_DISABLED_TEXT, AI_BUDGET_EXCEEDED_TEXT}:
+    if answer in {
+        AI_UNAVAILABLE_TEXT,
+        AI_DISABLED_TEXT,
+        AI_BUDGET_EXCEEDED_TEXT,
+        AI_DAILY_LIMIT_EXCEEDED_TEXT,
+    }:
         answer = fallback_debt_followup_text(state, debt)
     send_tenant_message(
         session,
@@ -6375,11 +6524,7 @@ def run_owner_supervisor_digest(
 ) -> int:
     if not ai_enabled(session) or not setting_bool_value(get_setting_value(session, "ai_supervisor_enabled")):
         return 0
-    try:
-        hour = min(22, max(0, int(get_setting_value(session, "ai_supervisor_hour") or 10)))
-    except ValueError:
-        hour = 10
-    if now < datetime.combine(today, time(hour=hour), tzinfo=LOCAL_TZ):
+    if not ai_supervisor_schedule_due(session, today, now):
         return 0
     owner_id = telegram_owner_chat_id(session)
     if not owner_id or not telegram_token(session):
@@ -6404,11 +6549,11 @@ def run_owner_supervisor_digest(
         chat_id=owner_id,
         actor_role="owner",
         lease=None,
-        system_prompt=configured_owner_agent_system_prompt() + "\n" + SUPERVISOR_SYSTEM_PROMPT,
+        system_prompt=configured_audit_system_prompt(session),
         context=context,
         user_text="Проведи сегодняшнюю строгую ревизию. Предложи безопасные действия только там, где данных достаточно.",
-        model=resolve_ai_model(get_setting_value(session, "deepseek_model")),
-        max_tokens=1200,
+        model=resolve_ai_model(get_setting_value(session, "ai_supervisor_model")),
+        max_tokens=ai_supervisor_max_tokens(session),
     )
     store_agent_memories(
         session,
@@ -6418,7 +6563,13 @@ def run_owner_supervisor_digest(
         scope_id="owner",
     )
     answer = envelope.reply
-    if answer in {"", AI_UNAVAILABLE_TEXT, AI_DISABLED_TEXT, AI_BUDGET_EXCEEDED_TEXT}:
+    if answer in {
+        "",
+        AI_UNAVAILABLE_TEXT,
+        AI_DISABLED_TEXT,
+        AI_BUDGET_EXCEEDED_TEXT,
+        AI_DAILY_LIMIT_EXCEEDED_TEXT,
+    }:
         answer = "Утренняя ревизия. Сегодня нужно закрыть:\n" + "\n".join(lines[:10])
     send_telegram_text(session, owner_id, answer, app_keyboard(app_base_url(session)))
     for action in envelope.actions:
@@ -7207,6 +7358,66 @@ def ai_tenant_free_text_enabled(session: Session) -> bool:
     return setting_bool_value(get_setting_value(session, "ai_tenant_free_text_enabled"))
 
 
+def bounded_ai_int_setting(session: Session, key: str, fallback: int) -> int:
+    minimum, maximum, _label = AI_INTEGER_SETTING_LIMITS[key]
+    try:
+        return min(maximum, max(minimum, int(get_setting_value(session, key) or fallback)))
+    except ValueError:
+        return fallback
+
+
+def ai_daily_call_limit(session: Session) -> int:
+    return bounded_ai_int_setting(session, "ai_daily_call_limit", 100)
+
+
+def ai_max_output_tokens(session: Session) -> int:
+    return bounded_ai_int_setting(session, "ai_max_output_tokens", 1500)
+
+
+def ai_supervisor_max_tokens(session: Session) -> int:
+    return bounded_ai_int_setting(session, "ai_supervisor_max_tokens", 1200)
+
+
+def ai_usd_rub_rate(session: Session) -> float:
+    try:
+        raw_rate = str(get_setting_value(session, "ai_usd_rub_rate") or 100).replace(",", ".")
+        return min(1000.0, max(1.0, float(raw_rate)))
+    except ValueError:
+        return AI_DEFAULT_USD_RUB_RATE
+
+
+def ai_daily_calls(session: Session, today: date | None = None) -> int:
+    usage_date = today or date.today()
+    return int(
+        session.scalar(
+            select(func.coalesce(func.sum(AiUsageDaily.calls), 0)).where(AiUsageDaily.usage_date == usage_date)
+        )
+        or 0
+    )
+
+
+def ai_daily_call_limit_exceeded(session: Session, today: date | None = None) -> bool:
+    limit = ai_daily_call_limit(session)
+    return bool(limit > 0 and ai_daily_calls(session, today) >= limit)
+
+
+def ai_supervisor_schedule_due(session: Session, today: date, now: datetime) -> bool:
+    cadence = get_setting_value(session, "ai_supervisor_cadence") or "daily"
+    if cadence == "weekdays" and today.weekday() >= 5:
+        return False
+    if cadence == "weekly":
+        weekday = bounded_ai_int_setting(session, "ai_supervisor_weekday", 0)
+        if today.weekday() != weekday:
+            return False
+    configured_time = get_setting_value(session, "ai_supervisor_time") or "10:00"
+    try:
+        hour, minute = (int(part) for part in configured_time.split(":", 1))
+        scheduled_time = time(hour=hour, minute=minute)
+    except (TypeError, ValueError):
+        scheduled_time = time(hour=10)
+    return now >= datetime.combine(today, scheduled_time, tzinfo=LOCAL_TZ)
+
+
 def ai_monthly_budget_rub(session: Session) -> float:
     try:
         return max(0.0, float(str(get_setting_value(session, "ai_monthly_budget_rub") or "0").replace(",", ".")))
@@ -7245,14 +7456,19 @@ def ai_model_price_key(model: str) -> str:
     return "deepseek-v4-flash"
 
 
-def ai_estimated_cost_rub(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+def ai_estimated_cost_rub(
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    usd_rub_rate: float = AI_DEFAULT_USD_RUB_RATE,
+) -> float:
     price_key = ai_model_price_key(model)
     input_usd, output_usd = AI_MODEL_PRICES_USD_PER_M.get(
         price_key,
         AI_MODEL_PRICES_USD_PER_M["deepseek-v4-flash"],
     )
     cost_usd = (prompt_tokens / 1_000_000) * input_usd + (completion_tokens / 1_000_000) * output_usd
-    return money(cost_usd * AI_DEFAULT_USD_RUB_RATE)
+    return money(cost_usd * usd_rub_rate)
 
 
 def ai_conversation(session: Session, chat_id: int | str, role: str, lease: Lease | None = None) -> AiConversation:
@@ -7602,6 +7818,7 @@ def invoke_ai_completion(
     max_tokens: int,
     temperature: float = 0.2,
 ) -> DeepSeekResult | None:
+    max_tokens = min(max_tokens, ai_max_output_tokens(session))
     result = None
     try:
         configured_providers = provider_chain()
@@ -7696,27 +7913,65 @@ def invoke_ai_completion(
         raw=result.raw,
         provider=result.provider,
     )
-    cost = ai_estimated_cost_rub(normalized.model, normalized.prompt_tokens, normalized.completion_tokens)
+    cost = ai_estimated_cost_rub(
+        normalized.model,
+        normalized.prompt_tokens,
+        normalized.completion_tokens,
+        ai_usd_rub_rate(session),
+    )
     add_ai_usage(session, normalized, cost)
     return normalized
 
 
-def configured_owner_agent_system_prompt() -> str:
+def append_ai_instructions(base_prompt: str, instructions: str, audience: str) -> str:
+    custom = str(instructions or "").strip()
+    if not custom:
+        return base_prompt
+    return (
+        f"{base_prompt.rstrip()}\n\n"
+        f"Дополнительные инструкции владельца для {audience}:\n{custom}\n\n"
+        "Эти инструкции не отменяют формат ответа, ограничения безопасности, подтверждение действий и backend-валидацию."
+    )
+
+
+def configured_owner_agent_system_prompt(session: Session) -> str:
     configured_path = os.environ.get("AI_SYSTEM_PROMPT_PATH", "").strip()
     if not configured_path:
-        return OWNER_AGENT_SYSTEM_PROMPT
-    prompt_path = Path(configured_path)
-    if not prompt_path.is_absolute():
-        prompt_path = ROOT_DIR / prompt_path
-    try:
-        prompt = prompt_path.read_text(encoding="utf-8").strip()
-    except OSError as exc:
-        runtime_log("AI", f"system prompt path unavailable path={prompt_path} error={exc}")
-        return OWNER_AGENT_SYSTEM_PROMPT
-    if not prompt:
-        runtime_log("AI", f"system prompt path is empty path={prompt_path}")
-        return OWNER_AGENT_SYSTEM_PROMPT
-    return prompt[:20_000]
+        prompt = OWNER_AGENT_SYSTEM_PROMPT
+    else:
+        prompt_path = Path(configured_path)
+        if not prompt_path.is_absolute():
+            prompt_path = ROOT_DIR / prompt_path
+        try:
+            prompt = prompt_path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            runtime_log("AI", f"system prompt path unavailable path={prompt_path} error={exc}")
+            prompt = OWNER_AGENT_SYSTEM_PROMPT
+        if not prompt:
+            runtime_log("AI", f"system prompt path is empty path={prompt_path}")
+            prompt = OWNER_AGENT_SYSTEM_PROMPT
+    return append_ai_instructions(
+        prompt[:20_000],
+        get_setting_value(session, "ai_owner_instructions"),
+        "диалогов владельца",
+    )
+
+
+def configured_tenant_agent_system_prompt(session: Session) -> str:
+    return append_ai_instructions(
+        TENANT_AGENT_SYSTEM_PROMPT,
+        get_setting_value(session, "ai_tenant_instructions"),
+        "диалогов с арендаторами",
+    )
+
+
+def configured_audit_system_prompt(session: Session) -> str:
+    base_prompt = configured_owner_agent_system_prompt(session) + "\n\n" + SUPERVISOR_SYSTEM_PROMPT
+    return append_ai_instructions(
+        base_prompt,
+        get_setting_value(session, "ai_audit_instructions"),
+        "операционного аудита",
+    )
 
 
 def call_deepseek_ai(
@@ -7735,6 +7990,8 @@ def call_deepseek_ai(
         return AI_DISABLED_TEXT
     if ai_budget_exceeded(session):
         return AI_BUDGET_EXCEEDED_TEXT
+    if ai_daily_call_limit_exceeded(session):
+        return AI_DAILY_LIMIT_EXCEEDED_TEXT
 
     conversation = ai_conversation(session, chat_id, actor_role, lease)
     history = recent_ai_history(session, conversation)
@@ -7758,7 +8015,12 @@ def call_deepseek_ai(
         return AI_UNAVAILABLE_TEXT
 
     answer = clean_ai_response(normalized.content) or AI_UNAVAILABLE_TEXT
-    cost = ai_estimated_cost_rub(normalized.model, normalized.prompt_tokens, normalized.completion_tokens)
+    cost = ai_estimated_cost_rub(
+        normalized.model,
+        normalized.prompt_tokens,
+        normalized.completion_tokens,
+        ai_usd_rub_rate(session),
+    )
     log_ai_message(
         session,
         conversation,
@@ -7789,6 +8051,8 @@ def call_agent_envelope(
         return conversation, AgentEnvelope(reply=AI_DISABLED_TEXT)
     if ai_budget_exceeded(session):
         return conversation, AgentEnvelope(reply=AI_BUDGET_EXCEEDED_TEXT)
+    if ai_daily_call_limit_exceeded(session):
+        return conversation, AgentEnvelope(reply=AI_DAILY_LIMIT_EXCEEDED_TEXT)
 
     history = recent_ai_history(session, conversation)
     log_ai_message(session, conversation, "user", user_text)
@@ -7822,7 +8086,12 @@ def call_agent_envelope(
         needs_owner=envelope.needs_owner,
         owner_summary=envelope.owner_summary,
     )
-    cost = ai_estimated_cost_rub(normalized.model, normalized.prompt_tokens, normalized.completion_tokens)
+    cost = ai_estimated_cost_rub(
+        normalized.model,
+        normalized.prompt_tokens,
+        normalized.completion_tokens,
+        ai_usd_rub_rate(session),
+    )
     log_ai_message(
         session,
         conversation,
@@ -8470,7 +8739,7 @@ def notify_owner_about_tenant_update(
 
 
 def handle_tenant_ai_message(session: Session, chat_id: int | str, lease: Lease, text: str) -> bool:
-    if not text or text.startswith("/") or not ai_tenant_free_text_enabled(session):
+    if not text or text.startswith("/") or not ai_enabled(session) or not ai_tenant_free_text_enabled(session):
         return False
     state = agent_tenant_state(session, lease)
     context = "\n\n".join(
@@ -8490,7 +8759,7 @@ def handle_tenant_ai_message(session: Session, chat_id: int | str, lease: Lease,
         chat_id=chat_id,
         actor_role="tenant",
         lease=lease,
-        system_prompt=TENANT_AGENT_SYSTEM_PROMPT,
+        system_prompt=configured_tenant_agent_system_prompt(session),
         context=context,
         user_text=text,
         model=resolve_ai_model(get_setting_value(session, "deepseek_model")),
@@ -8571,7 +8840,7 @@ def handle_owner_ai_message(session: Session, chat_id: int | str, text: str, *, 
         send_telegram_text(session, chat_id, answer)
         return True
 
-    model_key = "deepseek_model"
+    model_key = "ai_supervisor_model" if audit_deep else "deepseek_model"
     action_policy = (
         "Владелец разрешил подготовить предложения действий: actions допустимы."
         if allows_actions
@@ -8582,11 +8851,15 @@ def handle_owner_ai_message(session: Session, chat_id: int | str, text: str, *, 
         chat_id=chat_id,
         actor_role="owner",
         lease=None,
-        system_prompt=configured_owner_agent_system_prompt(),
+        system_prompt=(
+            configured_audit_system_prompt(session)
+            if audit_deep
+            else configured_owner_agent_system_prompt(session)
+        ),
         context=owner_agent_context(session, chat_id, dashboard) + "\n\nПолитика текущего запроса:\n" + action_policy,
         user_text=user_text,
         model=resolve_ai_model(get_setting_value(session, model_key)),
-        max_tokens=1500 if audit_deep else 1100,
+        max_tokens=ai_supervisor_max_tokens(session) if audit_deep else 1100,
     )
     store_agent_memories(
         session,

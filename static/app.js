@@ -628,6 +628,23 @@ function monthMeta(value) {
   return `<span class="pill">месяц: ${formatMonth(value)}</span>`;
 }
 
+function syncAiSupervisorControls() {
+  const enabled = Boolean(qs("#aiSupervisorEnabledInput")?.checked);
+  const cadence = qs("#aiSupervisorCadenceSelect")?.value || "daily";
+  [
+    "#aiSupervisorCadenceSelect",
+    "#aiSupervisorTimeInput",
+    "#aiSupervisorModelSelect",
+    "#aiSupervisorMaxTokensInput",
+  ].forEach((selector) => {
+    const control = qs(selector);
+    if (control) control.disabled = !enabled;
+  });
+  const weekday = qs("#aiSupervisorWeekdaySelect");
+  if (weekday) weekday.disabled = !enabled || cadence !== "weekly";
+}
+
+
 function applySettings(settings = {}) {
   state.settings = {
     color_palette: "premium",
@@ -640,6 +657,19 @@ function applySettings(settings = {}) {
     automation_utility_cadence: "daily_evening",
     ai_enabled: false,
     ai_tenant_free_text_enabled: true,
+    ai_supervisor_enabled: true,
+    ai_supervisor_cadence: "daily",
+    ai_supervisor_weekday: "0",
+    ai_supervisor_time: "10:00",
+    ai_supervisor_model: "deepseek-v4-flash",
+    ai_supervisor_max_tokens: "1200",
+    ai_action_confirmation_ttl_hours: "48",
+    ai_daily_call_limit: "100",
+    ai_max_output_tokens: "1500",
+    ai_usd_rub_rate: "100",
+    ai_owner_instructions: "",
+    ai_tenant_instructions: "",
+    ai_audit_instructions: "",
     deepseek_model: "deepseek-v4-flash",
     ai_monthly_budget_rub: "1000",
     ip_recipient_name: "",
@@ -664,6 +694,19 @@ function applySettings(settings = {}) {
   const secret = qs("#telegramWebhookSecretInput");
   const aiEnabled = qs("#aiEnabledInput");
   const aiTenantFreeText = qs("#aiTenantFreeTextEnabledInput");
+  const aiSupervisorEnabled = qs("#aiSupervisorEnabledInput");
+  const aiSupervisorCadence = qs("#aiSupervisorCadenceSelect");
+  const aiSupervisorWeekday = qs("#aiSupervisorWeekdaySelect");
+  const aiSupervisorTime = qs("#aiSupervisorTimeInput");
+  const aiSupervisorModel = qs("#aiSupervisorModelSelect");
+  const aiSupervisorMaxTokens = qs("#aiSupervisorMaxTokensInput");
+  const aiActionConfirmationTtl = qs("#aiActionConfirmationTtlInput");
+  const aiDailyCallLimit = qs("#aiDailyCallLimitInput");
+  const aiMaxOutputTokens = qs("#aiMaxOutputTokensInput");
+  const aiUsdRubRate = qs("#aiUsdRubRateInput");
+  const aiOwnerInstructions = qs("#aiOwnerInstructionsInput");
+  const aiTenantInstructions = qs("#aiTenantInstructionsInput");
+  const aiAuditInstructions = qs("#aiAuditInstructionsInput");
   const deepseekApiKey = qs("#deepseekApiKeyInput");
   const deepseekModel = qs("#deepseekModelSelect");
   const aiBudget = qs("#aiMonthlyBudgetRubInput");
@@ -684,6 +727,19 @@ function applySettings(settings = {}) {
   if (ownerChat) ownerChat.value = state.settings.telegram_owner_chat_id || "";
   if (aiEnabled) aiEnabled.checked = Boolean(state.settings.ai_enabled);
   if (aiTenantFreeText) aiTenantFreeText.checked = Boolean(state.settings.ai_tenant_free_text_enabled);
+  if (aiSupervisorEnabled) aiSupervisorEnabled.checked = Boolean(state.settings.ai_supervisor_enabled);
+  if (aiSupervisorCadence) aiSupervisorCadence.value = state.settings.ai_supervisor_cadence || "daily";
+  if (aiSupervisorWeekday) aiSupervisorWeekday.value = String(state.settings.ai_supervisor_weekday ?? "0");
+  if (aiSupervisorTime) aiSupervisorTime.value = state.settings.ai_supervisor_time || "10:00";
+  if (aiSupervisorModel) aiSupervisorModel.value = state.settings.ai_supervisor_model || "deepseek-v4-flash";
+  if (aiSupervisorMaxTokens) aiSupervisorMaxTokens.value = state.settings.ai_supervisor_max_tokens || "1200";
+  if (aiActionConfirmationTtl) aiActionConfirmationTtl.value = state.settings.ai_action_confirmation_ttl_hours || "48";
+  if (aiDailyCallLimit) aiDailyCallLimit.value = state.settings.ai_daily_call_limit || "100";
+  if (aiMaxOutputTokens) aiMaxOutputTokens.value = state.settings.ai_max_output_tokens || "1500";
+  if (aiUsdRubRate) aiUsdRubRate.value = state.settings.ai_usd_rub_rate || "100";
+  if (aiOwnerInstructions) aiOwnerInstructions.value = state.settings.ai_owner_instructions || "";
+  if (aiTenantInstructions) aiTenantInstructions.value = state.settings.ai_tenant_instructions || "";
+  if (aiAuditInstructions) aiAuditInstructions.value = state.settings.ai_audit_instructions || "";
   if (deepseekModel) deepseekModel.value = state.settings.deepseek_model || "deepseek-v4-flash";
   if (aiBudget) aiBudget.value = state.settings.ai_monthly_budget_rub || "1000";
   if (notificationsEnabled) notificationsEnabled.checked = Boolean(state.settings.notifications_enabled);
@@ -702,6 +758,7 @@ function applySettings(settings = {}) {
   if (personalRecipientName) personalRecipientName.value = state.settings.personal_recipient_name || "";
   if (personalRecipientPhone) personalRecipientPhone.value = state.settings.personal_recipient_phone || "";
   if (personalRecipientBank) personalRecipientBank.value = state.settings.personal_recipient_bank || "";
+  syncAiSupervisorControls();
   const templateFields = {
     "#messageRentUpcomingInput": "message_rent_upcoming",
     "#messageRentDueInput": "message_rent_due",
@@ -727,6 +784,11 @@ function renderTelegramStatus() {
   if (!box) return;
   const ipReady = Boolean(state.settings.ip_recipient_name && state.settings.ip_recipient_account);
   const personalReady = Boolean(state.settings.personal_recipient_name && state.settings.personal_recipient_phone);
+  const auditCadence = {
+    daily: "ежедневно",
+    weekdays: "по будням",
+    weekly: "раз в неделю",
+  }[state.settings.ai_supervisor_cadence] || "ежедневно";
   box.innerHTML = `
     <h3>Telegram</h3>
     <div class="pill-row">
@@ -735,7 +797,11 @@ function renderTelegramStatus() {
       <span class="pill ${state.settings.ai_enabled ? "ok" : "warn"}">DeepSeek ${state.settings.ai_enabled ? "включён" : "выключен"}</span>
       <span class="pill ${state.settings.deepseek_api_key_configured ? "ok" : "warn"}">DeepSeek key ${state.settings.deepseek_api_key_configured ? "сохранён" : "не задан"}</span>
       <span class="pill">модель ${state.settings.deepseek_model || "deepseek-v4-flash"}</span>
+      <span class="pill ${state.settings.ai_supervisor_enabled ? "ok" : "warn"}">автоаудит ${state.settings.ai_supervisor_enabled ? `${auditCadence} · ${state.settings.ai_supervisor_time || "10:00"}` : "выключен"}</span>
+      <span class="pill">аудит ${state.settings.ai_supervisor_model || "deepseek-v4-flash"}</span>
       <span class="pill">AI budget ${state.settings.ai_monthly_budget_rub || "0"} ₽/мес</span>
+      <span class="pill">до ${state.settings.ai_daily_call_limit || "0"} выз./день</span>
+      <span class="pill">до ${state.settings.ai_max_output_tokens || "1500"} токенов</span>
       <span class="pill ${state.settings.telegram_owner_chat_id ? "ok" : "warn"}">owner chat ${state.settings.telegram_owner_chat_id || "не задан"}</span>
       <span class="pill ${state.settings.notifications_enabled ? "ok" : "warn"}">автонапоминания ${state.settings.notifications_enabled ? "включены" : "выключены"}</span>
       <span class="pill">граница ${formatDate(state.settings.notification_cutoff_date || appToday())}</span>
@@ -811,8 +877,10 @@ function renderPerformanceMonitor() {
       </div>
       <div class="pill-row">
         <span class="pill ${ai.enabled ? "ok" : "warn"}">AI ${ai.enabled ? "включён" : "выключен"}</span>
-        <span class="pill">AI сегодня: ${ai.today_calls || 0} выз.</span>
-        <span class="pill">расход ${money(ai.today_cost_rub || 0)}</span>
+        <span class="pill">AI сегодня: ${ai.today_calls || 0}/${ai.daily_call_limit || "∞"} выз.</span>
+        <span class="pill">сегодня ${money(ai.today_cost_rub || 0)}</span>
+        <span class="pill">месяц ${money(ai.monthly_spent_rub || 0)} / ${money(ai.monthly_budget_rub || 0)}</span>
+        <span class="pill ${ai.supervisor_enabled ? "ok" : "warn"}">автоаудит ${ai.supervisor_enabled ? `${escapeHtml(ai.supervisor_cadence || "daily")} · ${escapeHtml(ai.supervisor_time || "10:00")}` : "выключен"}</span>
         <span class="pill">задач агента ${ai.open_agent_tasks || 0}</span>
       </div>
     </div>
@@ -4196,6 +4264,26 @@ function bindEvents() {
     });
     toast("Настройки сохранены");
   });
+  on("#aiTestConnectionBtn", "click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const result = await api("/api/ai/test", { method: "POST", body: "{}" });
+      toast(`DeepSeek отвечает · ${result.model} · ${money(result.cost_rub || 0)}`);
+      await loadPerformanceMonitor();
+    } finally {
+      button.disabled = false;
+    }
+  });
+  on("#aiResetInstructionsBtn", "click", () => {
+    ["#aiOwnerInstructionsInput", "#aiTenantInstructionsInput", "#aiAuditInstructionsInput"].forEach((selector) => {
+      const input = qs(selector);
+      if (input) input.value = "";
+    });
+    toast("Дополнительные инструкции очищены. Сохраните настройки");
+  });
+  on("#aiSupervisorEnabledInput", "change", syncAiSupervisorControls);
+  on("#aiSupervisorCadenceSelect", "change", syncAiSupervisorControls);
   on("#paletteSelect", "change", (event) => {
     applySettings({ ...state.settings, color_palette: event.currentTarget.value });
   });

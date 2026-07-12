@@ -717,17 +717,64 @@
             <label>Секрет Telegram webhook<input type="password" name="telegram_webhook_secret" id="telegramWebhookSecretInput" placeholder="Оставьте пустым, чтобы не менять" /></label>
           </fieldset>
           <fieldset class="settings-pane form-grid compact" data-settings-panel="ai" hidden>
-            <legend>DeepSeek API</legend>
+            <legend>AI и автоматизация</legend>
+            <p class="eyebrow wide">Доступ и модели</p>
             <label class="check wide"><input type="checkbox" name="ai_enabled" id="aiEnabledInput" /> Включить AI-функции</label>
             <label class="check wide"><input type="checkbox" name="ai_tenant_free_text_enabled" id="aiTenantFreeTextEnabledInput" /> Ответы на свободный текст арендаторов</label>
             <label class="wide">API-ключ DeepSeek<input type="password" name="deepseek_api_key" id="deepseekApiKeyInput" autocomplete="new-password" placeholder="Оставьте пустым, чтобы не менять" /></label>
-            <label>Модель
+            <label>Модель диалогов
               <select name="deepseek_model" id="deepseekModelSelect">
                 <option value="deepseek-v4-flash">DeepSeek V4 Flash — быстрее и дешевле</option>
                 <option value="deepseek-v4-pro">DeepSeek V4 Pro — точнее для сложных задач</option>
               </select>
             </label>
-            <label>Месячный бюджет, ₽<input type="number" min="0" step="1" name="ai_monthly_budget_rub" id="aiMonthlyBudgetRubInput" placeholder="1000" /></label>
+            <label>Модель автоаудита
+              <select name="ai_supervisor_model" id="aiSupervisorModelSelect">
+                <option value="deepseek-v4-flash">DeepSeek V4 Flash</option>
+                <option value="deepseek-v4-pro">DeepSeek V4 Pro</option>
+              </select>
+            </label>
+            <button type="button" id="aiTestConnectionBtn">Проверить сохранённый API-ключ</button>
+            <p class="muted">Проверка отправляет один минимальный платный запрос и учитывается в лимитах.</p>
+
+            <p class="eyebrow wide">Автоаудит владельца</p>
+            <label class="check wide"><input type="checkbox" name="ai_supervisor_enabled" id="aiSupervisorEnabledInput" /> Автоматически проводить операционный аудит</label>
+            <label>Периодичность
+              <select name="ai_supervisor_cadence" id="aiSupervisorCadenceSelect">
+                <option value="daily">Каждый день</option>
+                <option value="weekdays">По рабочим дням</option>
+                <option value="weekly">Раз в неделю</option>
+              </select>
+            </label>
+            <label>День еженедельного аудита
+              <select name="ai_supervisor_weekday" id="aiSupervisorWeekdaySelect">
+                <option value="0">Понедельник</option>
+                <option value="1">Вторник</option>
+                <option value="2">Среда</option>
+                <option value="3">Четверг</option>
+                <option value="4">Пятница</option>
+                <option value="5">Суббота</option>
+                <option value="6">Воскресенье</option>
+              </select>
+            </label>
+            <label>Время автоаудита<input type="time" name="ai_supervisor_time" id="aiSupervisorTimeInput" /></label>
+            <label>Максимум токенов автоаудита<input type="number" min="100" max="4000" step="100" name="ai_supervisor_max_tokens" id="aiSupervisorMaxTokensInput" /></label>
+            <p class="muted wide">Время указано для Новосибирска. Аудит отправляется владельцу в Telegram только при наличии актуальных задач.</p>
+
+            <p class="eyebrow wide">Расходы и ограничения</p>
+            <label>Месячный бюджет, ₽<input type="number" min="0" max="10000000" step="1" name="ai_monthly_budget_rub" id="aiMonthlyBudgetRubInput" placeholder="1000" /></label>
+            <label>Запросов в день<input type="number" min="0" max="100000" step="1" name="ai_daily_call_limit" id="aiDailyCallLimitInput" /></label>
+            <label>Максимум токенов ответа<input type="number" min="100" max="8000" step="100" name="ai_max_output_tokens" id="aiMaxOutputTokensInput" /></label>
+            <label>Расчётный курс USD/RUB<input type="number" min="1" max="1000" step="0.1" name="ai_usd_rub_rate" id="aiUsdRubRateInput" /></label>
+            <label>Подтверждение действий действует, часов<input type="number" min="1" max="168" step="1" name="ai_action_confirmation_ttl_hours" id="aiActionConfirmationTtlInput" /></label>
+            <p class="muted wide">Ноль в бюджете или дневном лимите означает отсутствие соответствующего ограничения. Общий лимит токенов жёстко ограничивает любой ответ.</p>
+
+            <p class="eyebrow wide">Адаптация поведения</p>
+            <label class="wide">Инструкции для диалогов владельца<textarea name="ai_owner_instructions" id="aiOwnerInstructionsInput" rows="5" maxlength="6000" placeholder="Например: отвечай сначала кратким финансовым итогом, затем списком рисков"></textarea></label>
+            <label class="wide">Инструкции для диалогов с арендаторами<textarea name="ai_tenant_instructions" id="aiTenantInstructionsInput" rows="5" maxlength="6000" placeholder="Например: сохраняй нейтральный тон и не используй эмодзи"></textarea></label>
+            <label class="wide">Инструкции для автоаудита<textarea name="ai_audit_instructions" id="aiAuditInstructionsInput" rows="5" maxlength="6000" placeholder="Например: в первую очередь проверяй кассовые разрывы и просрочки старше трёх дней"></textarea></label>
+            <button type="button" id="aiResetInstructionsBtn">Сбросить дополнительные инструкции</button>
+            <p class="muted wide">Это дополнительные инструкции к защищённым системным промтам. Очистите поле, чтобы сбросить адаптацию. Формат ответа, подтверждение действий и backend-ограничения редактированием не отключаются.</p>
             <p class="muted wide">Запросы идут напрямую в DeepSeek API. Ключ хранится в зашифрованном виде и не возвращается в интерфейс.</p>
           </fieldset>
           <fieldset class="settings-pane form-grid compact" data-settings-panel="security" hidden>

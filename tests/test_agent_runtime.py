@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,12 +15,17 @@ from rental_manager.database import Base
 from rental_manager.main import (
     agent_memory_context,
     agent_tenant_state,
+    ai_supervisor_schedule_due,
     backfill_owner_style_preferences,
     build_dashboard,
     capture_owner_style_preferences,
+    configured_audit_system_prompt,
+    configured_owner_agent_system_prompt,
+    configured_tenant_agent_system_prompt,
     execute_agent_action,
     handle_agent_callback_query,
     handle_owner_ai_message,
+    handle_tenant_ai_message,
     handle_telegram_message,
     normalize_agent_action,
     owner_agent_context,
@@ -28,6 +33,7 @@ from rental_manager.main import (
     owner_request_allows_actions,
     owner_request_explicitly_requests_action,
     run_tenant_rent_dialogue,
+    LOCAL_TZ,
     sync_agent_tasks,
     tenant_message_without_name,
     update_tenant_state_from_envelope,
@@ -61,6 +67,73 @@ class AgentRuntimeTestCase(unittest.TestCase):
     def tearDown(self) -> None:
         self.engine.dispose()
         self.tmp.cleanup()
+
+    def test_auto_audit_schedule_respects_cadence_weekday_and_time(self) -> None:
+        wednesday = date(2026, 7, 15)
+        with self.Session() as session:
+            session.add_all(
+                [
+                    AppSetting(key="ai_supervisor_cadence", value="weekly"),
+                    AppSetting(key="ai_supervisor_weekday", value="2"),
+                    AppSetting(key="ai_supervisor_time", value="10:30"),
+                ]
+            )
+            session.flush()
+
+            self.assertFalse(
+                ai_supervisor_schedule_due(
+                    session,
+                    wednesday - timedelta(days=1),
+                    datetime.combine(wednesday - timedelta(days=1), time(hour=12), tzinfo=LOCAL_TZ),
+                )
+            )
+            self.assertFalse(
+                ai_supervisor_schedule_due(
+                    session,
+                    wednesday,
+                    datetime.combine(wednesday, time(hour=10, minute=15), tzinfo=LOCAL_TZ),
+                )
+            )
+            self.assertTrue(
+                ai_supervisor_schedule_due(
+                    session,
+                    wednesday,
+                    datetime.combine(wednesday, time(hour=10, minute=30), tzinfo=LOCAL_TZ),
+                )
+            )
+
+    def test_custom_ai_instructions_extend_protected_prompts(self) -> None:
+        with self.Session() as session, patch.dict("os.environ", {"AI_SYSTEM_PROMPT_PATH": ""}, clear=False):
+            session.add_all(
+                [
+                    AppSetting(key="ai_owner_instructions", value="Сначала показывай денежный итог."),
+                    AppSetting(key="ai_tenant_instructions", value="Не используй эмодзи."),
+                    AppSetting(key="ai_audit_instructions", value="Проверяй кассовые разрывы."),
+                ]
+            )
+            session.flush()
+
+            owner_prompt = configured_owner_agent_system_prompt(session)
+            tenant_prompt = configured_tenant_agent_system_prompt(session)
+            audit_prompt = configured_audit_system_prompt(session)
+
+        self.assertIn("Сначала показывай денежный итог", owner_prompt)
+        self.assertIn("Не используй эмодзи", tenant_prompt)
+        self.assertIn("Проверяй кассовые разрывы", audit_prompt)
+        self.assertIn("backend-валидацию", owner_prompt)
+        self.assertIn("backend-валидацию", tenant_prompt)
+        self.assertIn("backend-валидацию", audit_prompt)
+
+    def test_disabled_ai_does_not_intercept_tenant_free_text(self) -> None:
+        with self.Session() as session:
+            lease, _charge = self.create_lease(session)
+            session.add(AppSetting(key="ai_enabled", value="0"))
+            session.add(AppSetting(key="ai_tenant_free_text_enabled", value="1"))
+            session.flush()
+
+            handled = handle_tenant_ai_message(session, 501, lease, "Когда платить?")
+
+        self.assertFalse(handled)
 
     def create_lease(self, session, *, tenant_name: str = "Иван", apartment_name: str = "1") -> tuple[Lease, RentCharge]:
         rental_object = RentalObject(name=f"Дом {apartment_name}")
