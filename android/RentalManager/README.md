@@ -20,6 +20,7 @@ powershell -ExecutionPolicy Bypass -File .\build-apk.ps1
 
 ```text
 android/RentalManager/build/rental-manager-mobile.apk
+android/RentalManager/build/rental-manager-mobile-0.1.6.apk
 ```
 
 По умолчанию приложение подключается к `https://menedzer-arendy-g33ka.waw0.amvera.tech`. Если в старой установке был сохранён `127.0.0.1` или `localhost`, новая версия автоматически заменит его на публичный адрес. Да, localhost телефона - это сам телефон, вот такой маленький сюрприз.

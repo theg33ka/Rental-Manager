@@ -347,6 +347,32 @@ body.app-loading .topbar {
   color: var(--tab-active-ink);
 }
 
+.hermes-nav-btn {
+  min-width: max-content;
+}
+
+.hermes-nav-btn.active {
+  background: var(--tab-active-bg);
+  color: var(--tab-active-ink);
+}
+
+.hermes-pane[hidden] {
+  display: none;
+}
+
+.hermes-pane > div[id^="hermes"] {
+  overflow-x: auto;
+}
+
+.link-button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
 .settings-pane {
   width: 100%;
   margin: 0;

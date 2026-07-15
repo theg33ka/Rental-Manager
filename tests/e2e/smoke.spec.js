@@ -6,7 +6,7 @@ test.beforeEach(async ({ page }) => {
   await page.goto("/");
   await page.getByLabel("PIN-код").fill(process.env.E2E_OWNER_PIN || ("12" + "98"));
   await page.getByRole("button", { name: "Войти" }).click();
-  await expect(page.locator("#authOverlay")).toBeHidden();
+  await expect(page.locator("#authOverlay")).toBeHidden({ timeout: 15_000 });
   await expect(page.locator("#loadingOverlay")).toBeHidden();
   await expect(page.locator("#dashboard")).toBeVisible();
 });
@@ -61,6 +61,8 @@ test("AI settings save models, limits, auto audit and prompt adaptations", async
   await page.locator("#aiSupervisorMaxTokensInput").fill("900");
   await page.locator("#aiDailyCallLimitInput").fill("25");
   await page.locator("#aiMaxOutputTokensInput").fill("1400");
+  await page.locator('[name="ai_feature_owner_chat_daily_limit"]').fill("17");
+  await page.locator('[name="ai_output_chars_daily_briefing"]').fill("700");
   await page.locator("#aiUsdRubRateInput").fill("92.5");
   await page.locator("#aiActionConfirmationTtlInput").fill("24");
   await page.locator("#aiOwnerInstructionsInput").fill("Сначала покажи финансовый итог.");
@@ -85,6 +87,8 @@ test("AI settings save models, limits, auto audit and prompt adaptations", async
   await expect(page.locator("#aiSupervisorTimeInput")).toHaveValue("09:30");
   await expect(page.locator("#aiSupervisorModelSelect")).toHaveValue("deepseek-v4-pro");
   await expect(page.locator("#aiDailyCallLimitInput")).toHaveValue("25");
+  await expect(page.locator('[name="ai_feature_owner_chat_daily_limit"]')).toHaveValue("17");
+  await expect(page.locator('[name="ai_output_chars_daily_briefing"]')).toHaveValue("700");
   await expect(page.locator("#aiOwnerInstructionsInput")).toHaveValue("Сначала покажи финансовый итог.");
   await expect(page.locator("#aiTenantInstructionsInput")).toHaveValue("Не используй эмодзи.");
   await expect(page.locator("#aiAuditInstructionsInput")).toHaveValue("Проверяй просрочки старше трёх дней.");

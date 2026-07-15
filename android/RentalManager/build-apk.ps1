@@ -15,6 +15,11 @@ function Run-Native([string]$Command, [string[]]$Arguments) {
 }
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ManifestPath = Join-Path $Root "app\src\main\AndroidManifest.xml"
+[xml]$ManifestXml = Get-Content -LiteralPath $ManifestPath
+$AndroidNamespace = "http://schemas.android.com/apk/res/android"
+$VersionName = $ManifestXml.manifest.GetAttribute("versionName", $AndroidNamespace)
+$VersionedApk = Join-Path $Root "build\rental-manager-mobile-$VersionName.apk"
 $BuildTools = Join-Path $SdkRoot "build-tools\$BuildToolsVersion"
 $AndroidJar = Join-Path $SdkRoot "platforms\android-35\android.jar"
 $Javac = Join-Path $JavaHome "bin\javac.exe"
@@ -30,6 +35,7 @@ if (!(Test-Path $AndroidJar)) {
 
 Remove-Item -Recurse -Force "$Root\build\compiled", "$Root\build\gen", "$Root\build\classes", "$Root\build\dex" -ErrorAction SilentlyContinue
 Remove-Item -Force "$Root\build\unsigned.apk", "$Root\build\classes.jar", "$Root\build\rental-manager-mobile-aligned.apk", "$Root\build\rental-manager-mobile.apk" -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $VersionedApk -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force "$Root\build\compiled", "$Root\build\gen", "$Root\build\classes", "$Root\build\dex" | Out-Null
 
 Run-Native "$BuildTools\aapt2.exe" @("compile", "--dir", "$Root\app\src\main\res", "-o", "$Root\build\compiled")
@@ -50,4 +56,6 @@ if (!(Test-Path $KeystorePath)) {
 
 Run-Native "$BuildTools\apksigner.bat" @("sign", "--ks", $KeystorePath, "--ks-pass", "pass:android", "--key-pass", "pass:android", "--out", "$Root\build\rental-manager-mobile.apk", "$Root\build\rental-manager-mobile-aligned.apk")
 Run-Native "$BuildTools\apksigner.bat" @("verify", "--verbose", "$Root\build\rental-manager-mobile.apk")
-Get-Item "$Root\build\rental-manager-mobile.apk"
+Copy-Item -LiteralPath "$Root\build\rental-manager-mobile.apk" -Destination $VersionedApk
+Run-Native "$BuildTools\apksigner.bat" @("verify", "--verbose", $VersionedApk)
+Get-Item -LiteralPath $VersionedApk

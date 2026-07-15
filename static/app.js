@@ -26,10 +26,12 @@ const state = {
   manualDebt: null,
   quickReadingArmedUntil: 0,
   performance: null,
+  hermes: null,
+  hermesCaseFilters: { status: "", severity: "", propertyId: "" },
   loadFailures: [],
 };
 
-const ownerTabs = ["dashboard", "tenants", "rent", "meters", "utilities", "tariffs", "expenses", "reports", "dialogs", "messages", "automation", "settings"];
+const ownerTabs = ["dashboard", "tenants", "rent", "meters", "utilities", "tariffs", "expenses", "reports", "dialogs", "messages", "automation", "hermes", "settings"];
 const guestTabs = ["dashboard", "reports"];
 const panelMeta = {
   dashboard: ["Операционный центр", "Состояние портфеля"],
@@ -43,6 +45,7 @@ const panelMeta = {
   dialogs: ["Коммуникации", "Входящие диалоги"],
   messages: ["Коммуникации", "Рассылки и шаблоны"],
   automation: ["Управление", "Автоматизация"],
+  hermes: ["Hermes Core", "Центр управления AI"],
   settings: ["Система", "Настройки"],
 };
 let activeNavGroup = "overview";
@@ -657,6 +660,11 @@ function applySettings(settings = {}) {
     automation_utility_cadence: "daily_evening",
     ai_enabled: false,
     ai_tenant_free_text_enabled: true,
+    hermes_briefing_enabled: true,
+    hermes_auto_level_one_enabled: false,
+    hermes_auto_template_reminders: true,
+    hermes_mass_action_pin_threshold: "20",
+    ai_tenant_mode: "auto",
     ai_supervisor_enabled: true,
     ai_supervisor_cadence: "daily",
     ai_supervisor_weekday: "0",
@@ -666,6 +674,17 @@ function applySettings(settings = {}) {
     ai_action_confirmation_ttl_hours: "48",
     ai_daily_call_limit: "100",
     ai_max_output_tokens: "1500",
+    ai_feature_owner_chat_daily_limit: "50",
+    ai_feature_tenant_chat_daily_limit: "50",
+    ai_feature_case_details_daily_limit: "20",
+    ai_feature_skill_builder_daily_limit: "10",
+    ai_feature_deep_audit_daily_limit: "5",
+    ai_feature_key_test_daily_limit: "5",
+    ai_output_chars_daily_briefing: "800",
+    ai_output_chars_case_details: "1200",
+    ai_output_chars_owner_chat: "800",
+    ai_output_chars_tenant_chat: "500",
+    ai_output_chars_skill_proposal: "1000",
     ai_usd_rub_rate: "100",
     ai_owner_instructions: "",
     ai_tenant_instructions: "",
@@ -694,6 +713,11 @@ function applySettings(settings = {}) {
   const secret = qs("#telegramWebhookSecretInput");
   const aiEnabled = qs("#aiEnabledInput");
   const aiTenantFreeText = qs("#aiTenantFreeTextEnabledInput");
+  const hermesBriefingEnabled = qs("#hermesBriefingEnabledInput");
+  const hermesAutoLevelOne = qs("#hermesAutoLevelOneInput");
+  const hermesAutoTemplateReminders = qs("#hermesAutoTemplateRemindersInput");
+  const hermesMassActionPinThreshold = qs("#hermesMassActionPinThresholdInput");
+  const aiTenantMode = qs("#aiTenantModeInput");
   const aiSupervisorEnabled = qs("#aiSupervisorEnabledInput");
   const aiSupervisorCadence = qs("#aiSupervisorCadenceSelect");
   const aiSupervisorWeekday = qs("#aiSupervisorWeekdaySelect");
@@ -727,6 +751,11 @@ function applySettings(settings = {}) {
   if (ownerChat) ownerChat.value = state.settings.telegram_owner_chat_id || "";
   if (aiEnabled) aiEnabled.checked = Boolean(state.settings.ai_enabled);
   if (aiTenantFreeText) aiTenantFreeText.checked = Boolean(state.settings.ai_tenant_free_text_enabled);
+  if (hermesBriefingEnabled) hermesBriefingEnabled.checked = Boolean(state.settings.hermes_briefing_enabled);
+  if (hermesAutoLevelOne) hermesAutoLevelOne.checked = Boolean(state.settings.hermes_auto_level_one_enabled);
+  if (hermesAutoTemplateReminders) hermesAutoTemplateReminders.checked = Boolean(state.settings.hermes_auto_template_reminders);
+  if (hermesMassActionPinThreshold) hermesMassActionPinThreshold.value = state.settings.hermes_mass_action_pin_threshold || "20";
+  if (aiTenantMode) aiTenantMode.value = state.settings.ai_tenant_mode || "auto";
   if (aiSupervisorEnabled) aiSupervisorEnabled.checked = Boolean(state.settings.ai_supervisor_enabled);
   if (aiSupervisorCadence) aiSupervisorCadence.value = state.settings.ai_supervisor_cadence || "daily";
   if (aiSupervisorWeekday) aiSupervisorWeekday.value = String(state.settings.ai_supervisor_weekday ?? "0");
@@ -736,6 +765,9 @@ function applySettings(settings = {}) {
   if (aiActionConfirmationTtl) aiActionConfirmationTtl.value = state.settings.ai_action_confirmation_ttl_hours || "48";
   if (aiDailyCallLimit) aiDailyCallLimit.value = state.settings.ai_daily_call_limit || "100";
   if (aiMaxOutputTokens) aiMaxOutputTokens.value = state.settings.ai_max_output_tokens || "1500";
+  qsa("[data-hermes-setting]").forEach((input) => {
+    input.value = state.settings[input.name] ?? "";
+  });
   if (aiUsdRubRate) aiUsdRubRate.value = state.settings.ai_usd_rub_rate || "100";
   if (aiOwnerInstructions) aiOwnerInstructions.value = state.settings.ai_owner_instructions || "";
   if (aiTenantInstructions) aiTenantInstructions.value = state.settings.ai_tenant_instructions || "";
@@ -1150,6 +1182,234 @@ function hydrateForms() {
   setReportLinks();
 }
 
+async function loadHermesControlCenter() {
+  state.hermes = await api("/api/hermes");
+  renderHermes();
+}
+
+function hermesStatus(value) {
+  return {
+    new: "новый",
+    active: "активный",
+    waiting_owner: "ждёт владельца",
+    waiting_tenant: "ждёт жильца",
+    auto_monitoring: "под контролем",
+    snoozed: "отложен",
+    resolved: "закрыт",
+    pending: "ждёт подтверждения",
+    executed: "выполнено",
+    failed: "ошибка",
+    rejected: "отклонено",
+    expired: "истекло",
+    completed: "выполнено",
+    overdue: "просрочено",
+    active: "активно",
+  }[value] || value || "—";
+}
+
+function hermesEmpty(text) {
+  return `<p class="muted">${escapeHtml(text)}</p>`;
+}
+
+function updateHermesCaseFilter(key, value) {
+  state.hermesCaseFilters[key] = value;
+  renderHermes();
+}
+
+function renderHermes() {
+  const data = state.hermes;
+  if (!data) return;
+  const overview = data.overview || {};
+  const overviewRoot = qs("#hermesOverview");
+  if (overviewRoot) {
+    overviewRoot.innerHTML = [
+      ["Активные кейсы", overview.active_cases || 0, `${overview.waiting_owner || 0} ждут владельца`],
+      ["Подтверждения", overview.pending_proposals || 0, "изменения данных"],
+      ["Запланировано", overview.scheduled_actions || 0, "обязательства"],
+      ["Стоимость за месяц", money(overview.cost_month_rub || 0), `прогноз ${money(overview.monthly_forecast_rub || 0)}`],
+      ["Ошибки за 7 дней", overview.errors || 0, overview.enabled ? "Hermes включён" : "Hermes выключен"],
+    ].map(([label, value, note]) => `<article class="summary-card"><span>${label}</span><strong>${value}</strong><small>${note}</small></article>`).join("");
+  }
+
+  const filters = state.hermesCaseFilters;
+  const filteredCases = (data.cases || []).filter((item) =>
+    (!filters.status || item.status === filters.status)
+    && (!filters.severity || item.severity === filters.severity)
+    && (!filters.propertyId || String(item.property_id || "") === filters.propertyId)
+  );
+  const propertyFilter = qs("#hermesCasePropertyFilter");
+  if (propertyFilter) {
+    const currentValue = filters.propertyId;
+    propertyFilter.innerHTML = `<option value="">Все объекты</option>${(state.bootstrap?.objects || []).map((item) => `<option value="${item.id}">${escapeHtml(item.short_code || item.name)}</option>`).join("")}`;
+    propertyFilter.value = currentValue;
+  }
+  const statusFilter = qs("#hermesCaseStatusFilter");
+  const severityFilter = qs("#hermesCaseSeverityFilter");
+  if (statusFilter) statusFilter.value = filters.status;
+  if (severityFilter) severityFilter.value = filters.severity;
+  const caseRows = filteredCases.map((item) => `
+    <tr>
+      <td><button class="link-button" type="button" onclick="showHermesCase(${item.id})">${escapeHtml(item.label)}</button></td>
+      <td><strong>${escapeHtml(item.title)}</strong><br><span class="muted">${escapeHtml(item.compact_summary)}</span></td>
+      <td><span class="pill ${item.severity === "critical" ? "danger" : item.severity === "high" ? "warn" : ""}">${escapeHtml(hermesStatus(item.status))}</span></td>
+      <td>${Number(item.priority_score || 0).toFixed(1)}</td>
+      <td>${money(item.amount_total || 0)}</td>
+      <td><div class="attention-actions"><button class="mini" onclick="hermesCaseAction(${item.id}, 'snooze')">На день</button><button class="mini danger" onclick="hermesCaseAction(${item.id}, 'close')">Закрыть</button></div></td>
+    </tr>
+  `).join("");
+  const casesRoot = qs("#hermesCases");
+  if (casesRoot) casesRoot.innerHTML = table(["Кейс", "Ситуация", "Статус", "Приоритет", "Сумма", "Действия"], caseRows);
+
+  const commitmentRows = (data.commitments || []).map((item) => `
+    <tr><td>#${item.id}</td><td>${escapeHtml(item.description)}</td><td>${escapeHtml(hermesStatus(item.status))}</td><td>${formatDateTime(item.due_at)}</td><td><div class="attention-actions"><button class="mini primary" onclick="hermesCommitmentAction(${item.id}, 'complete')">Готово</button><button class="mini" onclick="hermesCommitmentAction(${item.id}, 'postpone')">Перенести</button></div></td></tr>
+  `).join("");
+  const commitmentsRoot = qs("#hermesCommitments");
+  if (commitmentsRoot) commitmentsRoot.innerHTML = table(["ID", "Обязательство", "Статус", "Срок", "Действия"], commitmentRows);
+
+  const preferenceRows = (data.preferences || []).map((item) => `
+    <tr><td>${escapeHtml(item.scope)}</td><td>${escapeHtml(item.key)}</td><td><code>${escapeHtml(JSON.stringify(item.value))}</code></td><td>${escapeHtml(item.mode)}</td><td>${item.enabled ? '<span class="pill ok">включено</span>' : '<span class="pill">выключено</span>'}</td><td><div class="attention-actions"><button class="mini" onclick="toggleHermesPreference(${item.id}, ${!item.enabled})">${item.enabled ? "Выключить" : "Включить"}</button><button class="mini danger" onclick="disableHermesPreference(${item.id})">Удалить</button></div></td></tr>
+  `).join("");
+  const preferencesRoot = qs("#hermesPreferences");
+  if (preferencesRoot) preferencesRoot.innerHTML = table(["Область", "Ключ", "Значение", "Режим", "Статус", "Действия"], preferenceRows);
+
+  const skillRows = (data.skills || []).map((item) => `
+    <tr><td><strong>${escapeHtml(item.name)}</strong><br><span class="muted">v${item.version} · ${escapeHtml(item.scope)}</span></td><td>${escapeHtml(item.goal)}</td><td>${escapeHtml(item.trigger_type)}</td><td>${escapeHtml(item.status)}</td><td><div class="attention-actions"><button class="mini" onclick="hermesSkillAction(${item.id}, 'dry-run')">Dry-run</button>${item.status === "active" ? `<button class="mini" onclick="hermesSkillAction(${item.id}, 'disable')">Выключить</button>` : `<button class="mini primary" onclick="hermesSkillAction(${item.id}, 'activate')">Включить</button>`}${item.previous_version_id ? `<button class="mini" onclick="hermesSkillAction(${item.id}, 'rollback')">Откатить</button>` : ""}</div></td></tr>
+  `).join("");
+  const skillsRoot = qs("#hermesSkills");
+  if (skillsRoot) skillsRoot.innerHTML = table(["Навык", "Цель", "Триггер", "Статус", "Действия"], skillRows);
+
+  const strategyRows = (data.tenant_strategies || []).map((item) => `
+    <tr><td>${item.contract_id}</td><td>${escapeHtml(item.preferred_channel)}</td><td>${escapeHtml(item.preferred_contact_window)}</td><td>${escapeHtml(item.reminder_stage)}</td><td>${item.broken_promises_count || 0}</td><td><div class="attention-actions"><button class="mini" onclick="editHermesStrategy(${item.id})">Изменить</button><button class="mini" onclick="resetHermesStrategy(${item.id})">Сбросить</button></div></td></tr>
+  `).join("");
+  const strategiesRoot = qs("#hermesStrategies");
+  if (strategiesRoot) strategiesRoot.innerHTML = table(["Договор", "Канал", "Окно", "Этап", "Нарушено обещаний", "Действия"], strategyRows);
+
+  const proposalRows = (data.proposals || []).map((item) => `
+    <tr><td>#${item.id}</td><td><strong>${escapeHtml(item.action_type)}</strong><br><span class="muted">${escapeHtml(item.preview)}</span><details><summary>Параметры и аудит</summary><pre class="message-preview">${escapeHtml(JSON.stringify({ actor: item.actor || item.requested_by, parameters: item.parameters, validation_error: item.error }, null, 2))}</pre></details></td><td><span class="pill ${item.safety_level >= 3 ? "danger" : item.safety_level === 2 ? "warn" : ""}">уровень ${item.safety_level}</span></td><td>${escapeHtml(hermesStatus(item.status))}</td><td>${item.status === "pending" ? `<div class="attention-actions"><button class="mini primary" onclick="decideHermesProposal(${item.id}, 'confirm', ${item.safety_level || 0})">Подтвердить</button><button class="mini danger" onclick="decideHermesProposal(${item.id}, 'reject', ${item.safety_level || 0})">Отклонить</button></div>` : escapeHtml(item.result || item.error || "—")}</td></tr>
+  `).join("");
+  const proposalsRoot = qs("#hermesProposals");
+  if (proposalsRoot) proposalsRoot.innerHTML = table(["ID", "Предложение", "Безопасность", "Статус", "Решение"], proposalRows);
+
+  const featureRows = Object.entries(data.usage?.features || {}).map(([feature, item]) => {
+    const limit = Number(data.settings?.[`ai_feature_${feature}_daily_limit`] || 0);
+    const todayCalls = Number(item.today_calls || 0);
+    const ratio = limit > 0 ? Math.round((todayCalls / limit) * 100) : 0;
+    const warning = ratio >= 95 ? "danger" : ratio >= 80 ? "warn" : ratio >= 50 ? "ok" : "";
+    return `
+    <tr><td>${escapeHtml(feature)}</td><td>${item.calls || 0}</td><td>${item.tokens || 0}</td><td>${money(item.cost_rub || 0)}</td><td>${escapeHtml((item.models || []).join(", "))}</td><td>${limit ? `<span class="pill ${warning}">${todayCalls}/${limit} · ${ratio}%</span>` : "—"}</td></tr>`;
+  }).join("");
+  const usageRoot = qs("#hermesUsage");
+  if (usageRoot) usageRoot.innerHTML = `<div class="pill-row"><span class="pill">месяц ${money(data.usage?.month_spent_rub || 0)}</span><span class="pill">прогноз ${money(data.usage?.month_forecast_rub || 0)}</span>${(overview.budget_warnings || []).map((value) => `<span class="pill ${value >= 95 ? "danger" : "warn"}">бюджет ${value}%</span>`).join("")}</div>${table(["Функция", "Вызовы", "Токены", "Стоимость", "Модели", "Дневной лимит"], featureRows)}`;
+
+  const runRows = (data.runs || []).map((item) => `
+    <tr><td><button class="link-button" onclick="showHermesRun(${item.id})">${escapeHtml(item.run_id)}</button></td><td>${escapeHtml(item.feature)}</td><td>${escapeHtml(item.model)}</td><td>${item.input_tokens || 0} / ${item.output_tokens || 0}</td><td>${money(item.estimated_cost || 0)}</td><td>${escapeHtml(item.status)}</td></tr>
+  `).join("");
+  const runsRoot = qs("#hermesRuns");
+  if (runsRoot) runsRoot.innerHTML = table(["Run", "Функция", "Модель", "Вход / выход", "Стоимость", "Статус"], runRows);
+}
+
+async function showHermesCase(caseId) {
+  const item = await api(`/api/hermes/cases/${caseId}`);
+  const root = qs("#hermesCaseDetails");
+  if (!root) return;
+  root.hidden = false;
+  root.innerHTML = `<div class="section-title"><div><h3>${escapeHtml(item.label)} · ${escapeHtml(item.title)}</h3><span>${escapeHtml(hermesStatus(item.status))}</span></div><button class="mini" onclick="this.closest('#hermesCaseDetails').hidden=true">Закрыть</button></div><p>${escapeHtml(item.rolling_summary)}</p><pre class="message-preview">${escapeHtml(JSON.stringify({ metadata: item.metadata, commitments: item.commitments, proposals: item.proposals, history: item.history }, null, 2))}</pre>`;
+  root.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+async function hermesCaseAction(caseId, action) {
+  if (action === "close" && !confirm("Закрыть кейс? Если исходная проблема останется, он будет открыт снова.")) return;
+  await api(`/api/hermes/cases/${caseId}/${action}`, { method: "POST", body: "{}" });
+  toast(action === "close" ? "Кейс закрыт" : "Кейс отложен на день");
+  await loadHermesControlCenter();
+}
+
+async function hermesCommitmentAction(commitmentId, action) {
+  await api(`/api/hermes/commitments/${commitmentId}/${action}`, { method: "POST", body: "{}" });
+  toast(action === "complete" ? "Обязательство выполнено" : "Обязательство перенесено на день");
+  await loadHermesControlCenter();
+}
+
+async function toggleHermesPreference(preferenceId, enabled) {
+  await api(`/api/hermes/preferences/${preferenceId}`, { method: "PATCH", body: JSON.stringify({ enabled }) });
+  await loadHermesControlCenter();
+}
+
+async function disableHermesPreference(preferenceId) {
+  if (!confirm("Выключить это предпочтение?")) return;
+  await api(`/api/hermes/preferences/${preferenceId}`, { method: "DELETE" });
+  await loadHermesControlCenter();
+}
+
+async function hermesSkillAction(skillId, action) {
+  const result = await api(`/api/hermes/skills/${skillId}/${action}`, { method: "POST", body: "{}" });
+  if (action === "dry-run") alert(JSON.stringify(result, null, 2));
+  else toast("Статус навыка обновлён");
+  await loadHermesControlCenter();
+}
+
+async function resetHermesStrategy(strategyId) {
+  if (!confirm("Сбросить стратегию к безопасным значениям?")) return;
+  await api(`/api/hermes/strategies/${strategyId}/reset`, { method: "POST", body: "{}" });
+  await loadHermesControlCenter();
+}
+
+async function editHermesStrategy(strategyId) {
+  const item = (state.hermes?.tenant_strategies || []).find((row) => row.id === strategyId);
+  if (!item) return;
+  const channel = prompt("Канал связи", item.preferred_channel || "telegram");
+  if (!channel) return;
+  const contactWindow = prompt("Окно связи, например 10:00-20:00", item.preferred_contact_window || "10:00-20:00");
+  if (!contactWindow) return;
+  const thresholdRaw = prompt("Эскалация после числа попыток", String(item.escalation_threshold || 3));
+  if (!thresholdRaw) return;
+  const escalationThreshold = Number(thresholdRaw);
+  if (!Number.isInteger(escalationThreshold) || escalationThreshold < 1 || escalationThreshold > 20) {
+    toast("Порог эскалации должен быть от 1 до 20");
+    return;
+  }
+  await api(`/api/hermes/strategies/${strategyId}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      preferred_channel: channel.trim(),
+      preferred_contact_window: contactWindow.trim(),
+      escalation_threshold: escalationThreshold,
+      strategy_source: "owner_manual",
+    }),
+  });
+  toast("Стратегия обновлена");
+  await loadHermesControlCenter();
+}
+
+async function decideHermesProposal(proposalId, decision, safetyLevel) {
+  if (decision === "reject") {
+    await api(`/api/hermes/proposals/${proposalId}/reject`, { method: "POST", body: "{}" });
+  } else {
+    const confirmationPin = safetyLevel >= 3 ? prompt("Критическое или массовое действие. Повторно введите PIN владельца:", "") : "";
+    if (safetyLevel >= 3 && !confirmationPin) return;
+    await api(`/api/hermes/proposals/${proposalId}/confirm`, { method: "POST", body: JSON.stringify({ confirmation_pin: confirmationPin }) });
+  }
+  toast(decision === "reject" ? "Предложение отклонено" : "Предложение выполнено");
+  await loadHermesControlCenter();
+}
+
+function showHermesBriefingPreview() {
+  const preview = state.hermes?.briefing_preview;
+  if (!preview?.text) {
+    alert("Для сводки сейчас нет новых или изменившихся кейсов.");
+    return;
+  }
+  alert(`${preview.text}\n\n${preview.length}/${preview.limit} символов`);
+}
+
+async function showHermesRun(runId) {
+  const item = await api(`/api/hermes/runs/${runId}`);
+  const root = qs("#hermesRunDetails");
+  if (!root) return;
+  root.hidden = false;
+  root.innerHTML = `<div class="section-title"><h3>Run ${escapeHtml(item.run_id)}</h3><button class="mini" onclick="this.closest('#hermesRunDetails').hidden=true">Закрыть</button></div><pre class="message-preview">${escapeHtml(JSON.stringify(item, null, 2))}</pre>`;
+}
+
 function renderAll() {
   if (isGuest()) {
     renderGuestView();
@@ -1171,6 +1431,7 @@ function renderAll() {
   renderSuspiciousReceipts();
   renderAutomation();
   renderPerformanceMonitor();
+  renderHermes();
   renderManualAllocationModal();
   renderManualDebtModal();
   setReportLinks();
@@ -4111,6 +4372,8 @@ function bindEvents() {
       filterActivePanel("");
       if (tab.dataset.tab === "dialogs") {
         loadBotDialogs().catch((error) => toast(error.message));
+      } else if (tab.dataset.tab === "hermes") {
+        loadHermesControlCenter().catch((error) => toast(error.message));
       }
     });
   });
@@ -4125,8 +4388,18 @@ function bindEvents() {
       });
     });
   });
+  qsa(".hermes-nav-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      qsa(".hermes-nav-btn").forEach((item) => item.classList.toggle("active", item === button));
+      qsa(".hermes-pane").forEach((pane) => {
+        pane.hidden = pane.dataset.hermesPanel !== button.dataset.hermesTarget;
+      });
+    });
+  });
 
   on("#refreshBtn", "click", () => loadAll({ fullScreen: true }));
+  on("#hermesRefreshBtn", "click", () => loadHermesControlCenter().catch((error) => toast(error.message)));
+  on("#hermesBriefingPreviewBtn", "click", showHermesBriefingPreview);
   on("#quickActionsBtn", "click", openQuickActions);
   on("#globalSearch", "input", (event) => filterActivePanel(event.currentTarget.value));
   on("#pinLoginForm", "submit", submitPinLogin);

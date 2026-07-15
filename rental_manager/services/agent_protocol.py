@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import json
 import re
 from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 ALLOWED_ACTION_TYPES = {
@@ -23,15 +24,33 @@ ALLOWED_TENANT_INTENTS = {
     "move_out_request",
     "complaint",
     "excuse",
+    "rent_question",
+    "utility_question",
+    "receipt_submission",
+    "amount_dispute",
+    "maintenance_issue",
+    "emergency",
+    "conflict",
+    "owner_request",
+    "general_question",
+    "unsupported",
 }
 
 
-@dataclass(frozen=True)
-class AgentEnvelope:
+class AgentEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     reply: str
-    actions: list[dict[str, Any]] = field(default_factory=list)
-    memories: list[dict[str, Any]] = field(default_factory=list)
     intent: str = "general"
+    requested_reads: list[dict[str, Any]] = Field(default_factory=list)
+    proposed_actions: list[dict[str, Any]] = Field(default_factory=list)
+    memory_changes: list[dict[str, Any]] = Field(default_factory=list)
+    commitment_changes: list[dict[str, Any]] = Field(default_factory=list)
+    skill_proposals: list[dict[str, Any]] = Field(default_factory=list)
+    confidence: float = 0
+    need_disambiguation: bool = False
+    actions: list[dict[str, Any]] = Field(default_factory=list)
+    memories: list[dict[str, Any]] = Field(default_factory=list)
     promise_date: str = ""
     needs_owner: bool = False
     owner_summary: str = ""
@@ -140,6 +159,12 @@ def normalize_actions(value: Any) -> list[dict[str, Any]]:
     return result
 
 
+def normalize_object_list(value: Any, *, limit: int = 5) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value[:limit] if isinstance(item, dict)]
+
+
 def parse_agent_envelope(raw: str) -> AgentEnvelope:
     parsed = parse_json_object(raw)
     if parsed is None:
@@ -156,11 +181,24 @@ def parse_agent_envelope(raw: str) -> AgentEnvelope:
     intent = str(parsed.get("intent") or "general").strip().lower()
     if intent not in ALLOWED_TENANT_INTENTS:
         intent = "general"
+    actions = normalize_actions(parsed.get("proposed_actions") or parsed.get("actions"))
+    memories = normalize_memories(parsed.get("memory_changes") or parsed.get("memory") or parsed.get("memories"))
+    try:
+        confidence = min(1.0, max(0.0, float(parsed.get("confidence") or 0)))
+    except (TypeError, ValueError):
+        confidence = 0.0
     return AgentEnvelope(
         reply=reply,
-        actions=normalize_actions(parsed.get("actions")),
-        memories=normalize_memories(parsed.get("memory") or parsed.get("memories")),
         intent=intent,
+        requested_reads=normalize_object_list(parsed.get("requested_reads")),
+        proposed_actions=actions,
+        memory_changes=memories,
+        commitment_changes=normalize_object_list(parsed.get("commitment_changes")),
+        skill_proposals=normalize_object_list(parsed.get("skill_proposals"), limit=3),
+        confidence=confidence,
+        need_disambiguation=bool(parsed.get("need_disambiguation")),
+        actions=actions,
+        memories=memories,
         promise_date=_bounded_text(parsed.get("promise_date"), 20),
         needs_owner=bool(parsed.get("needs_owner")),
         owner_summary=_bounded_reply(parsed.get("owner_summary"), 1200),

@@ -219,8 +219,8 @@
       @keyframes loading-rotate { to { transform: rotate(360deg); } }
       @keyframes loading-dot { 0%, 100% { opacity: .35; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-2px); } }
     </style>
-    <link rel="stylesheet" href="/static/styles.css?v=2026-07-05-dialogs" />
-    <link rel="stylesheet" href="/static/premium.css?v=2026-07-11-operational" />
+    <link rel="stylesheet" href="/static/styles.css?v=2026-07-15-hermes" />
+    <link rel="stylesheet" href="/static/premium.css?v=2026-07-15-hermes" />
   </head>
   <body class="auth-locked app-loading">
     <div id="loadingOverlay" class="loading-overlay" role="status" aria-live="polite">
@@ -301,6 +301,7 @@
           <button class="tab" data-group="communications" data-tab="dialogs">Входящие</button>
           <button class="tab" data-group="communications" data-tab="messages">Рассылки и платежи</button>
           <button class="tab" data-group="administration" data-tab="automation">Автоматизация</button>
+          <button class="tab" data-group="administration" data-tab="hermes">Hermes</button>
           <button class="tab" data-group="administration" data-tab="settings">Настройки</button>
         </nav>
 
@@ -685,6 +686,52 @@
         <div id="automationList" class="stack"></div>
       </section>
 
+      <section class="panel" id="hermes">
+        <div class="page-heading">
+          <div><p class="eyebrow">Hermes Core</p><h2>Центр управления AI</h2><p class="muted">Кейсы, обязательства, правила, подтверждения и стоимость в одном месте.</p></div>
+          <div class="page-heading-actions">
+            <button id="hermesBriefingPreviewBtn" type="button">Предпросмотр сводки</button>
+            <button id="hermesRefreshBtn" class="primary" type="button">Обновить</button>
+          </div>
+        </div>
+        <div class="summary-grid" id="hermesOverview"></div>
+        <div class="settings-nav hermes-nav" role="tablist" aria-label="Разделы Hermes">
+          <button type="button" class="hermes-nav-btn active" data-hermes-target="cases">Кейсы</button>
+          <button type="button" class="hermes-nav-btn" data-hermes-target="commitments">Обязательства</button>
+          <button type="button" class="hermes-nav-btn" data-hermes-target="preferences">Предпочтения</button>
+          <button type="button" class="hermes-nav-btn" data-hermes-target="skills">Навыки</button>
+          <button type="button" class="hermes-nav-btn" data-hermes-target="strategies">Стратегии</button>
+          <button type="button" class="hermes-nav-btn" data-hermes-target="proposals">Подтверждения</button>
+          <button type="button" class="hermes-nav-btn" data-hermes-target="usage">Стоимость</button>
+          <button type="button" class="hermes-nav-btn" data-hermes-target="debug">Отладка</button>
+        </div>
+        <section class="hermes-pane stack" data-hermes-panel="cases">
+          <div class="section-title"><div><h3>Операционные кейсы</h3><span>Приоритет строится детерминированно по состоянию данных.</span></div></div>
+          <div class="form-grid compact hermes-filters">
+            <label>Статус
+              <select id="hermesCaseStatusFilter" onchange="updateHermesCaseFilter('status', this.value)">
+                <option value="">Все</option><option value="new">Новые</option><option value="active">Активные</option><option value="waiting_owner">Ждут владельца</option><option value="waiting_tenant">Ждут жильца</option><option value="auto_monitoring">Под контролем</option><option value="snoozed">Отложенные</option><option value="resolved">Закрытые</option>
+              </select>
+            </label>
+            <label>Важность
+              <select id="hermesCaseSeverityFilter" onchange="updateHermesCaseFilter('severity', this.value)">
+                <option value="">Любая</option><option value="critical">Критическая</option><option value="high">Высокая</option><option value="medium">Средняя</option><option value="low">Низкая</option>
+              </select>
+            </label>
+            <label>Объект<select id="hermesCasePropertyFilter" onchange="updateHermesCaseFilter('propertyId', this.value)"><option value="">Все объекты</option></select></label>
+          </div>
+          <div id="hermesCases"></div>
+          <div id="hermesCaseDetails" class="card muted-box" hidden></div>
+        </section>
+        <section class="hermes-pane stack" data-hermes-panel="commitments" hidden><div class="section-title"><h3>Обязательства владельца</h3></div><div id="hermesCommitments"></div></section>
+        <section class="hermes-pane stack" data-hermes-panel="preferences" hidden><div class="section-title"><h3>Структурированные предпочтения</h3></div><div id="hermesPreferences"></div></section>
+        <section class="hermes-pane stack" data-hermes-panel="skills" hidden><div class="section-title"><h3>Декларативные навыки</h3></div><div id="hermesSkills"></div></section>
+        <section class="hermes-pane stack" data-hermes-panel="strategies" hidden><div class="section-title"><h3>Стратегии по жильцам</h3></div><div id="hermesStrategies"></div></section>
+        <section class="hermes-pane stack" data-hermes-panel="proposals" hidden><div class="section-title"><h3>Предложения действий</h3><span>Изменения уровня 2–3 выполняются только после явного подтверждения.</span></div><div id="hermesProposals"></div></section>
+        <section class="hermes-pane stack" data-hermes-panel="usage" hidden><div class="section-title"><h3>Использование AI</h3></div><div id="hermesUsage"></div></section>
+        <section class="hermes-pane stack" data-hermes-panel="debug" hidden><div class="section-title"><h3>Запуски и Context Manifest</h3></div><div id="hermesRuns"></div><div id="hermesRunDetails" class="card muted-box" hidden></div></section>
+      </section>
+
       <section class="panel" id="settings">
         <div class="page-heading">
           <div><p class="eyebrow">Система</p><h2>Настройки</h2><p class="muted">Интеграции, безопасность, реквизиты и обслуживание.</p></div>
@@ -721,6 +768,17 @@
             <p class="eyebrow wide">Доступ и модели</p>
             <label class="check wide"><input type="checkbox" name="ai_enabled" id="aiEnabledInput" /> Включить AI-функции</label>
             <label class="check wide"><input type="checkbox" name="ai_tenant_free_text_enabled" id="aiTenantFreeTextEnabledInput" /> Ответы на свободный текст арендаторов</label>
+            <label class="check wide"><input type="checkbox" name="hermes_briefing_enabled" id="hermesBriefingEnabledInput" /> Ежедневная детерминированная сводка Hermes</label>
+            <label class="check wide"><input type="checkbox" name="hermes_auto_level_one_enabled" id="hermesAutoLevelOneInput" /> Разрешить автономные внутренние действия уровня 1</label>
+            <label class="check wide"><input type="checkbox" name="hermes_auto_template_reminders" id="hermesAutoTemplateRemindersInput" /> Разрешить утверждённые шаблонные напоминания</label>
+            <label>Режим общения с жильцами
+              <select name="ai_tenant_mode" id="aiTenantModeInput">
+                <option value="auto">Автоматический</option>
+                <option value="draft_only">Только черновики владельцу</option>
+                <option value="finance_only">Только финансовые сценарии</option>
+              </select>
+            </label>
+            <label>Повторный PIN для массовых действий от<input type="number" min="1" max="1000" name="hermes_mass_action_pin_threshold" id="hermesMassActionPinThresholdInput" /></label>
             <label class="wide">API-ключ DeepSeek<input type="password" name="deepseek_api_key" id="deepseekApiKeyInput" autocomplete="new-password" placeholder="Оставьте пустым, чтобы не менять" /></label>
             <label>Модель диалогов
               <select name="deepseek_model" id="deepseekModelSelect">
@@ -768,6 +826,22 @@
             <label>Расчётный курс USD/RUB<input type="number" min="1" max="1000" step="0.1" name="ai_usd_rub_rate" id="aiUsdRubRateInput" /></label>
             <label>Подтверждение действий действует, часов<input type="number" min="1" max="168" step="1" name="ai_action_confirmation_ttl_hours" id="aiActionConfirmationTtlInput" /></label>
             <p class="muted wide">Ноль в бюджете или дневном лимите означает отсутствие соответствующего ограничения. Общий лимит токенов жёстко ограничивает любой ответ.</p>
+
+            <p class="eyebrow wide">Дневные лимиты по функциям</p>
+            <label>Диалоги владельца<input data-hermes-setting type="number" min="0" max="100000" step="1" name="ai_feature_owner_chat_daily_limit" /></label>
+            <label>Диалоги арендаторов<input data-hermes-setting type="number" min="0" max="100000" step="1" name="ai_feature_tenant_chat_daily_limit" /></label>
+            <label>Подробности кейсов<input data-hermes-setting type="number" min="0" max="100000" step="1" name="ai_feature_case_details_daily_limit" /></label>
+            <label>Конструктор навыков<input data-hermes-setting type="number" min="0" max="100000" step="1" name="ai_feature_skill_builder_daily_limit" /></label>
+            <label>Глубокий аудит<input data-hermes-setting type="number" min="0" max="100000" step="1" name="ai_feature_deep_audit_daily_limit" /></label>
+            <label>Проверка API-ключа<input data-hermes-setting type="number" min="0" max="100000" step="1" name="ai_feature_key_test_daily_limit" /></label>
+            <p class="muted wide">Ноль отключает отдельный дневной лимит. Общий лимит запросов и бюджет продолжают действовать.</p>
+
+            <p class="eyebrow wide">Длина ответов, символов</p>
+            <label>Ежедневная сводка<input data-hermes-setting type="number" min="200" max="2000" step="50" name="ai_output_chars_daily_briefing" /></label>
+            <label>Подробности кейса<input data-hermes-setting type="number" min="300" max="4000" step="100" name="ai_output_chars_case_details" /></label>
+            <label>Ответ владельцу<input data-hermes-setting type="number" min="200" max="4000" step="100" name="ai_output_chars_owner_chat" /></label>
+            <label>Ответ арендатору<input data-hermes-setting type="number" min="100" max="2000" step="50" name="ai_output_chars_tenant_chat" /></label>
+            <label>Карточка навыка<input data-hermes-setting type="number" min="300" max="3000" step="100" name="ai_output_chars_skill_proposal" /></label>
 
             <p class="eyebrow wide">Адаптация поведения</p>
             <label class="wide">Инструкции для диалогов владельца<textarea name="ai_owner_instructions" id="aiOwnerInstructionsInput" rows="5" maxlength="6000" placeholder="Например: отвечай сначала кратким финансовым итогом, затем списком рисков"></textarea></label>

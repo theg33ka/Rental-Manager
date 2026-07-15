@@ -4,8 +4,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 import os
+from typing import Protocol
 
-from rental_manager.services.deepseek_client import DeepSeekClient
+from rental_manager.services.deepseek_client import DeepSeekClient, DeepSeekResult
 
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
@@ -20,11 +21,33 @@ class AiProviderConfigError(ValueError):
     pass
 
 
+class ChatCompletionClient(Protocol):
+    def chat_completions(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, str]],
+        temperature: float = 0.2,
+        max_tokens: int = 1200,
+        session_id: str = "",
+    ) -> DeepSeekResult: ...
+
+
 @dataclass(frozen=True)
 class AiProviderRuntime:
     provider: AiProvider
     model: str
-    client: DeepSeekClient
+    client: ChatCompletionClient
+
+
+class AiProviderAdapter(Protocol):
+    def build(
+        self,
+        *,
+        requested_model: str,
+        deepseek_api_key: str,
+        environ: Mapping[str, str],
+    ) -> AiProviderRuntime: ...
 
 
 def _env(source: Mapping[str, str], name: str, default: str = "") -> str:
@@ -65,6 +88,42 @@ def provider_chain(environ: Mapping[str, str] | None = None) -> list[AiProvider]
     return [AiProvider.DEEPSEEK]
 
 
+class DeepSeekProviderAdapter:
+    def build(
+        self,
+        *,
+        requested_model: str,
+        deepseek_api_key: str,
+        environ: Mapping[str, str],
+    ) -> AiProviderRuntime:
+        model = normalize_deepseek_model(_env(environ, "DEEPSEEK_MODEL") or requested_model)
+        api_key = _env(environ, "DEEPSEEK_API_KEY") or (deepseek_api_key or "").strip()
+        if not api_key:
+            raise AiProviderConfigError("API-ключ DeepSeek не задан")
+        client = DeepSeekClient(
+            _env(environ, "DEEPSEEK_BASE_URL", DEEPSEEK_BASE_URL),
+            api_key,
+            timeout_seconds=_env_int(
+                environ,
+                "DEEPSEEK_REQUEST_TIMEOUT_SECONDS",
+                60,
+                minimum=10,
+                maximum=300,
+            ),
+            provider_name=AiProvider.DEEPSEEK.value,
+        )
+        return AiProviderRuntime(provider=AiProvider.DEEPSEEK, model=model, client=client)
+
+
+PROVIDER_ADAPTERS: dict[AiProvider, AiProviderAdapter] = {
+    AiProvider.DEEPSEEK: DeepSeekProviderAdapter(),
+}
+
+
+def register_provider_adapter(provider: AiProvider, adapter: AiProviderAdapter) -> None:
+    PROVIDER_ADAPTERS[provider] = adapter
+
+
 def build_provider_runtime(
     provider: AiProvider,
     *,
@@ -72,28 +131,14 @@ def build_provider_runtime(
     deepseek_api_key: str = "",
     environ: Mapping[str, str] | None = None,
 ) -> AiProviderRuntime:
-    if provider != AiProvider.DEEPSEEK:
-        raise AiProviderConfigError("Поддерживается только прямой DeepSeek API")
-
-    source = environ if environ is not None else os.environ
-    model = normalize_deepseek_model(_env(source, "DEEPSEEK_MODEL") or requested_model)
-    api_key = _env(source, "DEEPSEEK_API_KEY") or (deepseek_api_key or "").strip()
-    if not api_key:
-        raise AiProviderConfigError("API-ключ DeepSeek не задан")
-
-    client = DeepSeekClient(
-        _env(source, "DEEPSEEK_BASE_URL", DEEPSEEK_BASE_URL),
-        api_key,
-        timeout_seconds=_env_int(
-            source,
-            "DEEPSEEK_REQUEST_TIMEOUT_SECONDS",
-            60,
-            minimum=10,
-            maximum=300,
-        ),
-        provider_name=provider.value,
+    adapter = PROVIDER_ADAPTERS.get(provider)
+    if not adapter:
+        raise AiProviderConfigError(f"LLM provider {provider} не зарегистрирован")
+    return adapter.build(
+        requested_model=requested_model,
+        deepseek_api_key=deepseek_api_key,
+        environ=environ if environ is not None else os.environ,
     )
-    return AiProviderRuntime(provider=provider, model=model, client=client)
 
 
 def build_provider_chain(

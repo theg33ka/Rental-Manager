@@ -633,7 +633,7 @@ class OwnerChatRoutingTests(AgentRuntimeTestCase):
 
         mocked_agent.assert_called_once_with(session, 999, "Кого сегодня надо пнуть?")
 
-    def test_debt_question_never_sends_empty_answer_before_proposals(self) -> None:
+    def test_debt_question_is_answered_deterministically_without_proposals(self) -> None:
         with self.Session() as session:
             lease, charge = self.create_lease(session)
             conversation = AiConversation(chat_id="999", role="owner")
@@ -669,7 +669,7 @@ class OwnerChatRoutingTests(AgentRuntimeTestCase):
         sent_text = mocked_send.call_args.args[2]
         self.assertIn("3 200,00 ₽", sent_text)
         self.assertIn("Telegram не привязан", sent_text)
-        mocked_proposal.assert_called_once()
+        mocked_proposal.assert_not_called()
 
     def test_text_yes_never_confirms_pending_action(self) -> None:
         with self.Session() as session:

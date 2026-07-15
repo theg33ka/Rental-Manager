@@ -235,6 +235,12 @@ class AgentActionProposal(Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     executed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    case_id: Mapped[int | None] = mapped_column(ForeignKey("operational_cases.id"), nullable=True)
+    safety_level: Mapped[int] = mapped_column(Integer, default=2)
+    idempotency_key: Mapped[str] = mapped_column(String(160), default="")
+    group_key: Mapped[str] = mapped_column(String(160), default="")
+    validation_hash: Mapped[str] = mapped_column(String(128), default="")
+    confirmed_by: Mapped[str] = mapped_column(String(80), default="")
 
     conversation: Mapped[AiConversation | None] = relationship()
     lease: Mapped[Lease | None] = relationship()
@@ -306,6 +312,268 @@ class AgentTask(Base):
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     lease: Mapped[Lease | None] = relationship()
+
+
+class DomainEvent(Base):
+    __tablename__ = "domain_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(80), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(200), unique=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
+    entity_type: Mapped[str] = mapped_column(String(80), default="")
+    entity_id: Mapped[str] = mapped_column(String(80), default="")
+    property_id: Mapped[int | None] = mapped_column(ForeignKey("rental_objects.id"), nullable=True)
+    apartment_id: Mapped[int | None] = mapped_column(ForeignKey("apartments.id"), nullable=True)
+    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True)
+    contract_id: Mapped[int | None] = mapped_column(ForeignKey("leases.id"), nullable=True)
+    actor_type: Mapped[str] = mapped_column(String(40), default="system")
+    source: Mapped[str] = mapped_column(String(80), default="backend")
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    correlation_id: Mapped[str] = mapped_column(String(120), default="", index=True)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class OperationalCase(Base):
+    __tablename__ = "operational_cases"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    case_key: Mapped[str] = mapped_column(String(200), unique=True)
+    case_type: Mapped[str] = mapped_column(String(80), index=True)
+    status: Mapped[str] = mapped_column(String(40), default="new", index=True)
+    severity: Mapped[str] = mapped_column(String(20), default="medium", index=True)
+    priority_score: Mapped[float] = mapped_column(Float, default=0)
+    property_id: Mapped[int | None] = mapped_column(ForeignKey("rental_objects.id"), nullable=True)
+    apartment_id: Mapped[int | None] = mapped_column(ForeignKey("apartments.id"), nullable=True)
+    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True)
+    contract_id: Mapped[int | None] = mapped_column(ForeignKey("leases.id"), nullable=True)
+    parent_case_id: Mapped[int | None] = mapped_column(ForeignKey("operational_cases.id"), nullable=True)
+    title: Mapped[str] = mapped_column(String(240), default="")
+    compact_summary: Mapped[str] = mapped_column(Text, default="")
+    amount_total: Mapped[float] = mapped_column(Float, default=0)
+    currency: Mapped[str] = mapped_column(String(8), default="RUB")
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    last_changed_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    next_review_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    assigned_actor: Mapped[str] = mapped_column(String(40), default="hermes")
+    waiting_for: Mapped[str] = mapped_column(String(40), default="")
+    suppression_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    resolution_reason: Mapped[str] = mapped_column(Text, default="")
+    state_hash: Mapped[str] = mapped_column(String(128), default="")
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
+
+
+class OwnerCommitment(Base):
+    __tablename__ = "owner_commitments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    case_id: Mapped[int | None] = mapped_column(ForeignKey("operational_cases.id"), nullable=True, index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(40), default="active", index=True)
+    due_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    created_from_message_id: Mapped[int | None] = mapped_column(ForeignKey("ai_messages.id"), nullable=True)
+    completion_condition: Mapped[str] = mapped_column(Text, default="")
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
+
+
+class OwnerPreference(Base):
+    __tablename__ = "owner_preferences"
+    __table_args__ = (UniqueConstraint("scope", "key", "mode", "enabled", name="uq_owner_preference_active_key"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    scope: Mapped[str] = mapped_column(String(120), default="global", index=True)
+    key: Mapped[str] = mapped_column(String(120), index=True)
+    value_json: Mapped[str] = mapped_column(Text, default="{}")
+    source: Mapped[str] = mapped_column(String(80), default="owner_explicit")
+    mode: Mapped[str] = mapped_column(String(20), default="persistent")
+    valid_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    legacy_memory_id: Mapped[int | None] = mapped_column(ForeignKey("agent_memories.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
+
+
+class TenantStrategyProfile(Base):
+    __tablename__ = "tenant_strategy_profiles"
+    __table_args__ = (UniqueConstraint("contract_id", name="uq_tenant_strategy_contract"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), index=True)
+    contract_id: Mapped[int] = mapped_column(ForeignKey("leases.id"), index=True)
+    preferred_channel: Mapped[str] = mapped_column(String(40), default="telegram")
+    preferred_contact_window: Mapped[str] = mapped_column(String(40), default="10:00-20:00")
+    response_speed_bucket: Mapped[str] = mapped_column(String(40), default="unknown")
+    reminder_stage: Mapped[str] = mapped_column(String(40), default="pre_due")
+    soft_reminder_effectiveness: Mapped[float] = mapped_column(Float, default=0)
+    broken_promises_count: Mapped[int] = mapped_column(Integer, default=0)
+    active_payment_situation: Mapped[str] = mapped_column(String(80), default="")
+    escalation_threshold: Mapped[int] = mapped_column(Integer, default=3)
+    owner_only_topics_json: Mapped[str] = mapped_column(Text, default="[]")
+    last_strategy_change: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    strategy_source: Mapped[str] = mapped_column(String(80), default="observed_contract_history")
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
+
+
+class CaseMemory(Base):
+    __tablename__ = "case_memories"
+    __table_args__ = (UniqueConstraint("case_id", name="uq_case_memory_case"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    case_id: Mapped[int] = mapped_column(ForeignKey("operational_cases.id"), index=True)
+    rolling_summary: Mapped[str] = mapped_column(Text, default="")
+    state_hash: Mapped[str] = mapped_column(String(128), default="")
+    last_message_id: Mapped[int | None] = mapped_column(ForeignKey("ai_messages.id"), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
+
+
+class AiSkill(Base):
+    __tablename__ = "ai_skills"
+    __table_args__ = (UniqueConstraint("name", "version", name="uq_ai_skill_name_version"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(160), index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    goal: Mapped[str] = mapped_column(Text, default="")
+    trigger_type: Mapped[str] = mapped_column(String(80), default="manual")
+    trigger_config_json: Mapped[str] = mapped_column(Text, default="{}")
+    preconditions_json: Mapped[str] = mapped_column(Text, default="[]")
+    steps_json: Mapped[str] = mapped_column(Text, default="[]")
+    allowed_tools_json: Mapped[str] = mapped_column(Text, default="[]")
+    autonomous_tools_json: Mapped[str] = mapped_column(Text, default="[]")
+    confirmation_required_tools_json: Mapped[str] = mapped_column(Text, default="[]")
+    success_metric_json: Mapped[str] = mapped_column(Text, default="{}")
+    scope: Mapped[str] = mapped_column(String(120), default="global")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(40), default="draft", index=True)
+    created_by: Mapped[str] = mapped_column(String(80), default="owner")
+    previous_version_id: Mapped[int | None] = mapped_column(ForeignKey("ai_skills.id"), nullable=True)
+    legacy_memory_id: Mapped[int | None] = mapped_column(ForeignKey("agent_memories.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
+
+
+class AiSkillRun(Base):
+    __tablename__ = "ai_skill_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    skill_id: Mapped[int] = mapped_column(ForeignKey("ai_skills.id"), index=True)
+    case_id: Mapped[int | None] = mapped_column(ForeignKey("operational_cases.id"), nullable=True)
+    trigger_event_id: Mapped[int | None] = mapped_column(ForeignKey("domain_events.id"), nullable=True)
+    status: Mapped[str] = mapped_column(String(40), default="started")
+    selected_tools_json: Mapped[str] = mapped_column(Text, default="[]")
+    result_json: Mapped[str] = mapped_column(Text, default="{}")
+    error_text: Mapped[str] = mapped_column(Text, default="")
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class OwnerBriefing(Base):
+    __tablename__ = "owner_briefings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    briefing_date: Mapped[date] = mapped_column(Date, index=True)
+    status: Mapped[str] = mapped_column(String(40), default="draft")
+    text: Mapped[str] = mapped_column(Text, default="")
+    state_hash: Mapped[str] = mapped_column(String(128), default="")
+    preference_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    telegram_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    snoozed_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class OwnerBriefingItem(Base):
+    __tablename__ = "owner_briefing_items"
+    __table_args__ = (UniqueConstraint("briefing_id", "case_id", name="uq_briefing_case"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    briefing_id: Mapped[int] = mapped_column(ForeignKey("owner_briefings.id"), index=True)
+    case_id: Mapped[int] = mapped_column(ForeignKey("operational_cases.id"), index=True)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    selection_reason: Mapped[str] = mapped_column(Text, default="")
+    state_hash: Mapped[str] = mapped_column(String(128), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class ReminderOutcome(Base):
+    __tablename__ = "reminder_outcomes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    contract_id: Mapped[int] = mapped_column(ForeignKey("leases.id"), index=True)
+    case_id: Mapped[int | None] = mapped_column(ForeignKey("operational_cases.id"), nullable=True)
+    payment_situation_id: Mapped[int | None] = mapped_column(ForeignKey("payment_situations.id"), nullable=True)
+    message_log_id: Mapped[int | None] = mapped_column(ForeignKey("message_logs.id"), nullable=True)
+    stage: Mapped[str] = mapped_column(String(40), default="")
+    template_key: Mapped[str] = mapped_column(String(80), default="")
+    outcome: Mapped[str] = mapped_column(String(40), default="delivered", index=True)
+    sent_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    outcome_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class HermesAgentRun(Base):
+    __tablename__ = "hermes_agent_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(120), unique=True)
+    feature: Mapped[str] = mapped_column(String(80), index=True)
+    trigger: Mapped[str] = mapped_column(String(120), default="")
+    model: Mapped[str] = mapped_column(String(120), default="no_llm")
+    context_manifest_json: Mapped[str] = mapped_column(Text, default="{}")
+    state_hash: Mapped[str] = mapped_column(String(128), default="")
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    estimated_cost: Mapped[float] = mapped_column(Float, default=0)
+    selected_tools_json: Mapped[str] = mapped_column(Text, default="[]")
+    proposal_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    execution_result_json: Mapped[str] = mapped_column(Text, default="{}")
+    normalized_envelope_json: Mapped[str] = mapped_column(Text, default="{}")
+    error_text: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(40), default="running", index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class ConversationSummary(Base):
+    __tablename__ = "conversation_summaries"
+    __table_args__ = (UniqueConstraint("conversation_id", name="uq_conversation_summary"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(ForeignKey("ai_conversations.id"), index=True)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    last_message_id: Mapped[int | None] = mapped_column(ForeignKey("ai_messages.id"), nullable=True)
+    state_hash: Mapped[str] = mapped_column(String(128), default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
+
+
+class AiFeatureUsageDaily(Base):
+    __tablename__ = "ai_feature_usage_daily"
+    __table_args__ = (
+        UniqueConstraint("usage_date", "feature", "provider", "model", name="uq_ai_feature_usage_daily"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    usage_date: Mapped[date] = mapped_column(Date)
+    feature: Mapped[str] = mapped_column(String(80), index=True)
+    provider: Mapped[str] = mapped_column(String(40), default="deepseek")
+    model: Mapped[str] = mapped_column(String(120), default="")
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cost_rub: Mapped[float] = mapped_column(Float, default=0)
+    calls: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
 
 
 class AiUsageDaily(Base):

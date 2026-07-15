@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
-from rental_manager.models import Expense, Lease, ManualDebt, MessageLog, PaymentReceipt, PaymentSituation, RentCharge, UtilityBillLine
+from rental_manager.models import Lease, ManualDebt, MessageLog, PaymentReceipt, PaymentSituation, RentCharge, UtilityBillLine
 from rental_manager.services.billing import update_rent_charge_status, update_utility_line_status
 
 
@@ -68,10 +68,10 @@ def tenant_context_text(session: Session, lease: Lease, settings: dict[str, Any]
     debts = session.scalars(
         select(ManualDebt).where(ManualDebt.lease_id == lease.id, ManualDebt.active.is_(True)).order_by(ManualDebt.due_date, ManualDebt.id)
     ).all()
-    for debt in debts:
-        left = max(0.0, float(debt.amount or 0) - float(debt.paid_amount or 0))
+    for manual_debt in debts:
+        left = max(0.0, float(manual_debt.amount or 0) - float(manual_debt.paid_amount or 0))
         if left > 0.009:
-            manual_lines.append(f"- {debt.title or debt.kind}: долг {money_text(left)}")
+            manual_lines.append(f"- {manual_debt.title or manual_debt.kind}: долг {money_text(left)}")
         if len(manual_lines) >= 5:
             break
 

@@ -9,13 +9,12 @@ import json
 import os
 import queue
 import re
-import secrets
 from datetime import date, datetime, time, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 import threading
 import time as time_module
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
@@ -37,7 +36,9 @@ from rental_manager.models import (
     AgentTenantState,
     AiActionLog,
     AiConversation,
+    AiFeatureUsageDaily,
     AiMessage,
+    AiSkill,
     AiUsageDaily,
     Apartment,
     Expense,
@@ -48,10 +49,17 @@ from rental_manager.models import (
     MeterReading,
     PaymentReceipt,
     PaymentSituation,
+    HermesAgentRun,
+    OperationalCase,
+    OwnerBriefing,
+    OwnerBriefingItem,
+    OwnerCommitment,
+    OwnerPreference,
     RentalObject,
     RentCharge,
     Tariff,
     Tenant,
+    TenantStrategyProfile,
     UtilityAdvanceLedger,
     UtilityAdvanceSetting,
     UtilityAdvanceSettingHistory,
@@ -92,12 +100,10 @@ from rental_manager.services.ai_policy import (
     AI_UNAVAILABLE_TEXT,
     AUDIT_USER_PROMPT,
     OWNER_AGENT_SYSTEM_PROMPT,
-    OWNER_SYSTEM_PROMPT,
     SUPERVISOR_SYSTEM_PROMPT,
     TENANT_AGENT_SYSTEM_PROMPT,
     TENANT_DEBT_FOLLOWUP_SYSTEM_PROMPT,
     TENANT_ESCALATION_TEXT,
-    TENANT_SYSTEM_PROMPT,
     clean_ai_response,
     estimate_tokens,
     tenant_question_needs_owner,
@@ -115,12 +121,9 @@ from rental_manager.services.billing import (
     RENT_GENERATION_START,
     active_lease_for_apartment,
     calculate_utility_bill,
-    effective_due_date,
     full_months_lived,
     generate_rent_charges,
     money,
-    next_due_after,
-    object_last_reading_date,
     parse_date,
     resident_due_date,
     status_for_amount,
@@ -135,15 +138,83 @@ from rental_manager.services.owner_operations import (
     owner_operation_preview,
     validate_owner_operation,
 )
+from rental_manager.services.hermes.briefing import (
+    briefing_keyboard,
+    briefing_preview,
+    build_owner_briefing,
+    mark_briefing_sent,
+    snooze_briefing,
+)
+from rental_manager.services.hermes.cases import (
+    OPEN_CASE_STATUSES,
+    case_label,
+    case_snapshot,
+    close_case as hermes_close_case,
+    reconcile_operational_cases,
+    resolve_case_alias,
+    snooze_case as hermes_snooze_case,
+)
+from rental_manager.services.hermes.control_center import (
+    case_details as hermes_case_details,
+    control_center_snapshot,
+    list_cases as hermes_list_cases,
+    overview as hermes_overview,
+    serialize_commitment,
+    serialize_preference,
+    serialize_proposal,
+    serialize_run,
+    serialize_skill,
+    serialize_strategy,
+)
+from rental_manager.services.hermes.events import emit_domain_event, install_domain_event_listeners
+from rental_manager.services.hermes.memory import (
+    capture_owner_preference as capture_structured_owner_preference,
+    complete_owner_commitment,
+    create_owner_commitment,
+    is_commitment_phrase,
+    postpone_owner_commitment,
+    reconcile_owner_commitments,
+    update_conversation_summary,
+)
+from rental_manager.services.hermes.reminders import (
+    classify_tenant_intent,
+    record_reminder_outcome,
+    reminder_allowed as hermes_reminder_allowed,
+    tenant_acknowledgement,
+    tenant_response_policy,
+    update_latest_reminder_outcome,
+)
+from rental_manager.services.hermes.runtime import (
+    ContextManifest,
+    FEATURE_OUTPUT_LIMITS,
+    build_owner_context as build_hermes_owner_context,
+    build_tenant_context as build_hermes_tenant_context,
+    classify_owner_intent,
+    complete_agent_run,
+    create_agent_run,
+    create_grouped_deferral_proposal,
+    execute_grouped_deferral,
+    plan_grouped_deferral,
+    record_feature_usage,
+    usage_summary as hermes_usage_summary,
+)
+from rental_manager.services.hermes.safety import ACTION_SAFETY_REGISTRY
+from rental_manager.services.hermes.skills import (
+    activate_skill,
+    create_skill_draft,
+    disable_skill,
+    dry_run_skill,
+    rollback_skill,
+    skill_card,
+    version_skill,
+)
 from rental_manager.services.payment_allocation import (
     EPS,
     build_rent_plan,
-    build_utility_plan,
     create_rent_receipts,
     create_utility_receipts,
     describe_rent_allocation_decision,
     recalculate_lease_balances,
-    rent_charge_candidates,
     utility_line_candidates,
 )
 from rental_manager.services.receipt_matching import (
@@ -356,6 +427,22 @@ DEFAULT_SETTINGS = {
     "ai_audit_instructions": "",
     "deepseek_model": "deepseek-v4-flash",
     "ai_monthly_budget_rub": "1000",
+    "hermes_briefing_enabled": True,
+    "hermes_auto_level_one_enabled": False,
+    "hermes_auto_template_reminders": True,
+    "hermes_mass_action_pin_threshold": "20",
+    "ai_tenant_mode": "auto",
+    "ai_feature_owner_chat_daily_limit": "50",
+    "ai_feature_tenant_chat_daily_limit": "50",
+    "ai_feature_case_details_daily_limit": "20",
+    "ai_feature_skill_builder_daily_limit": "10",
+    "ai_feature_deep_audit_daily_limit": "5",
+    "ai_feature_key_test_daily_limit": "5",
+    "ai_output_chars_daily_briefing": "800",
+    "ai_output_chars_case_details": "1200",
+    "ai_output_chars_owner_chat": "800",
+    "ai_output_chars_tenant_chat": "500",
+    "ai_output_chars_skill_proposal": "1000",
     "ip_recipient_name": "",
     "ip_recipient_inn": "",
     "ip_recipient_ogrnip": "",
@@ -446,6 +533,9 @@ BOOLEAN_SETTINGS = {
     "ai_enabled",
     "ai_tenant_free_text_enabled",
     "ai_supervisor_enabled",
+    "hermes_briefing_enabled",
+    "hermes_auto_level_one_enabled",
+    "hermes_auto_template_reminders",
 }
 ENV_SETTING_KEYS = {
     "app_base_url": "APP_BASE_URL",
@@ -466,6 +556,10 @@ ENV_SETTING_KEYS = {
     "ai_usd_rub_rate": "AI_USD_RUB_RATE",
     "deepseek_model": "DEEPSEEK_MODEL",
     "ai_monthly_budget_rub": "AI_MONTHLY_BUDGET_RUB",
+    "hermes_briefing_enabled": "HERMES_BRIEFING_ENABLED",
+    "hermes_auto_level_one_enabled": "HERMES_AUTO_LEVEL_ONE_ENABLED",
+    "hermes_auto_template_reminders": "HERMES_AUTO_TEMPLATE_REMINDERS",
+    "ai_tenant_mode": "AI_TENANT_MODE",
     "deepseek_api_key": "DEEPSEEK_API_KEY",
 }
 VALID_REMINDER_CADENCES = {"twice_daily", "daily_evening", "every_two_days", "never"}
@@ -476,6 +570,18 @@ AI_INTEGER_SETTING_LIMITS = {
     "ai_action_confirmation_ttl_hours": (1, 168, "Срок подтверждения действия"),
     "ai_daily_call_limit": (0, 100000, "Дневной лимит AI-запросов"),
     "ai_max_output_tokens": (100, 8000, "Общий лимит ответа AI"),
+    "hermes_mass_action_pin_threshold": (1, 10000, "Порог массового критического действия"),
+    "ai_feature_owner_chat_daily_limit": (0, 100000, "Лимит owner chat"),
+    "ai_feature_tenant_chat_daily_limit": (0, 100000, "Лимит tenant chat"),
+    "ai_feature_case_details_daily_limit": (0, 100000, "Лимит case details"),
+    "ai_feature_skill_builder_daily_limit": (0, 100000, "Лимит skill builder"),
+    "ai_feature_deep_audit_daily_limit": (0, 100000, "Лимит deep audit"),
+    "ai_feature_key_test_daily_limit": (0, 100000, "Лимит проверки ключа"),
+    "ai_output_chars_daily_briefing": (200, 2000, "Лимит ежедневной сводки"),
+    "ai_output_chars_case_details": (300, 4000, "Лимит подробностей кейса"),
+    "ai_output_chars_owner_chat": (200, 4000, "Лимит owner chat"),
+    "ai_output_chars_tenant_chat": (100, 2000, "Лимит tenant chat"),
+    "ai_output_chars_skill_proposal": (300, 3000, "Лимит карточки навыка"),
 }
 AI_DECIMAL_SETTING_LIMITS = {
     "ai_monthly_budget_rub": (0.0, 10_000_000.0, "Месячный AI-бюджет"),
@@ -567,14 +673,18 @@ def startup() -> None:
         f"{APP_BUILD_MARKER} ai_providers={providers} "
         f"deepseek_env_key_configured={str(bool(os.environ.get('DEEPSEEK_API_KEY', '').strip())).lower()}",
     )
+    install_domain_event_listeners()
     init_db()
     with SessionLocal() as session:
+        ensure_database_schema(session)
         seeded_release = seed_release_baseline_if_empty(session)
         if not seeded_release:
             seed_if_empty(session)
         ensure_runtime_defaults(session)
         validate_production_security(session)
         generate_rent_charges(session)
+        reconcile_operational_cases(session)
+        reconcile_owner_commitments(session)
         session.commit()
     queue_startup_maintenance()
     queue_runtime_telegram_webhook_refresh()
@@ -603,6 +713,20 @@ def reminder_worker_loop() -> None:
             status = "failed"
             runtime_log("REMINDERS", f"background worker failed error={exc!r}")
             summary = {"error": str(exc)[:300]}
+            try:
+                with SessionLocal() as event_session:
+                    emit_domain_event(
+                        event_session,
+                        "automation_failed",
+                        entity_type="ReminderWorker",
+                        entity_id="scheduled",
+                        source="reminder_worker",
+                        payload={"error": f"{type(exc).__name__}: {exc}"[:1000]},
+                        idempotency_key=f"automation:reminder-worker:{date.today().isoformat()}:{type(exc).__name__}",
+                    )
+                    event_session.commit()
+            except Exception:
+                pass
         finally:
             record_background_event(
                 "reminder_worker",
@@ -668,6 +792,12 @@ SCHEMA_ADDITIONS = {
     ],
     "agent_action_proposals": [
         ("error_text", "TEXT NOT NULL DEFAULT ''"),
+        ("case_id", "INTEGER"),
+        ("safety_level", "INTEGER NOT NULL DEFAULT 2"),
+        ("idempotency_key", "VARCHAR(160) NOT NULL DEFAULT ''"),
+        ("group_key", "VARCHAR(160) NOT NULL DEFAULT ''"),
+        ("validation_hash", "VARCHAR(128) NOT NULL DEFAULT ''"),
+        ("confirmed_by", "VARCHAR(80) NOT NULL DEFAULT ''"),
     ],
 }
 
@@ -1086,6 +1216,11 @@ def normalize_ai_setting(key: str, value: Any) -> str:
         if cadence not in VALID_AI_SUPERVISOR_CADENCES:
             raise HTTPException(status_code=400, detail="Периодичность автоаудита задана некорректно.")
         return cadence
+    if key == "ai_tenant_mode":
+        mode = str(value or "").strip().lower()
+        if mode not in {"auto", "draft_only", "finance_only"}:
+            raise HTTPException(400, "Режим Tenant AI должен быть auto, draft_only или finance_only")
+        return mode
     if key == "ai_supervisor_time":
         match = re.fullmatch(r"([01]\d|2[0-3]):([0-5]\d)", str(value or "").strip())
         if not match:
@@ -2930,12 +3065,31 @@ def build_bootstrap_payload(
             },
         }
     registry_payload = build_registry_payload(session, role) if include_registry else empty_registry_payload()
+    hermes_summary = {}
+    if role == "owner":
+        open_case_count = int(
+            session.scalar(select(func.count(OperationalCase.id)).where(OperationalCase.status.in_(OPEN_CASE_STATUSES))) or 0
+        )
+        hermes_summary = {
+            "enabled": setting_bool_value(get_setting_value(session, "ai_enabled")),
+            "active_cases": open_case_count,
+            "waiting_owner": int(
+                session.scalar(select(func.count(OperationalCase.id)).where(OperationalCase.status == "waiting_owner")) or 0
+            ),
+            "pending_proposals": int(
+                session.scalar(select(func.count(AgentActionProposal.id)).where(AgentActionProposal.status == "pending")) or 0
+            ),
+            "active_commitments": int(
+                session.scalar(select(func.count(OwnerCommitment.id)).where(OwnerCommitment.status.in_({"active", "overdue"}))) or 0
+            ),
+        }
     return {
         "today": date.today().isoformat(),
         "auth": {"role": role},
         **registry_payload,
         "settings": settings_payload,
         "dashboard": dashboard_payload,
+        "hermes_summary": hermes_summary,
     }
 
 
@@ -3105,6 +3259,23 @@ def api_test_ai_connection(session: Session = Depends(get_session)) -> dict[str,
         raise HTTPException(status_code=409, detail=AI_BUDGET_EXCEEDED_TEXT)
     if ai_daily_call_limit_exceeded(session):
         raise HTTPException(status_code=409, detail=AI_DAILY_LIMIT_EXCEEDED_TEXT)
+    if ai_feature_daily_limit_exceeded(session, "key_test"):
+        raise HTTPException(status_code=409, detail=AI_DAILY_LIMIT_EXCEEDED_TEXT)
+    model = resolve_ai_model(get_setting_value(session, "deepseek_model"))
+    manifest = ContextManifest(
+        feature="key_test",
+        model=model,
+        selected_case_ids=[],
+        included_entities={},
+        included_messages_count=0,
+        approximate_input_size=8,
+        reason_for_llm_usage="explicit owner API key test",
+        excluded_context=["all business data", "chat history", "database access"],
+        output_limit=FEATURE_OUTPUT_LIMITS["key_test"],
+        selected_tools=[],
+        state_hash=hashlib.sha256(f"key-test:{date.today()}".encode("utf-8")).hexdigest(),
+    )
+    run = create_agent_run(session, manifest=manifest, trigger="api_key_test")
     try:
         runtime = build_provider_runtime(
             AiProvider.DEEPSEEK,
@@ -3118,8 +3289,10 @@ def api_test_ai_connection(session: Session = Depends(get_session)) -> dict[str,
             max_tokens=16,
         )
     except AiProviderConfigError as exc:
+        complete_agent_run(run, error=str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except DeepSeekClientError as exc:
+        complete_agent_run(run, error=str(exc))
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     normalized = DeepSeekResult(
         content=result.content,
@@ -3136,6 +3309,21 @@ def api_test_ai_connection(session: Session = Depends(get_session)) -> dict[str,
         ai_usd_rub_rate(session),
     )
     add_ai_usage(session, normalized, cost)
+    record_feature_usage(
+        session,
+        feature="key_test",
+        provider=normalized.provider,
+        model=normalized.model,
+        prompt_tokens=normalized.prompt_tokens,
+        completion_tokens=normalized.completion_tokens,
+        cost_rub=cost,
+    )
+    complete_agent_run(
+        run,
+        input_tokens=normalized.prompt_tokens,
+        output_tokens=normalized.completion_tokens,
+        estimated_cost=cost,
+    )
     session.commit()
     return {
         "ok": True,
@@ -3143,6 +3331,577 @@ def api_test_ai_connection(session: Session = Depends(get_session)) -> dict[str,
         "model": normalized.model,
         "cost_rub": cost,
     }
+
+
+HERMES_SETTING_KEYS = {
+    "ai_enabled",
+    "hermes_briefing_enabled",
+    "hermes_auto_level_one_enabled",
+    "hermes_auto_template_reminders",
+    "hermes_mass_action_pin_threshold",
+    "ai_tenant_mode",
+    "ai_monthly_budget_rub",
+    "ai_daily_call_limit",
+    "ai_supervisor_time",
+    "ai_feature_owner_chat_daily_limit",
+    "ai_feature_tenant_chat_daily_limit",
+    "ai_feature_case_details_daily_limit",
+    "ai_feature_skill_builder_daily_limit",
+    "ai_feature_deep_audit_daily_limit",
+    "ai_feature_key_test_daily_limit",
+    "ai_output_chars_daily_briefing",
+    "ai_output_chars_owner_chat",
+    "ai_output_chars_tenant_chat",
+    "ai_output_chars_case_details",
+    "ai_output_chars_skill_proposal",
+}
+
+
+def hermes_settings_payload(session: Session) -> dict[str, Any]:
+    settings = get_settings(session)
+    return {key: settings.get(key) for key in HERMES_SETTING_KEYS}
+
+
+def hermes_control_center_payload(session: Session) -> dict[str, Any]:
+    result = control_center_snapshot(
+        session,
+        enabled=setting_bool_value(get_setting_value(session, "ai_enabled")),
+        monthly_budget_rub=ai_monthly_budget_rub(session),
+    )
+    result["settings"] = hermes_settings_payload(session)
+    result["briefing_preview"] = briefing_preview(
+        session,
+        max_chars=ai_feature_output_limit(session, "daily_briefing"),
+    )
+    session.commit()
+    return result
+
+
+@app.get("/api/hermes")
+@app.get("/api/android/hermes/summary")
+def api_hermes_control_center(session: Session = Depends(get_session)) -> dict[str, Any]:
+    return hermes_control_center_payload(session)
+
+
+@app.get("/api/hermes/overview")
+def api_hermes_overview(session: Session = Depends(get_session)) -> dict[str, Any]:
+    result = hermes_overview(
+        session,
+        enabled=setting_bool_value(get_setting_value(session, "ai_enabled")),
+        monthly_budget_rub=ai_monthly_budget_rub(session),
+    )
+    session.commit()
+    return result
+
+
+@app.get("/api/hermes/cases")
+@app.get("/api/android/hermes/cases")
+def api_hermes_cases(
+    status: str = "",
+    severity: str = "",
+    property_id: int | None = None,
+    session: Session = Depends(get_session),
+) -> list[dict[str, Any]]:
+    result = hermes_list_cases(
+        session,
+        status=status,
+        severity=severity,
+        property_id=property_id,
+    )
+    session.commit()
+    return result
+
+
+@app.get("/api/hermes/cases/{case_id}")
+@app.get("/api/android/hermes/cases/{case_id}")
+def api_hermes_case_details(case_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
+    reconcile_operational_cases(session)
+    result = hermes_case_details(session, case_id)
+    if result is None:
+        raise HTTPException(404, "Кейс не найден")
+    session.commit()
+    return result
+
+
+@app.post("/api/hermes/cases/{case_id}/close")
+def api_hermes_close_case(
+    case_id: int,
+    payload: dict[str, Any] | None = None,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    try:
+        item = hermes_close_case(session, case_id, str((payload or {}).get("reason") or "Закрыто владельцем"))
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    session.commit()
+    return case_snapshot(session, item)
+
+
+@app.post("/api/hermes/cases/{case_id}/snooze")
+def api_hermes_snooze_case(
+    case_id: int,
+    payload: dict[str, Any] | None = None,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    raw_until = str((payload or {}).get("until") or "").strip()
+    try:
+        until = datetime.fromisoformat(raw_until) if raw_until else utc_now() + timedelta(days=1)
+        item = hermes_snooze_case(session, case_id, until)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    session.commit()
+    return case_snapshot(session, item)
+
+
+@app.get("/api/hermes/commitments")
+@app.get("/api/android/hermes/commitments")
+def api_hermes_commitments(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    reconcile_owner_commitments(session)
+    rows = session.scalars(
+        select(OwnerCommitment).order_by(OwnerCommitment.status, OwnerCommitment.due_at, OwnerCommitment.id)
+    ).all()
+    result = [serialize_commitment(item) for item in rows]
+    session.commit()
+    return result
+
+
+@app.post("/api/hermes/commitments/{commitment_id}/complete")
+def api_hermes_complete_commitment(
+    commitment_id: int,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    try:
+        item = complete_owner_commitment(session, commitment_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    session.commit()
+    return serialize_commitment(item)
+
+
+@app.post("/api/hermes/commitments/{commitment_id}/postpone")
+def api_hermes_postpone_commitment(
+    commitment_id: int,
+    payload: dict[str, Any] | None = None,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    try:
+        days = min(30, max(1, int((payload or {}).get("days") or 1)))
+        item = postpone_owner_commitment(session, commitment_id, days=days)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    session.commit()
+    return serialize_commitment(item)
+
+
+@app.get("/api/hermes/preferences")
+@app.get("/api/android/hermes/preferences")
+def api_hermes_preferences(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    rows = session.scalars(
+        select(OwnerPreference).order_by(OwnerPreference.enabled.desc(), OwnerPreference.scope, OwnerPreference.id)
+    ).all()
+    return [serialize_preference(item) for item in rows]
+
+
+@app.post("/api/hermes/preferences")
+def api_hermes_create_preference(
+    payload: dict[str, Any],
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    scope = str(payload.get("scope") or "global").strip()[:120]
+    key = str(payload.get("key") or "").strip()[:120]
+    mode = str(payload.get("mode") or "persistent").strip()
+    if not key or mode not in {"persistent", "once", "until_date"}:
+        raise HTTPException(400, "Укажите ключ и корректный режим предпочтения")
+    existing = session.scalar(
+        select(OwnerPreference).where(
+            OwnerPreference.scope == scope,
+            OwnerPreference.key == key,
+            OwnerPreference.mode == mode,
+            OwnerPreference.enabled.is_(True),
+        )
+    )
+    item = existing or OwnerPreference(scope=scope, key=key, mode=mode, source="owner_control_center")
+    if not existing:
+        session.add(item)
+    value = payload.get("value") if isinstance(payload.get("value"), dict) else {"value": payload.get("value")}
+    item.value_json = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    item.enabled = True
+    item.consumed_at = None
+    raw_until = str(payload.get("valid_until") or "").strip()
+    item.valid_until = datetime.fromisoformat(raw_until) if raw_until else None
+    session.commit()
+    return serialize_preference(item)
+
+
+@app.patch("/api/hermes/preferences/{preference_id}")
+def api_hermes_update_preference(
+    preference_id: int,
+    payload: dict[str, Any],
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    item = session.get(OwnerPreference, preference_id)
+    if not item:
+        raise HTTPException(404, "Предпочтение не найдено")
+    if "value" in payload:
+        value = payload["value"] if isinstance(payload["value"], dict) else {"value": payload["value"]}
+        item.value_json = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    if "enabled" in payload:
+        item.enabled = setting_bool_value(payload["enabled"])
+    if "mode" in payload and str(payload["mode"]) in {"persistent", "once", "until_date"}:
+        item.mode = str(payload["mode"])
+    item.updated_at = utc_now()
+    session.commit()
+    return serialize_preference(item)
+
+
+@app.delete("/api/hermes/preferences/{preference_id}")
+def api_hermes_disable_preference(
+    preference_id: int,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    item = session.get(OwnerPreference, preference_id)
+    if not item:
+        raise HTTPException(404, "Предпочтение не найдено")
+    item.enabled = False
+    item.updated_at = utc_now()
+    session.commit()
+    return serialize_preference(item)
+
+
+@app.get("/api/hermes/skills")
+def api_hermes_skills(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    rows = session.scalars(select(AiSkill).order_by(AiSkill.name, AiSkill.version.desc())).all()
+    return [serialize_skill(item) for item in rows]
+
+
+def require_hermes_skill(session: Session, skill_id: int) -> AiSkill:
+    item = session.get(AiSkill, skill_id)
+    if not item:
+        raise HTTPException(404, "Навык не найден")
+    return item
+
+
+@app.post("/api/hermes/skills/{skill_id}/dry-run")
+def api_hermes_skill_dry_run(
+    skill_id: int,
+    payload: dict[str, Any] | None = None,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    skill = require_hermes_skill(session, skill_id)
+    case_id = int((payload or {}).get("case_id") or 0)
+    case = session.get(OperationalCase, case_id) if case_id else None
+    return dry_run_skill(skill, case=case)
+
+
+@app.post("/api/hermes/skills/{skill_id}/activate")
+def api_hermes_activate_skill(skill_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
+    try:
+        item = activate_skill(session, skill_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    session.commit()
+    return serialize_skill(item)
+
+
+@app.post("/api/hermes/skills/{skill_id}/disable")
+def api_hermes_disable_skill(skill_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
+    try:
+        item = disable_skill(session, skill_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    session.commit()
+    return serialize_skill(item)
+
+
+@app.post("/api/hermes/skills/{skill_id}/rollback")
+def api_hermes_rollback_skill(skill_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
+    try:
+        item = rollback_skill(session, skill_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    session.commit()
+    return serialize_skill(item)
+
+
+@app.post("/api/hermes/skills/{skill_id}/version")
+def api_hermes_version_skill(
+    skill_id: int,
+    payload: dict[str, Any],
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    changes: dict[str, Any] = {}
+    json_fields = {
+        "trigger_config_json",
+        "preconditions_json",
+        "steps_json",
+        "allowed_tools_json",
+        "autonomous_tools_json",
+        "confirmation_required_tools_json",
+        "success_metric_json",
+    }
+    for key, value in payload.items():
+        changes[key] = json.dumps(value, ensure_ascii=False, sort_keys=True) if key in json_fields and not isinstance(value, str) else value
+    try:
+        item = version_skill(session, skill_id, changes)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    session.commit()
+    return serialize_skill(item)
+
+
+@app.get("/api/hermes/strategies")
+def api_hermes_strategies(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    rows = session.scalars(select(TenantStrategyProfile).order_by(TenantStrategyProfile.contract_id)).all()
+    return [serialize_strategy(item) for item in rows]
+
+
+@app.patch("/api/hermes/strategies/{strategy_id}")
+def api_hermes_update_strategy(
+    strategy_id: int,
+    payload: dict[str, Any],
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    item = session.get(TenantStrategyProfile, strategy_id)
+    if not item:
+        raise HTTPException(404, "Стратегия не найдена")
+    allowed = {
+        "preferred_channel",
+        "preferred_contact_window",
+        "response_speed_bucket",
+        "reminder_stage",
+        "soft_reminder_effectiveness",
+        "broken_promises_count",
+        "active_payment_situation",
+        "escalation_threshold",
+        "strategy_source",
+    }
+    unknown = set(payload) - allowed - {"owner_only_topics"}
+    if unknown:
+        raise HTTPException(400, "Неизвестные поля стратегии: " + ", ".join(sorted(unknown)))
+    if "preferred_channel" in payload and str(payload["preferred_channel"]) not in {"telegram", "whatsapp", "phone"}:
+        raise HTTPException(400, "Канал должен быть telegram, whatsapp или phone")
+    if "preferred_contact_window" in payload and not re.fullmatch(
+        r"(?:[01]\d|2[0-3]):[0-5]\d-(?:[01]\d|2[0-3]):[0-5]\d",
+        str(payload["preferred_contact_window"]),
+    ):
+        raise HTTPException(400, "Окно связи должно иметь формат 10:00-20:00")
+    if "response_speed_bucket" in payload and str(payload["response_speed_bucket"]) not in {
+        "unknown",
+        "fast",
+        "same_day",
+        "slow",
+    }:
+        raise HTTPException(400, "Неизвестная скорость ответа")
+    if "escalation_threshold" in payload:
+        try:
+            threshold = int(payload["escalation_threshold"])
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, "Порог эскалации должен быть целым числом") from exc
+        if not 1 <= threshold <= 20:
+            raise HTTPException(400, "Порог эскалации должен быть от 1 до 20")
+        payload["escalation_threshold"] = threshold
+    if "soft_reminder_effectiveness" in payload:
+        try:
+            effectiveness = float(payload["soft_reminder_effectiveness"])
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, "Эффективность напоминаний должна быть числом") from exc
+        if not 0 <= effectiveness <= 1:
+            raise HTTPException(400, "Эффективность напоминаний должна быть от 0 до 1")
+        payload["soft_reminder_effectiveness"] = effectiveness
+    if "broken_promises_count" in payload:
+        try:
+            broken_promises = int(payload["broken_promises_count"])
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, "Количество нарушенных обещаний должно быть целым числом") from exc
+        if broken_promises < 0:
+            raise HTTPException(400, "Количество нарушенных обещаний не может быть отрицательным")
+        payload["broken_promises_count"] = broken_promises
+    for key, value in payload.items():
+        if key in allowed:
+            setattr(item, key, value)
+    if "owner_only_topics" in payload and isinstance(payload["owner_only_topics"], list):
+        item.owner_only_topics_json = json.dumps(payload["owner_only_topics"], ensure_ascii=False)
+    item.last_strategy_change = utc_now()
+    session.commit()
+    return serialize_strategy(item)
+
+
+@app.post("/api/hermes/strategies/{strategy_id}/reset")
+def api_hermes_reset_strategy(strategy_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
+    item = session.get(TenantStrategyProfile, strategy_id)
+    if not item:
+        raise HTTPException(404, "Стратегия не найдена")
+    item.preferred_channel = "telegram"
+    item.preferred_contact_window = "10:00-20:00"
+    item.response_speed_bucket = "unknown"
+    item.reminder_stage = "pre_due"
+    item.soft_reminder_effectiveness = 0
+    item.broken_promises_count = 0
+    item.active_payment_situation = ""
+    item.escalation_threshold = 3
+    item.owner_only_topics_json = "[]"
+    item.strategy_source = "owner_reset"
+    item.last_strategy_change = utc_now()
+    session.commit()
+    return serialize_strategy(item)
+
+
+@app.get("/api/hermes/proposals")
+@app.get("/api/android/hermes/proposals")
+def api_hermes_proposals(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    rows = session.scalars(select(AgentActionProposal).order_by(AgentActionProposal.id.desc()).limit(200)).all()
+    return [serialize_proposal(item) for item in rows]
+
+
+def decide_hermes_proposal(
+    session: Session,
+    proposal_id: int,
+    *,
+    decision: str,
+    actor: str,
+    confirmation_pin: str = "",
+) -> AgentActionProposal:
+    proposal = session.scalar(
+        select(AgentActionProposal).where(AgentActionProposal.id == proposal_id).with_for_update()
+    )
+    if not proposal:
+        raise HTTPException(404, "Предложение не найдено")
+    if proposal.status != "pending":
+        return proposal
+    if proposal.expires_at and proposal.expires_at < utc_now():
+        proposal.status = "expired"
+        proposal.error_text = "Истёк срок подтверждения"
+        session.commit()
+        return proposal
+    if decision == "reject":
+        proposal.status = "rejected"
+        proposal.result_text = "Отклонено владельцем"
+        proposal.confirmed_by = actor[:80]
+        session.add(
+            AiActionLog(
+                conversation_id=proposal.conversation_id,
+                lease_id=proposal.lease_id,
+                actor_role="owner",
+                action_type=proposal.action_type,
+                status="rejected",
+                payload_json=proposal.payload_json,
+                note=f"proposal rejected from {actor}",
+            )
+        )
+        session.commit()
+        return proposal
+    if int(proposal.safety_level or 0) >= 3:
+        owner_hash = configured_environment_pin_hash("owner") or get_setting_value(session, PIN_SETTING_KEYS["owner"])
+        if not confirmation_pin or not verify_pin(owner_hash, confirmation_pin):
+            raise HTTPException(403, "Для критического или массового действия повторно введите PIN владельца")
+    proposal.status = "approved"
+    proposal.confirmed_at = utc_now()
+    proposal.confirmed_by = actor[:80]
+    session.flush()
+    try:
+        result_text = execute_agent_action(session, proposal)
+    except HTTPException as exc:
+        proposal.status = "failed"
+        proposal.result_text = str(exc.detail)
+        proposal.error_text = str(exc.detail)
+        session.commit()
+        raise HTTPException(409, str(exc.detail)) from exc
+    proposal.status = "executed"
+    proposal.executed_at = utc_now()
+    proposal.result_text = result_text
+    proposal.error_text = ""
+    reconcile_operational_cases(session)
+    session.add(
+        AiActionLog(
+            conversation_id=proposal.conversation_id,
+            lease_id=proposal.lease_id,
+            actor_role="owner",
+            action_type=proposal.action_type,
+            status="executed",
+            payload_json=proposal.payload_json,
+            note=f"{actor}: {result_text}"[:2000],
+        )
+    )
+    session.commit()
+    return proposal
+
+
+@app.post("/api/hermes/proposals/{proposal_id}/confirm")
+@app.post("/api/android/hermes/proposals/{proposal_id}/confirm")
+def api_hermes_confirm_proposal(
+    proposal_id: int,
+    request: Request,
+    payload: dict[str, Any] | None = None,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    actor = "android" if request.url.path.startswith("/api/android/") else "web"
+    item = decide_hermes_proposal(
+        session,
+        proposal_id,
+        decision="confirm",
+        actor=actor,
+        confirmation_pin=str((payload or {}).get("confirmation_pin") or ""),
+    )
+    return serialize_proposal(item)
+
+
+@app.post("/api/hermes/proposals/{proposal_id}/reject")
+@app.post("/api/android/hermes/proposals/{proposal_id}/reject")
+def api_hermes_reject_proposal(
+    proposal_id: int,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    actor = "android" if request.url.path.startswith("/api/android/") else "web"
+    return serialize_proposal(
+        decide_hermes_proposal(session, proposal_id, decision="reject", actor=actor)
+    )
+
+
+@app.get("/api/hermes/usage")
+@app.get("/api/android/hermes/usage")
+def api_hermes_usage(session: Session = Depends(get_session)) -> dict[str, Any]:
+    return hermes_usage_summary(session)
+
+
+@app.get("/api/hermes/runs")
+def api_hermes_runs(limit: int = 100, session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    rows = session.scalars(
+        select(HermesAgentRun).order_by(HermesAgentRun.id.desc()).limit(min(500, max(1, limit)))
+    ).all()
+    return [serialize_run(item) for item in rows]
+
+
+@app.get("/api/hermes/runs/{run_id}")
+def api_hermes_run_debug(run_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
+    item = session.get(HermesAgentRun, run_id)
+    if not item:
+        raise HTTPException(404, "Запуск не найден")
+    return serialize_run(item, include_debug=True)
+
+
+@app.get("/api/hermes/briefing/preview")
+def api_hermes_briefing_preview(session: Session = Depends(get_session)) -> dict[str, Any]:
+    result = briefing_preview(session, max_chars=ai_feature_output_limit(session, "daily_briefing"))
+    session.rollback()
+    return result
+
+
+@app.get("/api/hermes/settings")
+@app.get("/api/android/hermes/settings")
+def api_hermes_settings(session: Session = Depends(get_session)) -> dict[str, Any]:
+    return hermes_settings_payload(session)
+
+
+@app.post("/api/hermes/settings")
+@app.post("/api/android/hermes/settings")
+def api_save_hermes_settings(
+    payload: dict[str, Any],
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    filtered = {key: value for key, value in payload.items() if key in HERMES_SETTING_KEYS}
+    save_settings(session, filtered)
+    return hermes_settings_payload(session)
 
 
 @app.get("/api/month-progress")
@@ -6524,63 +7283,23 @@ def run_owner_supervisor_digest(
 ) -> int:
     if not ai_enabled(session) or not setting_bool_value(get_setting_value(session, "ai_supervisor_enabled")):
         return 0
+    if not setting_bool_value(get_setting_value(session, "hermes_briefing_enabled")):
+        return 0
     if not ai_supervisor_schedule_due(session, today, now):
         return 0
     owner_id = telegram_owner_chat_id(session)
     if not owner_id or not telegram_token(session):
         return 0
-    tasks = sync_agent_tasks(session, dashboard)
-    pending = [
-        task
-        for task in tasks
-        if not task.last_notified_at or task.last_notified_at.date() < today
-    ]
-    if not pending:
+    build = build_owner_briefing(
+        session,
+        today=today,
+        max_chars=ai_feature_output_limit(session, "daily_briefing"),
+    )
+    if not build.briefing or not build.text:
         return 0
-    dashboard = dashboard or build_dashboard(session)
-    lines = [
-        f"- [{task.severity}] {task.title}: {task.details} "
-        f"(в работе {max(0, (today - task.first_seen_at.date()).days)} дн.)"
-        for task in pending[:20]
-    ]
-    context = owner_agent_context(session, owner_id, dashboard) + "\n\nЗадачи для сегодняшней ревизии:\n" + "\n".join(lines)
-    conversation, envelope = call_agent_envelope(
-        session,
-        chat_id=owner_id,
-        actor_role="owner",
-        lease=None,
-        system_prompt=configured_audit_system_prompt(session),
-        context=context,
-        user_text="Проведи сегодняшнюю строгую ревизию. Предложи безопасные действия только там, где данных достаточно.",
-        model=resolve_ai_model(get_setting_value(session, "ai_supervisor_model")),
-        max_tokens=ai_supervisor_max_tokens(session),
-    )
-    store_agent_memories(
-        session,
-        conversation,
-        envelope.memories,
-        scope_type="owner",
-        scope_id="owner",
-    )
-    answer = envelope.reply
-    if answer in {
-        "",
-        AI_UNAVAILABLE_TEXT,
-        AI_DISABLED_TEXT,
-        AI_BUDGET_EXCEEDED_TEXT,
-        AI_DAILY_LIMIT_EXCEEDED_TEXT,
-    }:
-        answer = "Утренняя ревизия. Сегодня нужно закрыть:\n" + "\n".join(lines[:10])
-    send_telegram_text(session, owner_id, answer, app_keyboard(app_base_url(session)))
-    for action in envelope.actions:
-        try:
-            create_agent_action_proposal(session, conversation, owner_id, action)
-        except HTTPException as exc:
-            runtime_log("AGENT", f"supervisor proposal skipped error={exc.detail}")
-    notified_at = utc_now()
-    for task in pending:
-        task.last_notified_at = notified_at
-        task.notification_count = int(task.notification_count or 0) + 1
+    response = send_telegram_text(session, owner_id, build.text, briefing_keyboard(session, build))
+    message_id = int(((response.get("result") or {}) if isinstance(response, dict) else {}).get("message_id") or 0) or None
+    mark_briefing_sent(build, telegram_message_id=message_id)
     return 1
 
 
@@ -6592,7 +7311,11 @@ def run_due_reminders(session: Session, today: date | None = None) -> dict[str, 
     if not notifications_enabled(session):
         dashboard = build_dashboard(session)
         supervisor_sent = run_owner_supervisor_digest(session, today, now, dashboard)
-        payment_digest_sent = run_owner_payment_digest(session, today, now)
+        payment_digest_sent = (
+            0
+            if setting_bool_value(get_setting_value(session, "hermes_briefing_enabled"))
+            else run_owner_payment_digest(session, today, now)
+        )
         return {
             "enabled": False,
             "cutoff_date": cutoff.isoformat(),
@@ -6668,13 +7391,35 @@ def run_due_reminders(session: Session, today: date | None = None) -> dict[str, 
         if stage and situation_stage_sent(session, situation, stage):
             summary["skipped_duplicate"] += 1
         elif stage:
+            allowed, reason = hermes_reminder_allowed(session, situation=situation, now=now)
+            if not allowed:
+                summary["skipped_duplicate" if reason == "already_sent_today" else "skipped_disabled"] += 1
+                stage = ""
+        if stage:
             try:
                 if send_payment_situation_message(session, situation, template_key, stage, today):
                     summary["sent"] += 1
+                    record_reminder_outcome(
+                        session,
+                        lease_id=situation.lease_id,
+                        stage=stage,
+                        template_key=template_key,
+                        payment_situation_id=situation.id,
+                    )
                 else:
                     summary["skipped_duplicate"] += 1
-            except HTTPException:
+            except HTTPException as exc:
                 summary["failed"] += 1
+                emit_domain_event(
+                    session,
+                    "automation_failed",
+                    entity_type="PaymentSituation",
+                    entity_id=situation.id,
+                    contract_id=situation.lease_id,
+                    source="rent_reminder",
+                    payload={"error": str(exc.detail), "stage": stage, "template_key": template_key},
+                    idempotency_key=f"automation:rent-reminder:{situation.id}:{stage}:{today.isoformat()}",
+                )
 
         if due_delta == 0 and now >= datetime.combine(today, time(hour=20), tzinfo=LOCAL_TZ):
             notify_owner_situation_event(session, situation, "due_unpaid", today)
@@ -6736,13 +7481,35 @@ def run_due_reminders(session: Session, today: date | None = None) -> dict[str, 
         if stage and situation_stage_sent(session, situation, stage):
             summary["skipped_duplicate"] += 1
         elif stage:
+            allowed, reason = hermes_reminder_allowed(session, situation=situation, now=now)
+            if not allowed:
+                summary["skipped_duplicate" if reason == "already_sent_today" else "skipped_disabled"] += 1
+                stage = ""
+        if stage:
             try:
                 if send_payment_situation_message(session, situation, template_key, stage, today):
                     summary["sent"] += 1
+                    record_reminder_outcome(
+                        session,
+                        lease_id=situation.lease_id,
+                        stage=stage,
+                        template_key=template_key,
+                        payment_situation_id=situation.id,
+                    )
                 else:
                     summary["skipped_duplicate"] += 1
-            except HTTPException:
+            except HTTPException as exc:
                 summary["failed"] += 1
+                emit_domain_event(
+                    session,
+                    "automation_failed",
+                    entity_type="PaymentSituation",
+                    entity_id=situation.id,
+                    contract_id=situation.lease_id,
+                    source="utility_reminder",
+                    payload={"error": str(exc.detail), "stage": stage, "template_key": template_key},
+                    idempotency_key=f"automation:utility-reminder:{situation.id}:{stage}:{today.isoformat()}",
+                )
 
         if due_delta == 0 and now >= datetime.combine(today, time(hour=20), tzinfo=LOCAL_TZ):
             notify_owner_situation_event(session, situation, "due_unpaid", today)
@@ -6755,7 +7522,11 @@ def run_due_reminders(session: Session, today: date | None = None) -> dict[str, 
 
     dashboard = build_dashboard(session)
     summary["owner_due_digest_sent"] = 0
-    summary["owner_payment_digest_sent"] = run_owner_payment_digest(session, today, now)
+    summary["owner_payment_digest_sent"] = (
+        0
+        if setting_bool_value(get_setting_value(session, "hermes_briefing_enabled"))
+        else run_owner_payment_digest(session, today, now)
+    )
     summary["supervisor_digest_sent"] = run_owner_supervisor_digest(session, today, now, dashboard)
     summary["move_out_processed"] = process_move_out_notifications(session, today)["processed"]
     return summary
@@ -7259,7 +8030,6 @@ def handle_tenant_receipt_message(session: Session, message: dict[str, Any], lin
         except ValueError as exc:
             status = "suspicious"
             match_type = "review"
-            linked_id = None
             issues = [str(exc)]
 
     if status != "accepted":
@@ -7399,6 +8169,57 @@ def ai_daily_calls(session: Session, today: date | None = None) -> int:
 def ai_daily_call_limit_exceeded(session: Session, today: date | None = None) -> bool:
     limit = ai_daily_call_limit(session)
     return bool(limit > 0 and ai_daily_calls(session, today) >= limit)
+
+
+AI_FEATURE_LIMIT_SETTINGS = {
+    "owner_chat": "ai_feature_owner_chat_daily_limit",
+    "tenant_chat": "ai_feature_tenant_chat_daily_limit",
+    "case_details": "ai_feature_case_details_daily_limit",
+    "skill_builder": "ai_feature_skill_builder_daily_limit",
+    "deep_audit": "ai_feature_deep_audit_daily_limit",
+    "key_test": "ai_feature_key_test_daily_limit",
+}
+
+AI_OUTPUT_LIMIT_SETTINGS = {
+    "daily_briefing": "ai_output_chars_daily_briefing",
+    "case_details": "ai_output_chars_case_details",
+    "owner_chat": "ai_output_chars_owner_chat",
+    "tenant_chat": "ai_output_chars_tenant_chat",
+    "skill_builder": "ai_output_chars_skill_proposal",
+}
+
+
+def ai_feature_output_limit(session: Session, feature: str, *, detailed: bool = False) -> int:
+    fallback = FEATURE_OUTPUT_LIMITS.get(feature, 800)
+    setting_key = AI_OUTPUT_LIMIT_SETTINGS.get(feature)
+    if not setting_key:
+        return fallback
+    value = bounded_ai_int_setting(session, setting_key, fallback)
+    if feature == "daily_briefing":
+        return min(800, value)
+    if detailed and feature in {"owner_chat", "case_details"}:
+        return min(AI_INTEGER_SETTING_LIMITS[setting_key][1], max(value, value * 2))
+    return value
+
+
+def ai_feature_daily_limit_exceeded(session: Session, feature: str, today: date | None = None) -> bool:
+    setting_key = AI_FEATURE_LIMIT_SETTINGS.get(feature)
+    if not setting_key:
+        return False
+    limit = bounded_ai_int_setting(session, setting_key, 0)
+    if limit <= 0:
+        return False
+    usage_date = today or date.today()
+    calls = int(
+        session.scalar(
+            select(func.coalesce(func.sum(AiFeatureUsageDaily.calls), 0)).where(
+                AiFeatureUsageDaily.usage_date == usage_date,
+                AiFeatureUsageDaily.feature == feature,
+            )
+        )
+        or 0
+    )
+    return calls >= limit
 
 
 def ai_supervisor_schedule_due(session: Session, today: date, now: datetime) -> bool:
@@ -7800,11 +8621,12 @@ def add_ai_usage(session: Session, result: DeepSeekResult, cost_rub: float, toda
 
 
 def deepseek_client_for_settings(session: Session) -> DeepSeekClient:
-    return build_provider_runtime(
+    runtime = build_provider_runtime(
         AiProvider.DEEPSEEK,
         requested_model=get_setting_value(session, "deepseek_model"),
         deepseek_api_key=get_setting_value(session, "deepseek_api_key"),
-    ).client
+    )
+    return cast(DeepSeekClient, runtime.client)
 
 
 def invoke_ai_completion(
@@ -7817,8 +8639,26 @@ def invoke_ai_completion(
     model: str,
     max_tokens: int,
     temperature: float = 0.2,
+    feature: str = "owner_chat",
+    hermes_run: HermesAgentRun | None = None,
 ) -> DeepSeekResult | None:
     max_tokens = min(max_tokens, ai_max_output_tokens(session))
+    if hermes_run is None:
+        raw_size = sum(len(str(item.get("content") or "")) for item in messages)
+        manifest = ContextManifest(
+            feature=feature,
+            model=model,
+            selected_case_ids=[],
+            included_entities={},
+            included_messages_count=max(0, len(messages) - 2),
+            approximate_input_size=max(1, raw_size // 4),
+            reason_for_llm_usage=f"legacy {actor_role} completion routed through Hermes audit",
+            excluded_context=["database access", "SQL execution"],
+            output_limit=FEATURE_OUTPUT_LIMITS.get(feature, 800),
+            selected_tools=[],
+            state_hash=hashlib.sha256("\n".join(str(item.get("content") or "") for item in messages).encode("utf-8")).hexdigest(),
+        )
+        hermes_run = create_agent_run(session, manifest=manifest, trigger=actor_role)
     result = None
     try:
         configured_providers = provider_chain()
@@ -7834,6 +8674,7 @@ def invoke_ai_completion(
                 note=str(exc)[:2000],
             )
         )
+        complete_agent_run(hermes_run, error=str(exc))
         return None
     for provider in configured_providers:
         provider_started = time_module.perf_counter()
@@ -7901,6 +8742,7 @@ def invoke_ai_completion(
                 )
             )
     if result is None:
+        complete_agent_run(hermes_run, error="AI provider unavailable")
         return None
 
     prompt_tokens = result.prompt_tokens or estimate_tokens("\n".join(item["content"] for item in messages))
@@ -7920,6 +8762,21 @@ def invoke_ai_completion(
         ai_usd_rub_rate(session),
     )
     add_ai_usage(session, normalized, cost)
+    record_feature_usage(
+        session,
+        feature=feature,
+        provider=normalized.provider,
+        model=normalized.model,
+        prompt_tokens=normalized.prompt_tokens,
+        completion_tokens=normalized.completion_tokens,
+        cost_rub=cost,
+    )
+    complete_agent_run(
+        hermes_run,
+        input_tokens=normalized.prompt_tokens,
+        output_tokens=normalized.completion_tokens,
+        estimated_cost=cost,
+    )
     return normalized
 
 
@@ -7985,12 +8842,16 @@ def call_deepseek_ai(
     user_text: str,
     model: str,
     max_tokens: int = 700,
+    feature: str = "owner_chat",
+    manifest: ContextManifest | None = None,
 ) -> str:
     if not ai_enabled(session):
         return AI_DISABLED_TEXT
     if ai_budget_exceeded(session):
         return AI_BUDGET_EXCEEDED_TEXT
     if ai_daily_call_limit_exceeded(session):
+        return AI_DAILY_LIMIT_EXCEEDED_TEXT
+    if ai_feature_daily_limit_exceeded(session, feature):
         return AI_DAILY_LIMIT_EXCEEDED_TEXT
 
     conversation = ai_conversation(session, chat_id, actor_role, lease)
@@ -8002,6 +8863,7 @@ def call_deepseek_ai(
         *history,
         {"role": "user", "content": user_text.strip()},
     ]
+    hermes_run = create_agent_run(session, manifest=manifest, trigger=actor_role) if manifest else None
     normalized = invoke_ai_completion(
         session,
         conversation=conversation,
@@ -8010,6 +8872,8 @@ def call_deepseek_ai(
         messages=messages,
         model=model,
         max_tokens=max_tokens,
+        feature=feature,
+        hermes_run=hermes_run,
     )
     if normalized is None:
         return AI_UNAVAILABLE_TEXT
@@ -8045,6 +8909,8 @@ def call_agent_envelope(
     user_text: str,
     model: str,
     max_tokens: int = 1000,
+    feature: str = "owner_chat",
+    manifest: ContextManifest | None = None,
 ) -> tuple[AiConversation, AgentEnvelope]:
     conversation = ai_conversation(session, chat_id, actor_role, lease)
     if not ai_enabled(session):
@@ -8052,6 +8918,8 @@ def call_agent_envelope(
     if ai_budget_exceeded(session):
         return conversation, AgentEnvelope(reply=AI_BUDGET_EXCEEDED_TEXT)
     if ai_daily_call_limit_exceeded(session):
+        return conversation, AgentEnvelope(reply=AI_DAILY_LIMIT_EXCEEDED_TEXT)
+    if ai_feature_daily_limit_exceeded(session, feature):
         return conversation, AgentEnvelope(reply=AI_DAILY_LIMIT_EXCEEDED_TEXT)
 
     history = recent_ai_history(session, conversation)
@@ -8062,6 +8930,7 @@ def call_agent_envelope(
         *history,
         {"role": "user", "content": user_text.strip()},
     ]
+    hermes_run = create_agent_run(session, manifest=manifest, trigger=actor_role) if manifest else None
     normalized = invoke_ai_completion(
         session,
         conversation=conversation,
@@ -8071,14 +8940,23 @@ def call_agent_envelope(
         model=model,
         max_tokens=max_tokens,
         temperature=0.15,
+        feature=feature,
+        hermes_run=hermes_run,
     )
     if normalized is None:
         return conversation, AgentEnvelope(reply=AI_UNAVAILABLE_TEXT)
     envelope = parse_agent_envelope(normalized.content)
-    reply_limit = 1800 if actor_role == "owner" else 900
+    reply_limit = manifest.output_limit if manifest else FEATURE_OUTPUT_LIMITS.get(feature, 800)
     answer = clean_ai_response(envelope.reply, max_chars=reply_limit) or AI_UNAVAILABLE_TEXT
     envelope = AgentEnvelope(
         reply=answer,
+        requested_reads=envelope.requested_reads,
+        proposed_actions=envelope.proposed_actions,
+        memory_changes=envelope.memory_changes,
+        commitment_changes=envelope.commitment_changes,
+        skill_proposals=envelope.skill_proposals,
+        confidence=envelope.confidence,
+        need_disambiguation=envelope.need_disambiguation,
         actions=envelope.actions,
         memories=envelope.memories,
         intent=envelope.intent,
@@ -8102,6 +8980,14 @@ def call_agent_envelope(
         completion_tokens=normalized.completion_tokens,
         cost_rub=cost,
     )
+    if hermes_run:
+        complete_agent_run(
+            hermes_run,
+            input_tokens=normalized.prompt_tokens,
+            output_tokens=normalized.completion_tokens,
+            estimated_cost=cost,
+            envelope=envelope.model_dump(),
+        )
     return conversation, envelope
 
 
@@ -8456,11 +9342,13 @@ def create_agent_action_proposal(
 ) -> AgentActionProposal:
     lease, action_type, payload, preview = normalize_agent_action(session, action)
     payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    idempotency_key = "agent-proposal:" + hashlib.sha256(
+        f"{owner_chat_id}:{action_type}:{payload_json}".encode("utf-8")
+    ).hexdigest()
     pending = session.scalars(
         select(AgentActionProposal)
         .where(
-            AgentActionProposal.lease_id == (lease.id if lease else None),
-            AgentActionProposal.action_type == action_type,
+            AgentActionProposal.idempotency_key == idempotency_key,
             AgentActionProposal.status == "pending",
         )
         .order_by(AgentActionProposal.id.desc())
@@ -8482,6 +9370,22 @@ def create_agent_action_proposal(
         ttl_hours = min(168, max(1, int(get_setting_value(session, "ai_action_confirmation_ttl_hours") or 48)))
     except ValueError:
         ttl_hours = 48
+    decision = ACTION_SAFETY_REGISTRY.classify(
+        action_type,
+        payload,
+        owner_level_one_enabled=setting_bool_value(get_setting_value(session, "hermes_auto_level_one_enabled")),
+    )
+    related_case = None
+    if lease:
+        related_case = session.scalar(
+            select(OperationalCase)
+            .where(
+                OperationalCase.contract_id == lease.id,
+                OperationalCase.status.in_(OPEN_CASE_STATUSES),
+            )
+            .order_by(OperationalCase.priority_score.desc(), OperationalCase.id)
+            .limit(1)
+        )
     proposal = AgentActionProposal(
         conversation_id=conversation.id,
         lease_id=lease.id if lease else None,
@@ -8492,6 +9396,10 @@ def create_agent_action_proposal(
         requested_by="agent",
         owner_chat_id=str(owner_chat_id),
         expires_at=utc_now() + timedelta(hours=ttl_hours),
+        case_id=related_case.id if related_case else None,
+        safety_level=decision.level,
+        idempotency_key=idempotency_key,
+        validation_hash=hashlib.sha256(payload_json.encode("utf-8")).hexdigest(),
     )
     session.add(proposal)
     session.flush()
@@ -8741,18 +9649,45 @@ def notify_owner_about_tenant_update(
 def handle_tenant_ai_message(session: Session, chat_id: int | str, lease: Lease, text: str) -> bool:
     if not text or text.startswith("/") or not ai_enabled(session) or not ai_tenant_free_text_enabled(session):
         return False
+    intent = classify_tenant_intent(text)
+    settings = get_settings(session)
+    policy = tenant_response_policy(intent, settings, now=local_now())
     state = agent_tenant_state(session, lease)
-    context = "\n\n".join(
-        [
-            tenant_context_text(session, lease, get_settings(session)),
-            tenant_state_context(state),
-            agent_memory_context(
+    if intent == "payment_promise":
+        update_latest_reminder_outcome(session, lease_id=lease.id, outcome="promised")
+    else:
+        update_latest_reminder_outcome(session, lease_id=lease.id, outcome="replied")
+    if not policy["use_llm"]:
+        night = not (8 <= local_now().hour < 21)
+        answer = tenant_acknowledgement(intent, night=night)
+        send_telegram_text(session, chat_id, answer, tenant_keyboard())
+        if policy["escalate"]:
+            summary = f"{intent}: {text[:700]}"
+            notify_owner_about_tenant_dialogue(session, lease, text, summary)
+            situation = active_payment_situation_for_lease(session, lease.id)
+            if situation:
+                situation.status = "question" if intent != "deferral_request" else "escalated"
+                situation.escalated_at = utc_now()
+            emit_domain_event(
                 session,
-                scope_type="lease",
-                scope_id=str(lease.id),
-                lease_id=lease.id,
-            ),
-        ]
+                "tenant_message_escalated",
+                entity_type="Lease",
+                entity_id=lease.id,
+                property_id=lease.apartment.object_id,
+                apartment_id=lease.apartment_id,
+                tenant_id=lease.tenant_id,
+                contract_id=lease.id,
+                payload={"intent": intent, "delayed": policy["delay_escalation"], "text": text[:700]},
+            )
+        return True
+    model = resolve_ai_model(get_setting_value(session, "deepseek_model"))
+    selected = build_hermes_tenant_context(
+        session,
+        lease=lease,
+        user_text=text,
+        model=model,
+        reason="free tenant message needs scoped natural-language answer",
+        output_limit=ai_feature_output_limit(session, "tenant_chat"),
     )
     conversation, envelope = call_agent_envelope(
         session,
@@ -8760,18 +9695,12 @@ def handle_tenant_ai_message(session: Session, chat_id: int | str, lease: Lease,
         actor_role="tenant",
         lease=lease,
         system_prompt=configured_tenant_agent_system_prompt(session),
-        context=context,
+        context=selected.text,
         user_text=text,
-        model=resolve_ai_model(get_setting_value(session, "deepseek_model")),
-        max_tokens=850,
-    )
-    store_agent_memories(
-        session,
-        conversation,
-        envelope.memories,
-        scope_type="lease",
-        scope_id=str(lease.id),
-        lease_id=lease.id,
+        model=model,
+        max_tokens=500,
+        feature="tenant_chat",
+        manifest=selected.manifest,
     )
     update_tenant_state_from_envelope(state, envelope, text)
     situation = active_payment_situation_for_lease(session, lease.id)
@@ -8796,7 +9725,7 @@ def handle_tenant_ai_message(session: Session, chat_id: int | str, lease: Lease,
                 )
                 return True
     notify_owner_about_tenant_update(session, lease, envelope, state)
-    needs_owner = envelope.needs_owner or tenant_question_needs_owner(text)
+    needs_owner = policy["mode"] == "draft" or envelope.needs_owner or tenant_question_needs_owner(text)
     if needs_owner:
         if situation:
             situation.status = "question"
@@ -8814,33 +9743,173 @@ def handle_tenant_ai_message(session: Session, chat_id: int | str, lease: Lease,
             )
         )
         notify_owner_about_tenant_dialogue(session, lease, text, envelope.owner_summary)
-    answer = envelope.reply
+    answer = envelope.reply[: selected.manifest.output_limit]
+    if policy["mode"] == "draft":
+        notify_owner_about_tenant_dialogue(session, lease, text, answer or envelope.owner_summary)
+        answer = tenant_acknowledgement(intent)
     if needs_owner and answer in {"", AI_UNAVAILABLE_TEXT}:
         answer = TENANT_ESCALATION_TEXT
     send_telegram_text(session, chat_id, answer or AI_UNAVAILABLE_TEXT, tenant_keyboard())
     return True
 
 
+def hermes_case_choice_keyboard(session: Session, cases: list[OperationalCase], action: str = "details") -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": case_label(session, item)[:50],
+                    "callback_data": f"ai:case:{item.id}:{action}",
+                }
+            ]
+            for item in cases[:8]
+        ]
+    }
+
+
+def hermes_open_cases_text(session: Session, cases: list[OperationalCase] | None = None, *, limit: int = 8) -> str:
+    rows = cases or reconcile_operational_cases(session)
+    if not rows:
+        return "Активных операционных кейсов сейчас нет."
+    total = round(sum(float(item.amount_total or 0) for item in rows), 2)
+    rendered = f"{total:,.2f}".replace(",", " ").replace(".00", "")
+    lines = [f"Открыто {len(rows)} кейсов · сумма {rendered} ₽"]
+    for item in rows[:limit]:
+        lines.append(f"• {case_label(session, item)} — {item.compact_summary.rstrip('. ')}.")
+    if len(rows) > limit:
+        lines.append(f"Ещё {len(rows) - limit} — в Hermes Control Center.")
+    return clean_ai_response("\n".join(lines), max_chars=ai_feature_output_limit(session, "owner_chat"))
+
+
 def handle_owner_ai_message(session: Session, chat_id: int | str, text: str, *, audit_deep: bool = False) -> bool:
     user_text = text.strip()
     if not user_text:
         return False
-    captured_preferences = capture_owner_style_preferences(session, user_text)
-    dashboard = build_dashboard(session)
-    sync_agent_tasks(session, dashboard)
+    reconcile_operational_cases(session)
     conversation = ai_conversation(session, chat_id, "owner", None)
-    debt_details = owner_debt_details_text(session, dashboard, user_text) if owner_request_is_debt_details(user_text) else ""
-
-    allows_actions = owner_request_allows_actions(user_text, audit_deep=audit_deep)
-    explicitly_requests_action = owner_request_explicitly_requests_action(user_text)
-    if captured_preferences and not allows_actions:
-        answer = "Принял. " + " ".join(captured_preferences)
+    intent = classify_owner_intent(user_text)
+    matched_cases = resolve_case_alias(session, user_text)
+    selected_case = matched_cases[0] if len(matched_cases) == 1 else None
+    structured_preference = capture_structured_owner_preference(session, user_text, case=selected_case)
+    captured_style_preferences = capture_owner_style_preferences(session, user_text)
+    if structured_preference or captured_style_preferences:
+        parts = []
+        if structured_preference:
+            mode_text = "на один раз" if structured_preference.mode == "once" else "до срока" if structured_preference.mode == "until_date" else "постоянно"
+            parts.append(f"Правило сохранено {mode_text}: {structured_preference.key}.")
+        parts.extend(captured_style_preferences)
+        answer = "Принял. " + " ".join(parts)
         log_ai_message(session, conversation, "user", user_text)
         log_ai_message(session, conversation, "assistant", answer)
         send_telegram_text(session, chat_id, answer)
+        update_conversation_summary(session, conversation)
+        return True
+    if is_commitment_phrase(user_text):
+        if len(matched_cases) > 1:
+            send_telegram_text(
+                session,
+                chat_id,
+                "К какому кейсу относится обязательство?",
+                hermes_case_choice_keyboard(session, matched_cases, "owner_commitment"),
+            )
+            return True
+        if not selected_case:
+            open_cases = reconcile_operational_cases(session)
+            if len(open_cases) == 1:
+                selected_case = open_cases[0]
+            elif open_cases:
+                send_telegram_text(
+                    session,
+                    chat_id,
+                    "Уточните кейс — обещание нельзя привязать наугад.",
+                    hermes_case_choice_keyboard(session, open_cases, "owner_commitment"),
+                )
+                return True
+        commitment = create_owner_commitment(
+            session,
+            case=selected_case,
+            text=user_text,
+            briefing_time=get_setting_value(session, "ai_supervisor_time") or "10:00",
+        )
+        label = case_label(session, selected_case) if selected_case else "Обязательство"
+        send_telegram_text(session, chat_id, f"{label}: запомнил. Проверю результат {commitment.due_at:%d.%m в %H:%M}.")
+        return True
+    if intent.wants_skill:
+        skill = create_skill_draft(session, user_text)
+        send_telegram_text(
+            session,
+            chat_id,
+            skill_card(skill),
+            {
+                "inline_keyboard": [
+                    [
+                        {"text": "Активировать", "callback_data": f"ai:skill:{skill.id}:activate"},
+                        {"text": "Изменить", "callback_data": f"ai:skill:{skill.id}:edit"},
+                    ],
+                    [{"text": "Отмена", "callback_data": f"ai:skill:{skill.id}:cancel"}],
+                ]
+            },
+        )
+        return True
+    grouped = plan_grouped_deferral(session, user_text)
+    if grouped.matched:
+        if grouped.ambiguous_lease_ids:
+            cases = [item for item in reconcile_operational_cases(session) if item.contract_id in grouped.ambiguous_lease_ids]
+            send_telegram_text(
+                session,
+                chat_id,
+                "Нашёл несколько похожих целей. Выберите нужную:",
+                hermes_case_choice_keyboard(session, cases),
+            )
+            return True
+        if not grouped.items:
+            send_telegram_text(session, chat_id, "Подходящих открытых платежей для пакетной отсрочки не найдено.")
+            return True
+        try:
+            ttl = int(get_setting_value(session, "ai_action_confirmation_ttl_hours") or 48)
+        except ValueError:
+            ttl = 48
+        proposal = create_grouped_deferral_proposal(
+            session,
+            conversation=conversation,
+            owner_chat_id=chat_id,
+            plan=grouped,
+            ttl_hours=ttl,
+            mass_action_threshold=int(get_setting_value(session, "hermes_mass_action_pin_threshold") or 20),
+        )
+        response = send_telegram_text(
+            session,
+            chat_id,
+            proposal.preview_text + "\n\nДо подтверждения данные не изменятся.",
+            action_confirmation_keyboard(proposal.id),
+        )
+        proposal.owner_message_id = int(((response.get("result") or {}) if isinstance(response, dict) else {}).get("message_id") or 0) or None
+        return True
+    if len(matched_cases) > 1:
+        send_telegram_text(
+            session,
+            chat_id,
+            "Нашёл несколько похожих кейсов. Выберите нужный:",
+            hermes_case_choice_keyboard(session, matched_cases),
+        )
+        return True
+    if owner_request_is_debt_details(user_text) and not intent.wants_action:
+        send_telegram_text(session, chat_id, owner_debt_details_text(session, build_dashboard(session), user_text))
         return True
 
+    allows_actions = owner_request_allows_actions(user_text, audit_deep=audit_deep)
+    explicitly_requests_action = owner_request_explicitly_requests_action(user_text)
     model_key = "ai_supervisor_model" if audit_deep else "deepseek_model"
+    model = resolve_ai_model(get_setting_value(session, model_key))
+    feature = "deep_audit" if audit_deep else "owner_chat"
+    selected = build_hermes_owner_context(
+        session,
+        chat_id=chat_id,
+        user_text=user_text,
+        model=model,
+        feature=feature,
+        output_limit=ai_feature_output_limit(session, feature, detailed=intent.wants_detail),
+    )
     action_policy = (
         "Владелец разрешил подготовить предложения действий: actions допустимы."
         if allows_actions
@@ -8856,17 +9925,12 @@ def handle_owner_ai_message(session: Session, chat_id: int | str, text: str, *, 
             if audit_deep
             else configured_owner_agent_system_prompt(session)
         ),
-        context=owner_agent_context(session, chat_id, dashboard) + "\n\nПолитика текущего запроса:\n" + action_policy,
+        context=selected.text + "\n\nПолитика текущего запроса:\n" + action_policy,
         user_text=user_text,
-        model=resolve_ai_model(get_setting_value(session, model_key)),
+        model=model,
         max_tokens=ai_supervisor_max_tokens(session) if audit_deep else 1100,
-    )
-    store_agent_memories(
-        session,
-        conversation,
-        envelope.memories,
-        scope_type="owner",
-        scope_id="owner",
+        feature=feature,
+        manifest=selected.manifest,
     )
     actions = envelope.actions if allows_actions else []
     if envelope.actions and not allows_actions:
@@ -8879,9 +9943,7 @@ def handle_owner_ai_message(session: Session, chat_id: int | str, text: str, *, 
         except HTTPException as exc:
             proposal_errors.append(str(exc.detail))
 
-    if debt_details:
-        send_telegram_text(session, chat_id, debt_details)
-    elif not explicitly_requests_action:
+    if not explicitly_requests_action:
         send_telegram_text(session, chat_id, envelope.reply or AI_UNAVAILABLE_TEXT)
     elif not proposals:
         send_telegram_text(
@@ -8895,6 +9957,7 @@ def handle_owner_ai_message(session: Session, chat_id: int | str, text: str, *, 
             chat_id,
             f"Часть предложений не создана: {'; '.join(proposal_errors)}. Остальные ждут подтверждения кнопками.",
         )
+    update_conversation_summary(session, conversation)
     return True
 
 
@@ -9051,6 +10114,12 @@ def execute_agent_action(session: Session, proposal: AgentActionProposal) -> str
         payload = json.loads(proposal.payload_json or "{}")
     except json.JSONDecodeError as exc:
         raise HTTPException(400, "Повреждены параметры предложения") from exc
+
+    if proposal.action_type == "grouped_deferral":
+        try:
+            return execute_grouped_deferral(session, proposal)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     if proposal.action_type == "defer_rent":
         lease = session.get(Lease, int(payload.get("lease_id") or proposal.lease_id or 0))
@@ -9447,6 +10516,247 @@ def safe_answer_agent_callback(token: str, callback_id: str, text: str) -> None:
         runtime_log("TELEGRAM", f"callback answer failed error={exc}")
 
 
+def hermes_case_details_text(session: Session, item: OperationalCase) -> str:
+    snapshot = case_snapshot(session, item)
+    lines = [
+        f"{snapshot['label']} · {item.title}",
+        "",
+        item.compact_summary,
+        f"Статус: {item.status}; важность: {item.severity}.",
+    ]
+    if item.waiting_for:
+        lines.append(f"Сейчас ожидается: {item.waiting_for}.")
+    if item.next_review_at:
+        lines.append(f"Следующая проверка: {item.next_review_at:%d.%m.%Y %H:%M}.")
+    metadata = snapshot.get("metadata") or {}
+    if metadata.get("promise_date"):
+        lines.append(f"Обещанная дата: {metadata['promise_date']}.")
+    suggestion = {
+        "broken_payment_promise": "Предлагаю отправить разрешённое мягкое напоминание и проверить ответ завтра.",
+        "rent_overdue": "Предлагаю отправить напоминание или согласовать отсрочку кнопкой.",
+        "rent_partial": "Предлагаю уточнить остаток и ожидаемую дату оплаты.",
+        "utility_overdue": "Предлагаю напомнить о коммуналке или согласовать новую дату.",
+        "stale_meter_reading": "Предлагаю запросить свежие показания.",
+        "expense_compensation": "Предлагаю проверить компенсацию расхода.",
+    }.get(item.case_type, "Предлагаю выбрать следующее действие кнопкой ниже.")
+    lines.extend(["", suggestion])
+    return clean_ai_response("\n".join(lines), max_chars=ai_feature_output_limit(session, "case_details"))
+
+
+def hermes_case_actions_keyboard(item: OperationalCase) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "Отправить напоминание", "callback_data": f"ai:case:{item.id}:remind"},
+                {"text": "Дать отсрочку", "callback_data": f"ai:case:{item.id}:defer"},
+            ],
+            [
+                {"text": "Я разберусь", "callback_data": f"ai:case:{item.id}:owner_commitment"},
+                {"text": "Закрыть", "callback_data": f"ai:case:{item.id}:close"},
+            ],
+            [{"text": "Отложить на день", "callback_data": f"ai:case:{item.id}:snooze"}],
+        ]
+    }
+
+
+def send_case_template_reminder(session: Session, item: OperationalCase) -> str:
+    try:
+        metadata = json.loads(item.metadata_json or "{}")
+    except json.JSONDecodeError:
+        metadata = {}
+    if metadata.get("rent_charge_id"):
+        charge = session.get(RentCharge, int(metadata["rent_charge_id"]))
+        if not charge:
+            raise HTTPException(404, "Начисление больше не найдено")
+        situation = payment_situation(session, "rent", charge.id, charge.lease_id)
+        template_key = "message_rent_status_request" if charge.due_date < date.today() else "message_rent_due"
+        if not send_payment_situation_message(session, situation, template_key, "owner_case_action", date.today()):
+            return "Напоминание сегодня уже отправлялось."
+        record_reminder_outcome(
+            session,
+            lease_id=charge.lease_id,
+            stage="owner_case_action",
+            template_key=template_key,
+            payment_situation_id=situation.id,
+        )
+        return "Шаблонное напоминание отправлено."
+    if metadata.get("utility_line_id"):
+        line = session.get(UtilityBillLine, int(metadata["utility_line_id"]))
+        if not line or not line.lease_id:
+            raise HTTPException(404, "Коммунальный платёж больше не найден")
+        situation = payment_situation(session, "utility", line.id, int(line.lease_id))
+        if not send_payment_situation_message(
+            session,
+            situation,
+            "message_utility_overdue",
+            "owner_case_action",
+            date.today(),
+        ):
+            return "Напоминание сегодня уже отправлялось."
+        record_reminder_outcome(
+            session,
+            lease_id=int(line.lease_id),
+            stage="owner_case_action",
+            template_key="message_utility_overdue",
+            payment_situation_id=situation.id,
+        )
+        return "Шаблонное напоминание отправлено."
+    raise HTTPException(400, "Для этого кейса нет разрешённого шаблонного напоминания")
+
+
+def handle_hermes_callback_query(
+    session: Session,
+    callback: dict[str, Any],
+    *,
+    callback_id: str,
+    data: str,
+    chat_id: int | str,
+    token: str,
+) -> bool:
+    case_match = re.fullmatch(r"ai:case:(\d+):([a-z_]+)", data)
+    if case_match:
+        case_id_text, action = case_match.groups()
+        item = session.get(OperationalCase, int(case_id_text))
+        if not item:
+            safe_answer_agent_callback(token, callback_id, "Кейс не найден.")
+            return True
+        if action in {"details", "actions"}:
+            safe_answer_agent_callback(token, callback_id, "Открываю кейс.")
+            send_telegram_text(
+                session,
+                chat_id,
+                hermes_case_details_text(session, item),
+                hermes_case_actions_keyboard(item),
+            )
+        elif action == "snooze":
+            hermes_snooze_case(session, item.id, utc_now() + timedelta(days=1))
+            safe_answer_agent_callback(token, callback_id, "Отложено на день.")
+        elif action == "owner_commitment":
+            commitment = create_owner_commitment(
+                session,
+                case=item,
+                text="Я разберусь",
+                briefing_time=get_setting_value(session, "ai_supervisor_time") or "10:00",
+            )
+            safe_answer_agent_callback(token, callback_id, "Обязательство сохранено.")
+            send_telegram_text(
+                session,
+                chat_id,
+                f"{case_label(session, item)}: спрошу о результате {commitment.due_at:%d.%m в %H:%M}.",
+            )
+        elif action == "close":
+            hermes_close_case(session, item.id, "Владелец закрыл кейс через Telegram")
+            safe_answer_agent_callback(token, callback_id, "Кейс закрыт.")
+        elif action == "remind":
+            try:
+                result = send_case_template_reminder(session, item)
+            except HTTPException as exc:
+                safe_answer_agent_callback(token, callback_id, str(exc.detail)[:180])
+            else:
+                safe_answer_agent_callback(token, callback_id, result[:180])
+        elif action == "defer":
+            try:
+                metadata = json.loads(item.metadata_json or "{}")
+            except json.JSONDecodeError:
+                metadata = {}
+            conversation = ai_conversation(session, chat_id, "owner", None)
+            if metadata.get("rent_charge_id") and item.contract_id:
+                create_agent_action_proposal(
+                    session,
+                    conversation,
+                    chat_id,
+                    {
+                        "type": "defer_rent",
+                        "payload": {
+                            "lease_id": item.contract_id,
+                            "charge_id": metadata["rent_charge_id"],
+                            "deferral_until": (date.today() + timedelta(days=7)).isoformat(),
+                            "notify_tenant": True,
+                        },
+                        "reason": "владелец запросил отсрочку из карточки кейса",
+                    },
+                )
+                safe_answer_agent_callback(token, callback_id, "Создано предложение на 7 дней.")
+            else:
+                safe_answer_agent_callback(token, callback_id, "Уточните срок отсрочки сообщением Hermes.")
+        else:
+            safe_answer_agent_callback(token, callback_id, "Неизвестное действие кейса.")
+        return True
+
+    briefing_match = re.fullmatch(r"ai:briefing:(\d+):(remaining|snooze)", data)
+    if briefing_match:
+        briefing_id_text, action = briefing_match.groups()
+        briefing = session.get(OwnerBriefing, int(briefing_id_text))
+        if not briefing:
+            safe_answer_agent_callback(token, callback_id, "Сводка не найдена.")
+            return True
+        if action == "snooze":
+            snooze_briefing(session, briefing.id)
+            safe_answer_agent_callback(token, callback_id, "Сводка отложена на 3 часа.")
+        else:
+            included = set(
+                session.scalars(
+                    select(OwnerBriefingItem.case_id).where(OwnerBriefingItem.briefing_id == briefing.id)
+                ).all()
+            )
+            remaining = [item for item in reconcile_operational_cases(session) if item.id not in included]
+            safe_answer_agent_callback(token, callback_id, "Показываю остальные кейсы.")
+            send_telegram_text(
+                session,
+                chat_id,
+                hermes_open_cases_text(session, remaining, limit=8),
+                hermes_case_choice_keyboard(session, remaining),
+            )
+        return True
+
+    commitment_match = re.fullmatch(r"ai:commitment:(\d+):(done|postpone|details)", data)
+    if commitment_match:
+        commitment_id_text, action = commitment_match.groups()
+        callback_commitment = session.get(OwnerCommitment, int(commitment_id_text))
+        if not callback_commitment:
+            safe_answer_agent_callback(token, callback_id, "Обязательство не найдено.")
+            return True
+        if action == "done":
+            complete_owner_commitment(session, callback_commitment.id)
+            if callback_commitment.case_id:
+                hermes_close_case(session, callback_commitment.case_id, "Владелец подтвердил выполнение обязательства")
+            safe_answer_agent_callback(token, callback_id, "Отмечено выполненным.")
+        elif action == "postpone":
+            postpone_owner_commitment(session, callback_commitment.id)
+            safe_answer_agent_callback(token, callback_id, "Перенесено на завтра.")
+        elif callback_commitment.case_id:
+            item = session.get(OperationalCase, callback_commitment.case_id)
+            if item:
+                send_telegram_text(session, chat_id, hermes_case_details_text(session, item), hermes_case_actions_keyboard(item))
+            safe_answer_agent_callback(token, callback_id, "Открываю подробности.")
+        return True
+
+    skill_match = re.fullmatch(r"ai:skill:(\d+):(activate|edit|cancel|disable|rollback)", data)
+    if skill_match:
+        skill_id_text, action = skill_match.groups()
+        try:
+            callback_skill: AiSkill | None
+            if action == "activate":
+                callback_skill = activate_skill(session, int(skill_id_text))
+                answer = "Навык активирован."
+            elif action in {"cancel", "disable"}:
+                callback_skill = disable_skill(session, int(skill_id_text))
+                answer = "Навык отключён."
+            elif action == "rollback":
+                callback_skill = rollback_skill(session, int(skill_id_text))
+                answer = "Предыдущая версия активирована."
+            else:
+                callback_skill = session.get(AiSkill, int(skill_id_text))
+                answer = "Опишите изменения обычным сообщением с названием навыка."
+            safe_answer_agent_callback(token, callback_id, answer)
+            if callback_skill:
+                send_telegram_text(session, chat_id, skill_card(callback_skill))
+        except ValueError as exc:
+            safe_answer_agent_callback(token, callback_id, str(exc)[:180])
+        return True
+    return False
+
+
 def handle_agent_callback_query(session: Session, callback: dict[str, Any]) -> None:
     callback_id = str(callback.get("id") or "")
     data = str(callback.get("data") or "")
@@ -9460,6 +10770,24 @@ def handle_agent_callback_query(session: Session, callback: dict[str, Any]) -> N
 
     if not owner_chat_allowed(session, sender.get("id") or ""):
         safe_answer_agent_callback(token, callback_id, "Подтверждать действия может только владелец.")
+        return
+
+    proposal_alias = re.fullmatch(r"ai:proposal:(\d+):(confirm|reject|edit)", data)
+    if proposal_alias:
+        proposal_id_text, alias_action = proposal_alias.groups()
+        if alias_action == "edit":
+            safe_answer_agent_callback(token, callback_id, "Опишите изменения сообщением — старое предложение не выполнится.")
+            return
+        data = f"agent:{alias_action}:{proposal_id_text}"
+
+    if handle_hermes_callback_query(
+        session,
+        callback,
+        callback_id=callback_id,
+        data=data,
+        chat_id=chat_id,
+        token=token,
+    ):
         return
 
     match = re.fullmatch(r"agent:(confirm|reject):(\d+)", data)
@@ -9497,6 +10825,15 @@ def handle_agent_callback_query(session: Session, callback: dict[str, Any]) -> N
     if proposal.owner_chat_id and str(chat_id) != proposal.owner_chat_id:
         safe_answer_agent_callback(token, callback_id, "Подтверждение доступно только в исходном owner chat.")
         return
+    proposal_owner_message_id = proposal.owner_message_id
+    if decision == "confirm" and int(proposal.safety_level or 0) >= 3:
+        safe_answer_agent_callback(token, callback_id, "Для уровня 3 нужен повторный PIN в Control Center.")
+        send_telegram_text(
+            session,
+            chat_id,
+            "Это критическое или массовое действие. Откройте Hermes Control Center в веб-панели или Android и подтвердите его повторным PIN владельца.",
+        )
+        return
 
     if decision == "reject":
         proposal.status = "rejected"
@@ -9517,6 +10854,7 @@ def handle_agent_callback_query(session: Session, callback: dict[str, Any]) -> N
     else:
         proposal.status = "approved"
         proposal.confirmed_at = utc_now()
+        proposal.confirmed_by = str(sender.get("id") or chat_id)
         session.add(
             AiActionLog(
                 conversation_id=proposal.conversation_id,
@@ -9583,6 +10921,7 @@ def handle_agent_callback_query(session: Session, callback: dict[str, Any]) -> N
             proposal.executed_at = utc_now()
             proposal.result_text = result_text
             proposal.error_text = ""
+            reconcile_operational_cases(session)
             session.add(
                 AiActionLog(
                     conversation_id=proposal.conversation_id,
@@ -9597,7 +10936,7 @@ def handle_agent_callback_query(session: Session, callback: dict[str, Any]) -> N
             safe_answer_agent_callback(token, callback_id, "Подтверждено и выполнено.")
             send_telegram_text(session, chat_id, f"Готово. {result_text}")
 
-    message_id = message.get("message_id") or proposal.owner_message_id
+    message_id = message.get("message_id") or proposal_owner_message_id
     if message_id:
         try:
             clear_inline_keyboard(token, chat_id, int(message_id))

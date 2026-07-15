@@ -18,7 +18,7 @@ def redact_log_text(value: object) -> str:
 
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
-        payload = {
+        payload: dict[str, object] = {
             "at": datetime.now(UTC).isoformat(),
             "level": record.levelname.lower(),
             "logger": record.name,

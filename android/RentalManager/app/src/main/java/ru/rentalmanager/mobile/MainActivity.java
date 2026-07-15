@@ -1978,6 +1978,12 @@ public class MainActivity extends Activity {
         ui.addView(primaryButton("Настроить страницы", v -> showPageSectionsDialog()));
         content.addView(ui);
 
+        LinearLayout hermes = card();
+        hermes.addView(label("Hermes Core", 19, text, true));
+        hermes.addView(label("Кейсы, обязательства, подтверждения, настройки автономности и стоимость AI.", 14, muted, false));
+        hermes.addView(primaryButton("Открыть центр управления AI", v -> startActivity(new Intent(this, HermesActivity.class))));
+        content.addView(hermes);
+
         if (showSection("more_notifications")) {
         LinearLayout notif = card();
         notif.addView(label("Пуш-уведомления", 19, text, true));

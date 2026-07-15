@@ -1203,6 +1203,17 @@ td.actions .button {
   color: #e2ca9b;
 }
 
+.hermes-nav-btn {
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+
+.hermes-nav-btn.active {
+  background: var(--accent-soft);
+  color: #e2ca9b;
+}
+
 .modal-shell {
   padding: 24px;
   background: rgba(3, 5, 7, 0.78);

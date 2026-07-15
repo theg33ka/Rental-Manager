@@ -14,7 +14,6 @@ from rental_manager.models import (
     Expense,
     Lease,
     ManualDebt,
-    Meter,
     PaymentReceipt,
     PaymentSituation,
     RentalObject,
