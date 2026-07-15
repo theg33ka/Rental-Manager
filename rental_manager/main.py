@@ -8483,17 +8483,15 @@ def backfill_owner_style_preferences(session: Session, limit: int = 50) -> int:
 
 def owner_request_is_debt_details(text: str) -> bool:
     lowered = (text or "").lower()
-    debt_topic = bool(re.search(r"\b(долг|должен|должны|задолж|просроч|коммунал)", lowered))
-    detail_request = bool(re.search(r"\b(кто|сколько|какие|покажи|подроб|список|распиши)", lowered))
+    debt_topic = bool(re.search(r"\b(долг|должен|должны|должник|задолж|просроч|коммунал)", lowered))
+    detail_request = bool(
+        re.search(r"\b(кто|сколько|какие|покажи|подроб|список|распиши|сводк|состояни|как\s+там|что\s+(?:там\s+)?по)", lowered)
+    )
     return debt_topic and detail_request
 
 
-def owner_request_allows_actions(text: str, *, audit_deep: bool = False) -> bool:
-    if audit_deep:
-        return True
+def owner_request_allows_actions(text: str) -> bool:
     lowered = (text or "").lower()
-    if owner_request_is_debt_details(lowered):
-        return True
     explicit_action = re.search(
         r"\b(отправ|уведом|напиш|создай|оформ|выдай|дай|предостав|отсроч|установ|перенес|"
         r"добав|начисл|подготов|сделай|выполни|запусти|предложи)\w*",
@@ -9781,14 +9779,23 @@ def hermes_open_cases_text(session: Session, cases: list[OperationalCase] | None
     return clean_ai_response("\n".join(lines), max_chars=ai_feature_output_limit(session, "owner_chat"))
 
 
-def handle_owner_ai_message(session: Session, chat_id: int | str, text: str, *, audit_deep: bool = False) -> bool:
+def handle_owner_ai_message(
+    session: Session,
+    chat_id: int | str,
+    text: str,
+    *,
+    audit_deep: bool = False,
+    audit_requested: bool = False,
+) -> bool:
     user_text = text.strip()
     if not user_text:
         return False
     reconcile_operational_cases(session)
     conversation = ai_conversation(session, chat_id, "owner", None)
     intent = classify_owner_intent(user_text)
-    matched_cases = resolve_case_alias(session, user_text)
+    audit_mode = audit_requested or audit_deep
+    debt_summary_request = not audit_mode and owner_request_is_debt_details(user_text) and not intent.wants_action
+    matched_cases = [] if audit_mode or debt_summary_request else resolve_case_alias(session, user_text)
     selected_case = matched_cases[0] if len(matched_cases) == 1 else None
     structured_preference = capture_structured_owner_preference(session, user_text, case=selected_case)
     captured_style_preferences = capture_owner_style_preferences(session, user_text)
@@ -9885,6 +9892,9 @@ def handle_owner_ai_message(session: Session, chat_id: int | str, text: str, *, 
         )
         proposal.owner_message_id = int(((response.get("result") or {}) if isinstance(response, dict) else {}).get("message_id") or 0) or None
         return True
+    if debt_summary_request:
+        send_telegram_text(session, chat_id, owner_debt_details_text(session, build_dashboard(session), user_text))
+        return True
     if len(matched_cases) > 1:
         send_telegram_text(
             session,
@@ -9893,15 +9903,11 @@ def handle_owner_ai_message(session: Session, chat_id: int | str, text: str, *, 
             hermes_case_choice_keyboard(session, matched_cases),
         )
         return True
-    if owner_request_is_debt_details(user_text) and not intent.wants_action:
-        send_telegram_text(session, chat_id, owner_debt_details_text(session, build_dashboard(session), user_text))
-        return True
-
-    allows_actions = owner_request_allows_actions(user_text, audit_deep=audit_deep)
+    allows_actions = owner_request_allows_actions(user_text)
     explicitly_requests_action = owner_request_explicitly_requests_action(user_text)
-    model_key = "ai_supervisor_model" if audit_deep else "deepseek_model"
+    model_key = "ai_supervisor_model" if audit_mode else "deepseek_model"
     model = resolve_ai_model(get_setting_value(session, model_key))
-    feature = "deep_audit" if audit_deep else "owner_chat"
+    feature = "deep_audit" if audit_mode else "owner_chat"
     selected = build_hermes_owner_context(
         session,
         chat_id=chat_id,
@@ -9922,13 +9928,13 @@ def handle_owner_ai_message(session: Session, chat_id: int | str, text: str, *, 
         lease=None,
         system_prompt=(
             configured_audit_system_prompt(session)
-            if audit_deep
+            if audit_mode
             else configured_owner_agent_system_prompt(session)
         ),
         context=selected.text + "\n\nПолитика текущего запроса:\n" + action_policy,
         user_text=user_text,
         model=model,
-        max_tokens=ai_supervisor_max_tokens(session) if audit_deep else 1100,
+        max_tokens=ai_supervisor_max_tokens(session) if audit_mode else 1100,
         feature=feature,
         manifest=selected.manifest,
     )
@@ -10532,31 +10538,50 @@ def hermes_case_details_text(session: Session, item: OperationalCase) -> str:
     if metadata.get("promise_date"):
         lines.append(f"Обещанная дата: {metadata['promise_date']}.")
     suggestion = {
-        "broken_payment_promise": "Предлагаю отправить разрешённое мягкое напоминание и проверить ответ завтра.",
+        "broken_payment_promise": "Предлагаю проверить ситуацию и зафиксировать следующий шаг.",
         "rent_overdue": "Предлагаю отправить напоминание или согласовать отсрочку кнопкой.",
         "rent_partial": "Предлагаю уточнить остаток и ожидаемую дату оплаты.",
-        "utility_overdue": "Предлагаю напомнить о коммуналке или согласовать новую дату.",
-        "stale_meter_reading": "Предлагаю запросить свежие показания.",
-        "expense_compensation": "Предлагаю проверить компенсацию расхода.",
-    }.get(item.case_type, "Предлагаю выбрать следующее действие кнопкой ниже.")
+        "rent_due": "Предлагаю напомнить о сроке или согласовать отсрочку кнопкой.",
+        "utility_overdue": "Предлагаю отправить напоминание о коммуналке.",
+        "stale_meter_reading": "Внесите свежие показания на странице счётчиков.",
+        "suspicious_payment": "Проверьте чек на странице сообщений.",
+        "expense_compensation": "Проверьте компенсацию на странице расходов.",
+        "automation_failure": "Проверьте журнал автоматизации и причину ошибки.",
+    }.get(item.case_type, "Зафиксируйте следующий шаг или закройте кейс.")
     lines.extend(["", suggestion])
     return clean_ai_response("\n".join(lines), max_chars=ai_feature_output_limit(session, "case_details"))
 
 
 def hermes_case_actions_keyboard(item: OperationalCase) -> dict[str, Any]:
-    return {
-        "inline_keyboard": [
+    rows: list[list[dict[str, str]]] = []
+    if item.case_type in {"rent_due", "rent_overdue", "rent_partial"}:
+        rows.append(
             [
                 {"text": "Отправить напоминание", "callback_data": f"ai:case:{item.id}:remind"},
                 {"text": "Дать отсрочку", "callback_data": f"ai:case:{item.id}:defer"},
-            ],
+            ]
+        )
+    elif item.case_type == "utility_overdue":
+        rows.append([{"text": "Отправить напоминание", "callback_data": f"ai:case:{item.id}:remind"}])
+
+    commitment_label = {
+        "stale_meter_reading": "Внесу показания",
+        "suspicious_payment": "Проверю платёж",
+        "expense_compensation": "Проверю расход",
+        "automation_failure": "Проверю ошибку",
+        "tenant_message_escalation": "Отвечу жильцу",
+        "deferral_request": "Решу запрос",
+    }.get(item.case_type, "Я разберусь")
+    rows.extend(
+        [
             [
-                {"text": "Я разберусь", "callback_data": f"ai:case:{item.id}:owner_commitment"},
+                {"text": commitment_label, "callback_data": f"ai:case:{item.id}:owner_commitment"},
                 {"text": "Закрыть", "callback_data": f"ai:case:{item.id}:close"},
             ],
             [{"text": "Отложить на день", "callback_data": f"ai:case:{item.id}:snooze"}],
         ]
-    }
+    )
+    return {"inline_keyboard": rows}
 
 
 def send_case_template_reminder(session: Session, item: OperationalCase) -> str:
@@ -11184,7 +11209,7 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
         return
     if command == "/audit":
         deep = "deep" in text.lower().split()[1:]
-        handle_owner_ai_message(session, chat_id, AUDIT_USER_PROMPT, audit_deep=deep)
+        handle_owner_ai_message(session, chat_id, AUDIT_USER_PROMPT, audit_deep=deep, audit_requested=True)
         return
     if command == "/run_reminders":
         summary = run_due_reminders(session)

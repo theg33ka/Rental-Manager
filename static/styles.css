@@ -1715,6 +1715,65 @@ td.actions .button {
   font-weight: 600;
 }
 
+.attention-grid.attention-grid--grouped {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 20px;
+}
+
+.attention-object-group {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+}
+
+.attention-object-group__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 2px 9px;
+  border-bottom: 1px solid var(--line);
+}
+
+.attention-object-group__head h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.attention-object-group__head span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.attention-object-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  align-items: stretch;
+  gap: 14px;
+}
+
+.attention-card__debt {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 12px;
+  border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, currentColor 8%, transparent);
+}
+
+.attention-card__debt span {
+  color: color-mix(in srgb, currentColor 72%, transparent);
+  font-size: 12px;
+}
+
+.attention-card__debt strong {
+  font-size: 20px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
 .attention-card__panel {
   display: grid;
   gap: 10px;
@@ -2175,5 +2234,13 @@ td.actions .button {
 
   .auth-card {
     padding: 22px;
+  }
+
+  .attention-object-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .attention-object-group__head {
+    align-items: center;
   }
 }

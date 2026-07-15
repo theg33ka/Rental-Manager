@@ -28,7 +28,7 @@ from rental_manager.models import (
     Apartment,
 )
 from rental_manager.services.hermes.briefing import build_owner_briefing, mark_briefing_sent
-from rental_manager.services.hermes.cases import reconcile_operational_cases
+from rental_manager.services.hermes.cases import reconcile_operational_cases, resolve_case_alias
 from rental_manager.services.hermes.events import emit_domain_event, stable_hash
 from rental_manager.services.hermes.memory import (
     applicable_preferences,
@@ -395,6 +395,35 @@ class HermesCoreTests(unittest.TestCase):
                 )
             )
             self.assertEqual(session.scalar(select(func.count(HermesAgentRun.id))), 1)
+
+    def test_case_alias_ignores_generic_debt_question_and_matches_object(self) -> None:
+        with self.Session() as session:
+            bath_lease, _ = self.add_lease(session, object_name="Баня", apartment_name="3", tenant_name="Матвей")
+            white_lease, _ = self.add_lease(session, object_name="Белый дом", apartment_name="2", tenant_name="Виталий")
+            bath_case = self.add_case(
+                session,
+                key="bath-debt",
+                priority=80,
+                property_id=bath_lease.apartment.object_id,
+                apartment_id=bath_lease.apartment_id,
+                contract_id=bath_lease.id,
+                case_type="rent_overdue",
+            )
+            self.add_case(
+                session,
+                key="white-debt",
+                priority=70,
+                property_id=white_lease.apartment.object_id,
+                apartment_id=white_lease.apartment_id,
+                contract_id=white_lease.id,
+                case_type="rent_overdue",
+            )
+
+            generic = resolve_case_alias(session, "Как там по должникам?")
+            specific = resolve_case_alias(session, "Покажи кейс по Бане")
+
+            self.assertEqual(generic, [])
+            self.assertEqual([item.id for item in specific], [bath_case.id])
 
     def test_domain_events_are_idempotent_with_full_audit_fields(self) -> None:
         with self.Session() as session:

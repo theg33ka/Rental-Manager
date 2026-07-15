@@ -50,6 +50,81 @@ MANAGED_CASE_TYPES = {
     "owner_commitment",
     "automation_failure",
 }
+CASE_ALIAS_STOPWORDS = {
+    "как",
+    "там",
+    "что",
+    "это",
+    "кто",
+    "кого",
+    "где",
+    "какие",
+    "какой",
+    "покажи",
+    "найди",
+    "нужно",
+    "требует",
+    "требуют",
+    "внимания",
+    "список",
+    "сводка",
+    "следующие",
+    "шаги",
+}
+CASE_ALIAS_TOPIC_PREFIXES = (
+    "аренд",
+    "долг",
+    "долж",
+    "коммунал",
+    "оплат",
+    "платеж",
+    "платёж",
+    "просроч",
+    "напомин",
+    "показан",
+    "счет",
+    "счёт",
+    "чек",
+    "расход",
+    "компенсац",
+    "риск",
+    "кейс",
+    "case",
+)
+CASE_ALIAS_SUFFIXES = (
+    "ого",
+    "ему",
+    "ому",
+    "ыми",
+    "ими",
+    "ами",
+    "ями",
+    "ую",
+    "юю",
+    "ий",
+    "ый",
+    "ой",
+    "ая",
+    "яя",
+    "ое",
+    "ее",
+    "ов",
+    "ев",
+    "ей",
+    "ам",
+    "ям",
+    "ах",
+    "ях",
+    "ом",
+    "ем",
+    "ы",
+    "и",
+    "а",
+    "я",
+    "у",
+    "ю",
+    "е",
+)
 
 
 @dataclass(frozen=True)
@@ -710,6 +785,13 @@ def case_snapshot(session: Session, item: OperationalCase) -> dict[str, Any]:
     }
 
 
+def _case_alias_stem(token: str) -> str:
+    for suffix in CASE_ALIAS_SUFFIXES:
+        if token.endswith(suffix) and len(token) - len(suffix) >= 3:
+            return token[: -len(suffix)]
+    return token
+
+
 def resolve_case_alias(session: Session, text: str, *, open_only: bool = True) -> list[OperationalCase]:
     normalized = re.sub(r"[^0-9a-zа-яё]+", " ", (text or "").lower()).strip()
     id_match = re.search(r"(?:кейс|case)\s*(\d+)", normalized)
@@ -723,13 +805,29 @@ def resolve_case_alias(session: Session, text: str, *, open_only: bool = True) -
         query = query.where(OperationalCase.status.in_(OPEN_CASE_STATUSES))
     cases = session.scalars(query.order_by(OperationalCase.priority_score.desc(), OperationalCase.id)).all()
     scored: list[tuple[int, OperationalCase]] = []
-    tokens = {token for token in normalized.split() if len(token) >= 2}
+    tokens = {
+        token
+        for token in normalized.split()
+        if len(token) >= 3 and token not in CASE_ALIAS_STOPWORDS and not token.startswith(CASE_ALIAS_TOPIC_PREFIXES)
+    }
+    if not tokens:
+        return []
     for item in cases:
         label = re.sub(r"[^0-9a-zа-яё]+", " ", case_label(session, item).lower())
-        haystack = " ".join([label, item.title.lower(), item.compact_summary.lower(), item.case_key.lower()])
-        score = sum(1 for token in tokens if token in haystack)
-        if normalized and normalized in haystack:
-            score += 3
+        lease = session.get(Lease, item.contract_id) if item.contract_id else None
+        identity = " ".join(
+            [
+                label,
+                item.title.lower(),
+                lease.tenant.full_name.lower() if lease and lease.tenant else "",
+            ]
+        )
+        identity_stems = {
+            _case_alias_stem(word)
+            for word in re.sub(r"[^0-9a-zа-яё]+", " ", identity).split()
+            if len(word) >= 3
+        }
+        score = sum(1 for token in tokens if _case_alias_stem(token) in identity_stems)
         if score:
             scored.append((score, item))
     if not scored:

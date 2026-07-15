@@ -2146,8 +2146,53 @@ function attentionLeadText(group) {
   return "Нужно посмотреть внимательнее.";
 }
 
+function dashboardItemDebt(item) {
+  return Math.max(0, Number(item?.debt || 0));
+}
+
+function tenantAttentionDebtTotal(group) {
+  return [group.rentItems, group.utilityItems, group.manualDebtItems]
+    .flat()
+    .reduce((total, item) => total + dashboardItemDebt(item), 0);
+}
+
+function joinRussianList(values) {
+  if (values.length <= 1) return values[0] || "";
+  if (values.length === 2) return `${values[0]} и ${values[1]}`;
+  return `${values.slice(0, -1).join(", ")} и ${values.at(-1)}`;
+}
+
+function summarizedAttentionIssues(group) {
+  const rentOverdue = group.issues.filter((issue) => issue.kind === "rent_overdue");
+  const utilityGroups = [
+    ["utility_overdue", "Просрочена коммуналка", "Просрочены платежи по коммуналке"],
+    ["utility_partial", "Частично оплачена коммуналка", "Осталось оплатить по коммуналке"],
+    ["utility_issued", "Выставлена коммуналка", "Выставлены платежи по коммуналке"],
+  ];
+  const summarizedKinds = new Set(["rent_overdue", ...utilityGroups.map(([kind]) => kind)]);
+  const result = group.issues.filter((issue) => !summarizedKinds.has(issue.kind));
+
+  if (rentOverdue.length) {
+    const months = [...new Set(rentOverdue.map((issue) => formatMonth(issue.item.due_date)))];
+    result.push({
+      ...rentOverdue[0],
+      title: "Просрочена аренда",
+      text: `Просрочена аренда за ${joinRussianList(months)}`,
+    });
+  }
+  utilityGroups.forEach(([kind, title, text]) => {
+    const issues = group.issues.filter((issue) => issue.kind === kind);
+    if (!issues.length) return;
+    const total = issues.reduce((sum, issue) => sum + dashboardItemDebt(issue.item), 0);
+    result.push({ ...issues[0], title, text: `${text}: ${money(total)}` });
+  });
+  return result.sort((left, right) =>
+    issuePriority(right.kind, right.item) - issuePriority(left.kind, left.item) || String(left.date).localeCompare(String(right.date))
+  );
+}
+
 function tenantAttentionCard(group) {
-  const issueList = group.issues.map((issue) => `
+  const issueList = summarizedAttentionIssues(group).map((issue) => `
     <article class="attention-issue attention-issue--${issue.kind.replaceAll("_", "-")}">
       <strong>${issue.title}</strong>
       <div>${issue.text}</div>
@@ -2166,10 +2211,11 @@ function tenantAttentionCard(group) {
       </div>
     </div>
   `;
+  const totalDebt = tenantAttentionDebtTotal(group);
   return attentionCard(
     group.topIssue?.tone || issueTone(group.topIssue?.kind, group.topIssue?.item),
-    `${group.object}, ${group.apartment}<br><span class="muted">${group.tenant}</span>`,
-    `<p class="attention-lead">${attentionLeadText(group)}</p><div class="attention-issue-list">${issueList}</div>${reminderBlock}`,
+    `${escapeHtml(group.object)}, ${escapeHtml(group.apartment)}<br><span class="muted">${escapeHtml(group.tenant)}</span>`,
+    `<div class="attention-card__debt"><span>Общий долг</span><strong>${money(totalDebt)}</strong></div><p class="attention-lead">${attentionLeadText(group)}</p><div class="attention-issue-list">${issueList}</div>${reminderBlock}`,
     `<div class="attention-card__footer-actions"><button class="mini primary" onclick="openManualAllocation(${group.leaseId})">Зачесть вручную</button><button class="mini" onclick="openPaymentHistory(${group.leaseId})">История</button>${group.primaryRent ? `<button class="mini" onclick="deferRent(${group.primaryRent.id})">Отсрочка</button>` : `<button class="mini" type="button" disabled>Отсрочка</button>`}</div>`,
     `<span class="pill">${group.issues.length} проблем</span>${group.topIssue ? monthMeta(group.topIssue.date) : ""}`,
   );
@@ -2214,6 +2260,43 @@ function expenseFundCard(fund) {
     `<div class="attention-card__footer-actions"><button class="mini" onclick="openExpensesTab()">Расходы</button></div>`,
     `<span class="pill">контроль денег на расходы</span>`,
   );
+}
+
+function dashboardCardCountLabel(count) {
+  const lastTwo = count % 100;
+  const last = count % 10;
+  if (lastTwo >= 11 && lastTwo <= 14) return `${count} карточек`;
+  if (last === 1) return `${count} карточка`;
+  if (last >= 2 && last <= 4) return `${count} карточки`;
+  return `${count} карточек`;
+}
+
+function renderDashboardAttentionSections(entries, objectOrder = []) {
+  const grouped = new Map();
+  entries.forEach((entry) => {
+    const objectName = String(entry.object || "Общее").trim() || "Общее";
+    if (!grouped.has(objectName)) grouped.set(objectName, []);
+    grouped.get(objectName).push(entry.html);
+  });
+  const order = new Map(objectOrder.map((name, index) => [name, index]));
+  return [...grouped.entries()]
+    .sort(([left], [right]) => {
+      if (left === "Общее") return 1;
+      if (right === "Общее") return -1;
+      const leftOrder = order.has(left) ? order.get(left) : Number.MAX_SAFE_INTEGER;
+      const rightOrder = order.has(right) ? order.get(right) : Number.MAX_SAFE_INTEGER;
+      return leftOrder - rightOrder || left.localeCompare(right, "ru");
+    })
+    .map(([objectName, cards]) => `
+      <div class="attention-object-group">
+        <div class="attention-object-group__head">
+          <h3>${escapeHtml(objectName)}</h3>
+          <span>${dashboardCardCountLabel(cards.length)}</span>
+        </div>
+        <div class="attention-object-grid">${cards.join("")}</div>
+      </div>
+    `)
+    .join("");
 }
 
 function dashboardDebtTotal(dashboard) {
@@ -2327,20 +2410,25 @@ function renderDashboard() {
       .filter(([, value]) => value > 0)
       .slice(0, 6)
       .map(([label, value]) => attentionCard("warn", label, `<p class="attention-lead">Открыто: ${value}</p><p class="muted">Подробности доступны управляющему.</p>`, "", `<span class="pill">${label}</span>`));
-    qs("#attentionList").innerHTML = cards.join("") || `<div class="empty-state"><strong>Портфель работает штатно</strong><span>Критичных отклонений не зафиксировано.</span></div>`;
+    const attentionRoot = qs("#attentionList");
+    attentionRoot.classList.remove("attention-grid--grouped");
+    attentionRoot.innerHTML = cards.join("") || `<div class="empty-state"><strong>Портфель работает штатно</strong><span>Критичных отклонений не зафиксировано.</span></div>`;
     return;
   }
   renderMonthlyReportTray(dashboard.monthly_reports);
 
   state.dashboardAttentionGroups = collectTenantAttentionGroups(dashboard);
-  const cards = [
-    ...state.dashboardAttentionGroups.map(tenantAttentionCard),
-    ...(dashboard.expense_fund?.has_mismatch ? [expenseFundCard(dashboard.expense_fund)] : []),
-    ...dashboard.provider_debts.map(providerDebtCard),
-    ...dashboard.stale_readings.map(staleReadingCard),
-    ...dashboard.suspicious_receipts.map(suspiciousReceiptCard),
+  const cardEntries = [
+    ...state.dashboardAttentionGroups.map((group) => ({ object: group.object, html: tenantAttentionCard(group) })),
+    ...(dashboard.expense_fund?.has_mismatch ? [{ object: "Общее", html: expenseFundCard(dashboard.expense_fund) }] : []),
+    ...dashboard.provider_debts.map((item) => ({ object: item.object, html: providerDebtCard(item) })),
+    ...dashboard.stale_readings.map((item) => ({ object: item.object, html: staleReadingCard(item) })),
+    ...dashboard.suspicious_receipts.map((item) => ({ object: item.object || "Общее", html: suspiciousReceiptCard(item) })),
   ];
-  qs("#attentionList").innerHTML = cards.join("") || `<div class="card ok"><h3>Критичных задач нет</h3><p class="muted">Все обязательные действия на текущий момент закрыты.</p></div>`;
+  const attentionRoot = qs("#attentionList");
+  attentionRoot.classList.add("attention-grid--grouped");
+  const objectOrder = (dashboard.object_summary?.by_object || []).map((item) => item.object);
+  attentionRoot.innerHTML = renderDashboardAttentionSections(cardEntries, objectOrder) || `<div class="card ok"><h3>Критичных задач нет</h3><p class="muted">Все обязательные действия на текущий момент закрыты.</p></div>`;
 }
 function renderMonthlyReportTray(reports = []) {
   const tray = qs("#monthlyReportTray");

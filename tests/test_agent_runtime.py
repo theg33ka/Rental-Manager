@@ -24,6 +24,7 @@ from rental_manager.main import (
     configured_tenant_agent_system_prompt,
     execute_agent_action,
     handle_agent_callback_query,
+    hermes_case_actions_keyboard,
     handle_owner_ai_message,
     handle_tenant_ai_message,
     handle_telegram_message,
@@ -47,6 +48,7 @@ from rental_manager.models import (
     Apartment,
     AppSetting,
     Lease,
+    OperationalCase,
     PaymentSituation,
     RentalObject,
     RentCharge,
@@ -54,6 +56,7 @@ from rental_manager.models import (
     utc_now,
 )
 from rental_manager.services.agent_protocol import AgentEnvelope, parse_agent_envelope
+from rental_manager.services.ai_policy import AUDIT_USER_PROMPT
 
 
 class AgentRuntimeTestCase(unittest.TestCase):
@@ -656,6 +659,25 @@ class OwnerChatRoutingTests(AgentRuntimeTestCase):
                 reply="",
                 actions=[{"type": "send_tenant_message", "payload": {"lease_id": lease.id, "text": "Напоминание"}}],
             )
+            session.add_all(
+                [
+                    OperationalCase(
+                        case_key="custom-debt-1",
+                        case_type="custom_operational_issue",
+                        status="active",
+                        title="Первый долг по аренде",
+                        compact_summary="Долг по аренде требует внимания.",
+                    ),
+                    OperationalCase(
+                        case_key="custom-debt-2",
+                        case_type="custom_operational_issue",
+                        status="active",
+                        title="Второй долг по аренде",
+                        compact_summary="Долг по аренде требует внимания.",
+                    ),
+                ]
+            )
+            session.flush()
 
             with patch("rental_manager.main.build_dashboard", return_value=dashboard), patch(
                 "rental_manager.main.sync_agent_tasks"
@@ -664,12 +686,71 @@ class OwnerChatRoutingTests(AgentRuntimeTestCase):
             ), patch("rental_manager.main.store_agent_memories"), patch(
                 "rental_manager.main.send_telegram_text"
             ) as mocked_send, patch("rental_manager.main.create_agent_action_proposal") as mocked_proposal:
-                handle_owner_ai_message(session, 999, "Кто и сколько должен по коммуналке?")
+                handle_owner_ai_message(session, 999, "Как там по должникам?")
 
         sent_text = mocked_send.call_args.args[2]
         self.assertIn("3 200,00 ₽", sent_text)
         self.assertIn("Telegram не привязан", sent_text)
+        self.assertEqual(len(mocked_send.call_args.args), 3)
         mocked_proposal.assert_not_called()
+
+    def test_audit_prompt_is_informational_even_in_deep_mode(self) -> None:
+        self.assertFalse(owner_request_allows_actions(AUDIT_USER_PROMPT))
+        self.assertFalse(owner_request_explicitly_requests_action(AUDIT_USER_PROMPT))
+
+    def test_audit_returns_summary_without_case_picker_or_proposals(self) -> None:
+        with self.Session() as session:
+            conversation = AiConversation(chat_id="999", role="owner")
+            session.add_all(
+                [
+                    conversation,
+                    OperationalCase(
+                        case_key="audit-1",
+                        case_type="custom_operational_issue",
+                        status="active",
+                        title="Первый кейс по долгам",
+                        compact_summary="Требует внимания.",
+                    ),
+                    OperationalCase(
+                        case_key="audit-2",
+                        case_type="custom_operational_issue",
+                        status="active",
+                        title="Второй кейс по долгам",
+                        compact_summary="Требует внимания.",
+                    ),
+                ]
+            )
+            session.flush()
+            envelope = AgentEnvelope(
+                reply="Аудит завершён. Есть два вопроса для проверки.",
+                actions=[{"type": "run_reminders", "payload": {}}],
+            )
+
+            with patch(
+                "rental_manager.main.call_agent_envelope",
+                return_value=(conversation, envelope),
+            ) as mocked_agent, patch("rental_manager.main.send_telegram_text") as mocked_send, patch(
+                "rental_manager.main.create_agent_action_proposal"
+            ) as mocked_proposal:
+                handle_owner_ai_message(session, 999, AUDIT_USER_PROMPT, audit_requested=True)
+
+        self.assertEqual(mocked_send.call_args.args[2], envelope.reply)
+        self.assertEqual(len(mocked_send.call_args.args), 3)
+        self.assertEqual(mocked_agent.call_args.kwargs["feature"], "deep_audit")
+        mocked_proposal.assert_not_called()
+
+    def test_case_actions_match_case_type(self) -> None:
+        stale = OperationalCase(id=10, case_type="stale_meter_reading")
+        rent = OperationalCase(id=11, case_type="rent_overdue")
+
+        stale_labels = [button["text"] for row in hermes_case_actions_keyboard(stale)["inline_keyboard"] for button in row]
+        rent_labels = [button["text"] for row in hermes_case_actions_keyboard(rent)["inline_keyboard"] for button in row]
+
+        self.assertIn("Внесу показания", stale_labels)
+        self.assertNotIn("Отправить напоминание", stale_labels)
+        self.assertNotIn("Дать отсрочку", stale_labels)
+        self.assertIn("Отправить напоминание", rent_labels)
+        self.assertIn("Дать отсрочку", rent_labels)
 
     def test_text_yes_never_confirms_pending_action(self) -> None:
         with self.Session() as session:
