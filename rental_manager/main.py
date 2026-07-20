@@ -4828,14 +4828,43 @@ def build_dashboard(session: Session) -> dict[str, Any]:
         for line in utility_lines
         if line.status in {"issued", "overdue", "partial"} and utility_debt(line) > 0 and debt_visible_by_cutoff(line.due_date, cutoff)
     ]
-    manual_debts = [
-        serialize_manual_debt(debt, session, include_reminder=False)
+    manual_debt_records = [
+        debt
         for debt in outstanding_manual_debts(session, cutoff=cutoff)
         if debt.lease_id
         and int(debt.lease_id) not in ignored_ids
         and debt.lease
         and IGNORE_LEASE_MARK not in (debt.lease.notes or "")
     ]
+    manual_debts = [serialize_manual_debt(debt, session, include_reminder=False) for debt in manual_debt_records]
+
+    _month_start, month_end = month_range(today.year, today.month)
+    expected_rent = money(
+        sum(
+            rent_debt(charge)
+            for charge in charges
+            if charge.due_date <= month_end and rent_debt(charge) > 0
+        )
+        + sum(
+            manual_debt_debt(debt)
+            for debt in manual_debt_records
+            if debt.kind == "rent" and (manual_debt_reference_date(debt) or today) <= month_end
+        )
+    )
+    expected_utility = money(
+        sum(
+            utility_debt(line)
+            for line in utility_lines
+            if line.status in {"issued", "overdue", "partial"}
+            and utility_debt(line) > 0
+            and (line.due_date is None or line.due_date <= month_end)
+        )
+        + sum(
+            manual_debt_debt(debt)
+            for debt in manual_debt_records
+            if debt.kind == "utility" and (manual_debt_reference_date(debt) or today) <= month_end
+        )
+    )
 
     pending_expenses = session.scalars(
         select(Expense).where(Expense.source_funds == "personal", Expense.compensation_status != "compensated")
@@ -4910,6 +4939,12 @@ def build_dashboard(session: Session) -> dict[str, Any]:
     return {
         "object_summary": build_object_summary(session),
         "month_summary": month_dashboard_summary(session, today.year, today.month, today),
+        "expected_receipts": {
+            "through": month_end.isoformat(),
+            "rent": expected_rent,
+            "utility": expected_utility,
+            "total": money(expected_rent + expected_utility),
+        },
         "income_trend": dashboard_income_trend(session, today),
         "monthly_reports": build_monthly_report_shells(session, today),
         "rent_overdue": overdue_rent,

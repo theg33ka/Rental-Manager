@@ -507,6 +507,8 @@ function bootstrapDefaults() {
     dashboard: {
       object_summary: { occupied: 0, total: 0, by_object: [] },
       month_summary: {},
+      expected_receipts: { rent: 0, utility: 0, total: 0 },
+      income_trend: [],
       monthly_reports: [],
       rent_overdue: [],
       rent_partial: [],
@@ -2463,20 +2465,19 @@ function renderMonthSummary(dashboard) {
 function renderDashboard() {
   const dashboard = state.bootstrap.dashboard;
   const month = dashboard.month_summary || {};
-  const received = Number(month.salary_paid || 0) + Number(month.bill_payment_paid || 0) + Number(month.advance_paid || 0);
-  const rentExpected = Math.max(0, Number(month.salary_due || 0) - Number(month.salary_paid || 0));
-  const utilityExpected = Math.max(
-    0,
-    Number(month.bill_payment_due || 0) + Number(month.advance_due || 0)
-      - Number(month.bill_payment_paid || 0) - Number(month.advance_paid || 0),
-  );
+  const currentPeriod = appToday().slice(0, 7);
+  const currentIncome = (dashboard.income_trend || []).find((item) => item.period === currentPeriod);
+  const received = Number(currentIncome?.amount || 0);
+  const expectedReceipts = dashboard.expected_receipts || {};
+  const rentExpected = Number(expectedReceipts.rent || 0);
+  const utilityExpected = Number(expectedReceipts.utility || 0);
   const expected = rentExpected + utilityExpected;
   const debt = dashboardDebtTotal(dashboard);
   const occupied = Number(month.occupied || dashboard.object_summary?.occupied || 0);
   const totalApartments = Number(month.total_apartments || dashboard.object_summary?.total || 0);
   const occupancy = totalApartments ? Math.round((occupied / totalApartments) * 100) : 0;
   qs("#summaryGrid").innerHTML = [
-    metricCard("Поступило", money(received), "Принятые оплаты за месяц", "success"),
+    metricCard("Поступило", money(received), "Все принятые оплаты за месяц", "success"),
     expectedMetricCard(expected, rentExpected, utilityExpected),
     metricCard("Задолженность", money(debt), debt ? "Требует контроля" : "Просрочек нет", debt ? "danger" : "success"),
     metricCard("Заполняемость", `${occupancy}%`, `${occupied} из ${totalApartments} квартир`, occupancy < 90 ? "accent" : "success"),

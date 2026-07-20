@@ -1518,6 +1518,7 @@ class DashboardCutoffTests(DatabaseTestCase):
         self.assertEqual(item["tenant_id"], tenant.id)
         self.assertFalse(item["lease_active"])
         self.assertEqual(item["debt"], 10000)
+        self.assertEqual(dashboard["expected_receipts"]["rent"], 10000)
 
     def test_apartment_month_state_skips_ignored_lease(self) -> None:
         with self.Session() as session:
@@ -2155,6 +2156,7 @@ class DashboardIssuedUtilityTests(DatabaseTestCase):
 
         self.assertEqual(len(dashboard["utility_issued"]), 1)
         self.assertEqual(dashboard["utility_issued"][0]["tenant"], "Жилец с выставленной коммуналкой")
+        self.assertEqual(dashboard["expected_receipts"]["utility"], 1800)
 
 
 class StatusHelperTests(unittest.TestCase):
