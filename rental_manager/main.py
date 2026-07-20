@@ -4732,6 +4732,11 @@ def build_dashboard(session: Session) -> dict[str, Any]:
     today = date.today()
     cutoff = configured_notification_cutoff_date(session)
     ignored_ids = ignored_lease_ids(session)
+    active_tenant_ids = (
+        select(Lease.tenant_id)
+        .join(Apartment, Lease.apartment_id == Apartment.id)
+        .where(Lease.active.is_(True), Apartment.active.is_(True))
+    )
 
     charge_query = (
         select(RentCharge)
@@ -4741,7 +4746,7 @@ def build_dashboard(session: Session) -> dict[str, Any]:
         )
         .join(Lease)
         .join(Apartment)
-        .where(Lease.active.is_(True), Apartment.active.is_(True))
+        .where(Lease.tenant_id.in_(active_tenant_ids))
         .order_by(RentCharge.due_date)
     )
     if cutoff:
@@ -4934,8 +4939,15 @@ def build_status_dashboard_fast(session: Session, today: date | None = None) -> 
     cutoff = configured_notification_cutoff_date(session)
     ignored_ids = ignored_lease_ids(session)
 
+    active_tenant_ids = (
+        select(Lease.tenant_id)
+        .join(Apartment, Lease.apartment_id == Apartment.id)
+        .where(Lease.active.is_(True), Apartment.active.is_(True))
+    )
+    rent_filters = [Lease.tenant_id.in_(active_tenant_ids)]
     active_filters = [Lease.active.is_(True), Apartment.active.is_(True)]
     if ignored_ids:
+        rent_filters.append(Lease.id.not_in(ignored_ids))
         active_filters.append(Lease.id.not_in(ignored_ids))
 
     rent_base = (
@@ -4943,7 +4955,7 @@ def build_status_dashboard_fast(session: Session, today: date | None = None) -> 
         .select_from(RentCharge)
         .join(Lease, RentCharge.lease_id == Lease.id)
         .join(Apartment, Lease.apartment_id == Apartment.id)
-        .where(*active_filters)
+        .where(*rent_filters)
     )
     utility_base = (
         select(func.count(UtilityBillLine.id))

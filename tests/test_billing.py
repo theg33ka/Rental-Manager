@@ -1473,6 +1473,52 @@ class PaymentReceiptReviewTests(DatabaseTestCase):
 
 
 class DashboardCutoffTests(DatabaseTestCase):
+    def test_dashboard_keeps_old_rent_debt_after_tenant_transfer(self) -> None:
+        with self.Session() as session:
+            rental_object = RentalObject(name="Дом переезда", short_code="ДП")
+            old_apartment = Apartment(name="1", sort_order=1, odn_share_percent=50, active=True, object=rental_object)
+            current_apartment = Apartment(name="2", sort_order=2, odn_share_percent=50, active=True, object=rental_object)
+            tenant = Tenant(full_name="Переехавший жилец")
+            old_lease = Lease(
+                apartment=old_apartment,
+                tenant=tenant,
+                start_date=date(2026, 1, 1),
+                end_date=date(2026, 5, 31),
+                payment_day=1,
+                ip_amount=10000,
+                personal_amount=0,
+                active=False,
+            )
+            current_lease = Lease(
+                apartment=current_apartment,
+                tenant=tenant,
+                start_date=date(2026, 6, 1),
+                payment_day=1,
+                ip_amount=10000,
+                personal_amount=0,
+                active=True,
+            )
+            old_charge = RentCharge(
+                lease=old_lease,
+                period_start=date(2026, 5, 1),
+                period_end=date(2026, 5, 31),
+                due_date=date(2026, 5, 1),
+                ip_due=10000,
+                personal_due=0,
+                ip_paid=0,
+                personal_paid=0,
+                status="overdue",
+            )
+            session.add_all([rental_object, old_apartment, current_apartment, tenant, old_lease, current_lease, old_charge])
+            session.commit()
+
+            dashboard = build_dashboard(session)
+
+        item = next(entry for entry in dashboard["rent_overdue"] if entry["id"] == old_charge.id)
+        self.assertEqual(item["tenant_id"], tenant.id)
+        self.assertFalse(item["lease_active"])
+        self.assertEqual(item["debt"], 10000)
+
     def test_apartment_month_state_skips_ignored_lease(self) -> None:
         with self.Session() as session:
             rental_object = RentalObject(name="Дом-игнор", short_code="ДИ")
