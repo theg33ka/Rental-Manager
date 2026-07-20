@@ -8,8 +8,14 @@ from sqlalchemy.orm import Session
 
 from rental_manager.models import Lease, PaymentReceipt, RentCharge, UtilityAdvanceLedger, UtilityBillLine
 from rental_manager.services.billing import RENT_GENERATION_START, generate_rent_charges, money, update_rent_charge_status, update_utility_line_status
+from rental_manager.services.tenant_debts import tenant_debt_lease_ids
 
 EPS = 0.009
+
+
+def recalculate_tenant_lease_balances(session: Session, lease_ids: set[int]) -> None:
+    for lease_id in sorted(lease_ids):
+        recalculate_lease_balances(session, lease_id)
 
 
 def recalculate_lease_balances(session: Session, lease_id: int) -> None:
@@ -68,8 +74,10 @@ def normalized_rent_channel(channel: str) -> str:
 
 def rent_charge_candidates(session: Session, lease_id: int, channel: str, cutoff: date | None = None) -> list[RentCharge]:
     cutoff = cutoff or RENT_GENERATION_START
+    lease = session.get(Lease, lease_id)
+    lease_ids = tenant_debt_lease_ids(session, lease) if lease else [lease_id]
     charges = session.scalars(
-        select(RentCharge).where(RentCharge.lease_id == lease_id).order_by(RentCharge.due_date, RentCharge.id)
+        select(RentCharge).where(RentCharge.lease_id.in_(lease_ids)).order_by(RentCharge.due_date, RentCharge.id)
     ).all()
     for charge in charges:
         update_rent_charge_status(charge)
@@ -77,9 +85,11 @@ def rent_charge_candidates(session: Session, lease_id: int, channel: str, cutoff
 
 
 def utility_line_candidates(session: Session, lease_id: int) -> list[UtilityBillLine]:
+    lease = session.get(Lease, lease_id)
+    lease_ids = tenant_debt_lease_ids(session, lease) if lease else [lease_id]
     lines = session.scalars(
         select(UtilityBillLine)
-        .where(UtilityBillLine.lease_id == lease_id)
+        .where(UtilityBillLine.lease_id.in_(lease_ids))
         .order_by(UtilityBillLine.due_date, UtilityBillLine.id)
     ).all()
     for line in lines:
@@ -143,10 +153,26 @@ def persisted_charge_for_payment_month(session: Session, lease_id: int, paid_at:
         month_end = date(paid_day.year + 1, 1, 1) - timedelta(days=1)
     else:
         month_end = date(paid_day.year, paid_day.month + 1, 1) - timedelta(days=1)
-    return session.scalar(
+    current_lease_charge = session.scalar(
         select(RentCharge)
         .where(
             RentCharge.lease_id == lease_id,
+            RentCharge.due_date >= month_start,
+            RentCharge.due_date <= month_end,
+        )
+        .order_by(RentCharge.due_date, RentCharge.id)
+        .limit(1)
+    )
+    if current_lease_charge:
+        return current_lease_charge
+    lease = session.get(Lease, lease_id)
+    if not lease:
+        return None
+    lease_ids = tenant_debt_lease_ids(session, lease)
+    return session.scalar(
+        select(RentCharge)
+        .where(
+            RentCharge.lease_id.in_(lease_ids),
             RentCharge.due_date >= month_start,
             RentCharge.due_date <= month_end,
         )
@@ -284,9 +310,9 @@ def create_rent_receipts(
         raise ValueError("Не удалось честно разложить платёж по аренде")
     receipts = [
         PaymentReceipt(
-            lease_id=lease.id,
+            lease_id=charge.lease_id,
             rent_charge_id=charge.id,
-            apartment_id=lease.apartment_id,
+            apartment_id=charge.lease.apartment_id,
             amount=portion,
             channel=channel,
             paid_at=paid_at,
@@ -301,7 +327,7 @@ def create_rent_receipts(
     ]
     session.add_all(receipts)
     session.flush()
-    recalculate_lease_balances(session, lease.id)
+    recalculate_tenant_lease_balances(session, {receipt.lease_id for receipt in receipts if receipt.lease_id})
     return receipts
 
 
@@ -324,9 +350,9 @@ def create_utility_receipts(
         raise ValueError("Не удалось честно разложить платёж по коммуналке")
     receipts = [
         PaymentReceipt(
-            lease_id=lease.id,
+            lease_id=line.lease_id,
             utility_line_id=line.id,
-            apartment_id=lease.apartment_id,
+            apartment_id=line.apartment_id,
             amount=portion,
             channel="utility_advance" if (getattr(line, "line_type", "") or "usage") == "advance" else "utilities",
             paid_at=paid_at,
@@ -341,7 +367,7 @@ def create_utility_receipts(
     ]
     session.add_all(receipts)
     session.flush()
-    recalculate_lease_balances(session, lease.id)
+    recalculate_tenant_lease_balances(session, {receipt.lease_id for receipt in receipts if receipt.lease_id})
     return receipts
 
 

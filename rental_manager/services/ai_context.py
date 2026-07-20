@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from rental_manager.models import Lease, ManualDebt, MessageLog, PaymentReceipt, PaymentSituation, RentCharge, UtilityBillLine
 from rental_manager.services.billing import update_rent_charge_status, update_utility_line_status
+from rental_manager.services.tenant_debts import tenant_debt_leases
 
 
 def money_text(value: float) -> str:
@@ -31,27 +32,33 @@ def _status_text(value: str) -> str:
 
 def tenant_context_text(session: Session, lease: Lease, settings: dict[str, Any], today: date | None = None) -> str:
     today = today or date.today()
+    tenant_leases = tenant_debt_leases(session, lease)
+    lease_ids = [item.id for item in tenant_leases]
+
+    def location(item: Lease) -> str:
+        return f"{item.apartment.object.name}, {item.apartment.name}"
+
     rent_lines = []
     charges = session.scalars(
-        select(RentCharge).where(RentCharge.lease_id == lease.id).order_by(RentCharge.due_date, RentCharge.id)
+        select(RentCharge).where(RentCharge.lease_id.in_(lease_ids)).order_by(RentCharge.due_date, RentCharge.id)
     ).all()
     for charge in charges:
         update_rent_charge_status(charge, today)
         debt = max(0.0, float(charge.ip_due or 0) - float(charge.ip_paid or 0)) + max(0.0, float(charge.personal_due or 0) - float(charge.personal_paid or 0))
         if debt > 0.009 or charge.due_date >= today:
             rent_lines.append(
-                f"- {charge.due_date:%d.%m.%Y}: {_status_text(charge.status)}, долг {money_text(debt)}, "
+                f"- {location(charge.lease)}, {charge.due_date:%d.%m.%Y}: {_status_text(charge.status)}, долг {money_text(debt)}, "
                 f"ИП осталось {money_text(max(0.0, float(charge.ip_due or 0) - float(charge.ip_paid or 0)))}, "
                 f"перевод осталось {money_text(max(0.0, float(charge.personal_due or 0) - float(charge.personal_paid or 0)))}"
             )
-        if len(rent_lines) >= 6:
+        if len(rent_lines) >= 12:
             break
 
     utility_lines = []
     lines = session.scalars(
         select(UtilityBillLine)
         .options(joinedload(UtilityBillLine.bill))
-        .where(UtilityBillLine.lease_id == lease.id)
+        .where(UtilityBillLine.lease_id.in_(lease_ids))
         .order_by(UtilityBillLine.due_date, UtilityBillLine.id)
     ).all()
     for line in lines:
@@ -60,31 +67,43 @@ def tenant_context_text(session: Session, lease: Lease, settings: dict[str, Any]
         if debt > 0.009:
             due = f"{line.due_date:%d.%m.%Y}" if line.due_date else "срок не задан"
             service = line.bill.service.name if line.bill and line.bill.service else "коммунальная услуга"
-            utility_lines.append(f"- {service}, срок {due}: {_status_text(line.status)}, долг {money_text(debt)}")
-        if len(utility_lines) >= 6:
+            utility_lines.append(
+                f"- {location(line.lease)}, {service}, срок {due}: {_status_text(line.status)}, долг {money_text(debt)}"
+            )
+        if len(utility_lines) >= 12:
             break
 
     manual_lines = []
     debts = session.scalars(
-        select(ManualDebt).where(ManualDebt.lease_id == lease.id, ManualDebt.active.is_(True)).order_by(ManualDebt.due_date, ManualDebt.id)
+        select(ManualDebt)
+        .where(ManualDebt.lease_id.in_(lease_ids), ManualDebt.active.is_(True))
+        .order_by(ManualDebt.due_date, ManualDebt.id)
     ).all()
     for manual_debt in debts:
         left = max(0.0, float(manual_debt.amount or 0) - float(manual_debt.paid_amount or 0))
         if left > 0.009:
-            manual_lines.append(f"- {manual_debt.title or manual_debt.kind}: долг {money_text(left)}")
-        if len(manual_lines) >= 5:
+            manual_lines.append(
+                f"- {location(manual_debt.lease)}, {manual_debt.title or manual_debt.kind}: долг {money_text(left)}"
+            )
+        if len(manual_lines) >= 8:
             break
 
     receipt_lines = []
     receipts = session.scalars(
-        select(PaymentReceipt).where(PaymentReceipt.lease_id == lease.id).order_by(PaymentReceipt.paid_at.desc(), PaymentReceipt.id.desc()).limit(5)
+        select(PaymentReceipt)
+        .where(PaymentReceipt.lease_id.in_(lease_ids))
+        .order_by(PaymentReceipt.paid_at.desc(), PaymentReceipt.id.desc())
+        .limit(5)
     ).all()
     for receipt in receipts:
         receipt_lines.append(f"- {receipt.paid_at:%d.%m.%Y}: {money_text(receipt.amount)}, канал {receipt.channel}, статус {_status_text(receipt.status)}")
 
     message_lines = []
     logs = session.scalars(
-        select(MessageLog).where(MessageLog.lease_id == lease.id).order_by(MessageLog.created_at.desc(), MessageLog.id.desc()).limit(5)
+        select(MessageLog)
+        .where(MessageLog.lease_id.in_(lease_ids))
+        .order_by(MessageLog.created_at.desc(), MessageLog.id.desc())
+        .limit(5)
     ).all()
     for log in logs:
         message_lines.append(f"- {log.created_at:%d.%m.%Y}: {log.template_key or 'сообщение'}, статус {_status_text(log.status)}")
@@ -92,7 +111,7 @@ def tenant_context_text(session: Session, lease: Lease, settings: dict[str, Any]
     situation_lines = []
     situations = session.scalars(
         select(PaymentSituation)
-        .where(PaymentSituation.lease_id == lease.id)
+        .where(PaymentSituation.lease_id.in_(lease_ids))
         .order_by(PaymentSituation.updated_at.desc(), PaymentSituation.id.desc())
         .limit(8)
     ).all()
@@ -111,6 +130,7 @@ def tenant_context_text(session: Session, lease: Lease, settings: dict[str, Any]
             f"Жилец: {lease.tenant.full_name}",
             f"Объект: {lease.apartment.object.name}",
             f"Квартира: {lease.apartment.name}",
+            "История квартир: " + " → ".join(location(item) for item in tenant_leases),
             f"День оплаты аренды: {lease.payment_day}",
             f"Ежемесячно: всего {total_rent}, ИП {money_text(lease.ip_amount)}, перевод {money_text(lease.personal_amount)}",
             "",

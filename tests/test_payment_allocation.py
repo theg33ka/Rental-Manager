@@ -10,7 +10,7 @@ from sqlalchemy.orm import sessionmaker
 
 from rental_manager.database import Base
 from rental_manager.main import create_personal_priority_receipts
-from rental_manager.models import Apartment, Lease, Tenant, UtilityBill, UtilityBillLine, UtilityService
+from rental_manager.models import Apartment, Lease, RentalObject, RentCharge, Tenant, UtilityBill, UtilityBillLine, UtilityService
 from rental_manager.services.billing import generate_rent_charges
 from rental_manager.services.payment_allocation import create_rent_receipts, create_utility_receipts
 from rental_manager.services.seed import seed_if_empty
@@ -296,6 +296,97 @@ class PaymentAllocationTests(unittest.TestCase):
             charge = next(item for item in lease.rent_charges if item.due_date == date(2026, 4, 1))
             self.assertEqual(charge.personal_paid, 3000.0)
             self.assertEqual(line.paid_amount, 800.0)
+
+    def test_payments_from_current_lease_close_debts_from_previous_apartment(self) -> None:
+        with self.Session() as session:
+            rental_object = RentalObject(name="Дом переезда", short_code="ДП")
+            old_apartment = Apartment(object=rental_object, name="1", sort_order=1, odn_share_percent=50)
+            current_apartment = Apartment(object=rental_object, name="2", sort_order=2, odn_share_percent=50)
+            tenant = Tenant(full_name="Переехавший жилец")
+            old_lease = Lease(
+                apartment=old_apartment,
+                tenant=tenant,
+                start_date=date(2026, 6, 1),
+                end_date=date(2026, 6, 30),
+                payment_day=1,
+                ip_amount=10000,
+                personal_amount=0,
+                active=False,
+            )
+            current_lease = Lease(
+                apartment=current_apartment,
+                tenant=tenant,
+                start_date=date(2026, 7, 1),
+                payment_day=1,
+                ip_amount=10000,
+                personal_amount=0,
+                active=True,
+            )
+            old_charge = RentCharge(
+                lease=old_lease,
+                period_start=date(2026, 6, 1),
+                period_end=date(2026, 6, 30),
+                due_date=date(2026, 6, 1),
+                ip_due=10000,
+                personal_due=0,
+                status="overdue",
+            )
+            service = UtilityService(object=rental_object, name="Электричество", kind="electricity")
+            bill = UtilityBill(
+                service=service,
+                period_start=date(2026, 5, 1),
+                period_end=date(2026, 5, 31),
+                status="issued",
+            )
+            old_line = UtilityBillLine(
+                bill=bill,
+                apartment=old_apartment,
+                lease=old_lease,
+                total_amount=2500,
+                status="overdue",
+                due_date=date(2026, 6, 7),
+            )
+            session.add_all(
+                [
+                    rental_object,
+                    old_apartment,
+                    current_apartment,
+                    tenant,
+                    old_lease,
+                    current_lease,
+                    old_charge,
+                    service,
+                    bill,
+                    old_line,
+                ]
+            )
+            session.flush()
+
+            rent_receipts = create_rent_receipts(
+                session,
+                current_lease,
+                "ip",
+                10000,
+                paid_at=datetime(2026, 7, 21, 12, 0),
+                source="test",
+                status="accepted",
+            )
+            utility_receipts = create_utility_receipts(
+                session,
+                current_lease,
+                2500,
+                paid_at=datetime(2026, 7, 21, 12, 5),
+                source="test",
+                status="accepted",
+            )
+            session.commit()
+
+            self.assertEqual(old_charge.ip_paid, 10000)
+            self.assertEqual(old_line.paid_amount, 2500)
+            self.assertEqual(rent_receipts[0].lease_id, old_lease.id)
+            self.assertEqual(rent_receipts[0].apartment_id, old_apartment.id)
+            self.assertEqual(utility_receipts[0].lease_id, old_lease.id)
+            self.assertEqual(utility_receipts[0].apartment_id, old_apartment.id)
 
 
 if __name__ == "__main__":

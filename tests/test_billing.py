@@ -1509,16 +1509,50 @@ class DashboardCutoffTests(DatabaseTestCase):
                 personal_paid=0,
                 status="overdue",
             )
-            session.add_all([rental_object, old_apartment, current_apartment, tenant, old_lease, current_lease, old_charge])
+            service = UtilityService(object=rental_object, name="Электричество", kind="electricity", active=True)
+            bill = UtilityBill(
+                service=service,
+                period_start=date(2026, 5, 1),
+                period_end=date(2026, 5, 31),
+                status="issued",
+            )
+            old_utility = UtilityBillLine(
+                bill=bill,
+                apartment=old_apartment,
+                lease=old_lease,
+                total_amount=2500,
+                paid_amount=0,
+                status="overdue",
+                due_date=date(2026, 6, 7),
+            )
+            session.add_all(
+                [
+                    rental_object,
+                    old_apartment,
+                    current_apartment,
+                    tenant,
+                    old_lease,
+                    current_lease,
+                    old_charge,
+                    service,
+                    bill,
+                    old_utility,
+                ]
+            )
             session.commit()
 
             dashboard = build_dashboard(session)
+            debt_message = render_message_text(session, "message_all_debts", current_lease)
 
         item = next(entry for entry in dashboard["rent_overdue"] if entry["id"] == old_charge.id)
         self.assertEqual(item["tenant_id"], tenant.id)
         self.assertFalse(item["lease_active"])
         self.assertEqual(item["debt"], 10000)
         self.assertEqual(dashboard["expected_receipts"]["rent"], 10000)
+        self.assertEqual(dashboard["expected_receipts"]["utility"], 2500)
+        self.assertIn("Дом переезда, 1", debt_message)
+        self.assertIn("10 000,00 ₽", debt_message)
+        self.assertIn("2 500,00 ₽", debt_message)
 
     def test_apartment_month_state_skips_ignored_lease(self) -> None:
         with self.Session() as session:

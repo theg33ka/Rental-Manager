@@ -35,6 +35,7 @@ from rental_manager.services.hermes.cases import (
 from rental_manager.services.hermes.events import stable_hash
 from rental_manager.services.hermes.memory import applicable_preferences, preference_value
 from rental_manager.services.hermes.safety import ActionSafetyRegistry
+from rental_manager.services.tenant_debts import tenant_debt_leases
 
 
 FEATURE_OUTPUT_LIMITS = {
@@ -276,23 +277,25 @@ def build_tenant_context(
     reason: str,
     output_limit: int | None = None,
 ) -> SelectedContext:
+    tenant_leases = tenant_debt_leases(session, lease)
+    lease_ids = [item.id for item in tenant_leases]
     charges = session.scalars(
         select(RentCharge)
-        .where(RentCharge.lease_id == lease.id)
+        .where(RentCharge.lease_id.in_(lease_ids))
         .order_by(RentCharge.due_date.desc(), RentCharge.id.desc())
-        .limit(4)
+        .limit(12)
     ).all()
     utilities = session.scalars(
         select(UtilityBillLine)
-        .where(UtilityBillLine.lease_id == lease.id)
+        .where(UtilityBillLine.lease_id.in_(lease_ids))
         .order_by(UtilityBillLine.id.desc())
-        .limit(4)
+        .limit(12)
     ).all()
     debts = session.scalars(
         select(ManualDebt)
-        .where(ManualDebt.lease_id == lease.id, ManualDebt.active.is_(True))
+        .where(ManualDebt.lease_id.in_(lease_ids), ManualDebt.active.is_(True))
         .order_by(ManualDebt.id.desc())
-        .limit(4)
+        .limit(8)
     ).all()
     conversation = session.scalar(
         select(AiConversation)
@@ -322,6 +325,8 @@ def build_tenant_context(
         "rent_charges": [
             {
                 "id": item.id,
+                "lease_id": item.lease_id,
+                "apartment": item.lease.apartment.name,
                 "due_date": item.due_date.isoformat(),
                 "amount_due": round(float(item.ip_due or 0) + float(item.personal_due or 0), 2),
                 "amount_paid": round(float(item.ip_paid or 0) + float(item.personal_paid or 0), 2),
@@ -333,6 +338,8 @@ def build_tenant_context(
         "utility_lines": [
             {
                 "id": item.id,
+                "lease_id": item.lease_id,
+                "apartment": item.lease.apartment.name,
                 "due_date": item.due_date.isoformat() if item.due_date else None,
                 "amount": item.total_amount,
                 "paid": item.paid_amount,
@@ -341,7 +348,15 @@ def build_tenant_context(
             for item in utilities
         ],
         "manual_debts": [
-            {"id": item.id, "title": item.title, "amount": item.amount, "paid": item.paid_amount, "status": item.status}
+            {
+                "id": item.id,
+                "lease_id": item.lease_id,
+                "apartment": item.lease.apartment.name,
+                "title": item.title,
+                "amount": item.amount,
+                "paid": item.paid_amount,
+                "status": item.status,
+            }
             for item in debts
         ],
         "recent_messages": [
@@ -355,11 +370,15 @@ def build_tenant_context(
         feature="tenant_chat",
         model=model,
         selected_case_ids=[],
-        included_entities={"contracts": [lease.id], "tenants": [lease.tenant_id], "apartments": [lease.apartment_id]},
+        included_entities={
+            "contracts": lease_ids,
+            "tenants": [lease.tenant_id],
+            "apartments": [item.apartment_id for item in tenant_leases],
+        },
         included_messages_count=len(messages),
         approximate_input_size=max(1, len(context_text) // 4),
         reason_for_llm_usage=reason,
-        excluded_context=["other contracts", "other tenants", "owner dashboard", "full chat history", "database access"],
+        excluded_context=["other tenants", "owner dashboard", "full chat history", "database access"],
         output_limit=output_limit or FEATURE_OUTPUT_LIMITS["tenant_chat"],
         selected_tools=[],
         state_hash=state_hash,

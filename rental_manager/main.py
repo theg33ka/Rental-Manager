@@ -241,6 +241,7 @@ from rental_manager.services.telegram_bot import (
     telegram_file_info,
     telegram_api_request,
 )
+from rental_manager.services.tenant_debts import tenant_debt_leases
 
 
 APP_BUILD_MARKER = "progressive-boot-2026-07-05"
@@ -4766,7 +4767,8 @@ def build_dashboard(session: Session) -> dict[str, Any]:
             joinedload(UtilityBillLine.bill).joinedload(UtilityBill.service).joinedload(UtilityService.object),
         )
         .join(Apartment)
-        .where(Apartment.active.is_(True))
+        .join(Lease, UtilityBillLine.lease_id == Lease.id)
+        .where(Apartment.active.is_(True), Lease.tenant_id.in_(active_tenant_ids))
     )
     if cutoff:
         utility_query = utility_query.where(or_(UtilityBillLine.due_date.is_(None), UtilityBillLine.due_date >= cutoff))
@@ -4980,7 +4982,7 @@ def build_status_dashboard_fast(session: Session, today: date | None = None) -> 
         .where(Lease.active.is_(True), Apartment.active.is_(True))
     )
     rent_filters = [Lease.tenant_id.in_(active_tenant_ids)]
-    active_filters = [Lease.active.is_(True), Apartment.active.is_(True)]
+    active_filters = [Lease.tenant_id.in_(active_tenant_ids)]
     if ignored_ids:
         rent_filters.append(Lease.id.not_in(ignored_ids))
         active_filters.append(Lease.id.not_in(ignored_ids))
@@ -5150,6 +5152,14 @@ def serialize_manual_debt(
     }
 
 
+def debt_leases_for_tenant(session: Session, lease: Lease) -> list[Lease]:
+    return tenant_debt_leases(session, lease, ignored_lease_ids(session))
+
+
+def debt_location(lease: Lease) -> str:
+    return f"{lease.apartment.object.name}, {lease.apartment.name}"
+
+
 def outstanding_manual_debts(session: Session, lease: Lease | None = None, cutoff: date | None = None) -> list[ManualDebt]:
     query = select(ManualDebt).where(ManualDebt.active.is_(True))
     if lease:
@@ -5162,6 +5172,27 @@ def outstanding_manual_debts(session: Session, lease: Lease | None = None, cutof
         if not debt_visible_by_cutoff(ref_date, cutoff):
             continue
         if manual_debt_debt(debt) > EPS:
+            result.append(debt)
+    return result
+
+
+def outstanding_tenant_manual_debts(
+    session: Session,
+    lease: Lease,
+    cutoff: date | None = None,
+) -> list[ManualDebt]:
+    lease_ids = [item.id for item in debt_leases_for_tenant(session, lease)]
+    if not lease_ids:
+        return []
+    debts = session.scalars(
+        select(ManualDebt)
+        .where(ManualDebt.lease_id.in_(lease_ids), ManualDebt.active.is_(True))
+        .order_by(ManualDebt.due_date, ManualDebt.created_at, ManualDebt.id)
+    ).all()
+    result = []
+    for debt in debts:
+        update_manual_debt_status(debt)
+        if debt_visible_by_cutoff(manual_debt_reference_date(debt), cutoff) and manual_debt_debt(debt) > EPS:
             result.append(debt)
     return result
 
@@ -5216,6 +5247,18 @@ def outstanding_rent_charges(lease: Lease, today: date | None = None, cutoff: da
     return result
 
 
+def outstanding_tenant_rent_charges(
+    session: Session,
+    lease: Lease,
+    today: date | None = None,
+    cutoff: date | None = None,
+) -> list[RentCharge]:
+    result: list[RentCharge] = []
+    for item in debt_leases_for_tenant(session, lease):
+        result.extend(outstanding_rent_charges(item, today, cutoff))
+    return sorted(result, key=lambda charge: (charge.due_date, charge.id))
+
+
 def outstanding_utility_lines(
     session: Session,
     lease: Lease,
@@ -5233,6 +5276,30 @@ def outstanding_utility_lines(
     return result
 
 
+def outstanding_tenant_utility_lines(
+    session: Session,
+    lease: Lease,
+    today: date | None = None,
+    cutoff: date | None = None,
+) -> list[UtilityBillLine]:
+    lease_ids = [item.id for item in debt_leases_for_tenant(session, lease)]
+    if not lease_ids:
+        return []
+    today = today or date.today()
+    result: list[UtilityBillLine] = []
+    lines = session.scalars(
+        select(UtilityBillLine)
+        .where(UtilityBillLine.lease_id.in_(lease_ids))
+        .order_by(UtilityBillLine.due_date, UtilityBillLine.id)
+    ).all()
+    for line in lines:
+        update_utility_line_status(line, today)
+        debt = max(0.0, line.total_amount - line.paid_amount)
+        if debt > EPS and line.due_date and line.due_date <= today and debt_visible_by_cutoff(line.due_date, cutoff):
+            result.append(line)
+    return result
+
+
 def issued_utility_lines(
     session: Session,
     lease: Lease,
@@ -5246,6 +5313,47 @@ def issued_utility_lines(
         if debt > 0.009 and line.status == "issued" and debt_visible_by_cutoff(line.due_date, cutoff):
             result.append(line)
     return result
+
+
+def issued_tenant_utility_lines(
+    session: Session,
+    lease: Lease,
+    cutoff: date | None = None,
+) -> list[UtilityBillLine]:
+    lease_ids = [item.id for item in debt_leases_for_tenant(session, lease)]
+    if not lease_ids:
+        return []
+    result: list[UtilityBillLine] = []
+    lines = session.scalars(
+        select(UtilityBillLine)
+        .where(UtilityBillLine.lease_id.in_(lease_ids))
+        .order_by(UtilityBillLine.due_date, UtilityBillLine.id)
+    ).all()
+    for line in lines:
+        update_utility_line_status(line)
+        debt = max(0.0, line.total_amount - line.paid_amount)
+        if debt > EPS and line.status == "issued" and debt_visible_by_cutoff(line.due_date, cutoff):
+            result.append(line)
+    return result
+
+
+def first_open_tenant_rent_charge(session: Session, lease: Lease, cutoff: date | None = None) -> RentCharge | None:
+    charges = [charge for item in debt_leases_for_tenant(session, lease) for charge in item.rent_charges]
+    for charge in sorted(charges, key=lambda item: (item.due_date, item.id)):
+        update_rent_charge_status(charge)
+        debt = max(0.0, charge.ip_due - charge.ip_paid) + max(0.0, charge.personal_due - charge.personal_paid)
+        if debt > EPS and debt_visible_by_cutoff(charge.due_date, cutoff):
+            return charge
+    return None
+
+
+def first_open_tenant_utility_line(session: Session, lease: Lease, cutoff: date | None = None) -> UtilityBillLine | None:
+    lines = [
+        *outstanding_tenant_utility_lines(session, lease, cutoff=cutoff),
+        *issued_tenant_utility_lines(session, lease, cutoff),
+    ]
+    unique = {line.id: line for line in lines}
+    return min(unique.values(), key=lambda item: (item.due_date or date.max, item.id), default=None)
 
 
 def debt_month_heading(value: date | None) -> str:
@@ -5304,15 +5412,16 @@ def utility_debt_bullet(lines: list[UtilityBillLine]) -> str:
 
 def utility_message_line(line: UtilityBillLine, debt_override: float | None = None) -> str:
     debt = money(debt_override if debt_override is not None else max(0.0, line.total_amount - line.paid_amount))
+    location = debt_location(line.lease)
     if utility_line_is_advance(line):
         period = utility_line_period_label(line)
         return (
-            f"{line.bill.service.object.name}, аванс коммуналки на следующий период ({period}): {money_text(debt)}. "
+            f"{location}, аванс коммуналки на следующий период ({period}): {money_text(debt)}. "
             "Это предоплата: при следующем расчёте она вычтется из коммунального счёта."
         )
     service_name = (line.bill.service.name or "коммуналка").strip().lower()
     period = utility_line_period_label(line)
-    return f"{line.bill.service.object.name}, {service_name} за период {period}: {money_text(debt)}"
+    return f"{location}, {service_name} за период {period}: {money_text(debt)}"
 
 
 def selected_utility_lines(
@@ -5326,8 +5435,13 @@ def selected_utility_lines(
     if utility_lines_override is not None:
         lines = [item for item in utility_lines_override if debt_visible_by_cutoff(item.due_date, cutoff)]
     else:
-        lines = outstanding_utility_lines(session, lease, today, cutoff)
-        if line and debt_visible_by_cutoff(line.due_date, cutoff) and all(existing.id != line.id for existing in lines):
+        lines = outstanding_tenant_utility_lines(session, lease, today, cutoff)
+        if (
+            line
+            and line.lease.tenant_id == lease.tenant_id
+            and debt_visible_by_cutoff(line.due_date, cutoff)
+            and all(existing.id != line.id for existing in lines)
+        ):
             lines = [*lines, line]
     unique: dict[int, UtilityBillLine] = {}
     for item in sorted(lines, key=lambda current: (current.bill.period_end, current.id)):
@@ -5342,26 +5456,33 @@ def selected_utility_lines(
 def build_all_debts_breakdown(session: Session, lease: Lease, today: date | None = None) -> str:
     today = today or date.today()
     cutoff = configured_notification_cutoff_date(session)
-    rent_debts = outstanding_rent_charges(lease, today, cutoff)
-    utility_debts = outstanding_utility_lines(session, lease, today, cutoff)
-    manual_debts = outstanding_manual_debts(session, lease, cutoff)
+    rent_debts = outstanding_tenant_rent_charges(session, lease, today, cutoff)
+    utility_debts = outstanding_tenant_utility_lines(session, lease, today, cutoff)
+    manual_debts = outstanding_tenant_manual_debts(session, lease, cutoff)
 
     by_month: dict[tuple[int, int], list[str]] = {}
     for charge in rent_debts:
         key = (charge.due_date.year, charge.due_date.month)
-        by_month.setdefault(key, []).append(f"- {rent_debt_bullet(charge)}")
+        debt = max(0.0, charge.ip_due - charge.ip_paid) + max(0.0, charge.personal_due - charge.personal_paid)
+        by_month.setdefault(key, []).append(
+            f"- {debt_location(charge.lease)}: {rent_debt_bullet(charge)} Долг {money_text(debt)}"
+        )
 
-    utility_groups: dict[tuple[int, int], list[UtilityBillLine]] = {}
+    utility_groups: dict[tuple[int, int, int], list[UtilityBillLine]] = {}
     for line in utility_debts:
-        key = (line.bill.period_end.year, line.bill.period_end.month)
+        key = (line.bill.period_end.year, line.bill.period_end.month, line.lease_id or 0)
         utility_groups.setdefault(key, []).append(line)
 
-    for key, lines in utility_groups.items():
-        by_month.setdefault(key, []).append(f"- {utility_debt_bullet(lines)}")
+    for (year, month, _lease_id), lines in utility_groups.items():
+        by_month.setdefault((year, month), []).append(
+            f"- {debt_location(lines[0].lease)}: {utility_debt_bullet(lines)}"
+        )
 
     for debt in manual_debts:
         ref = manual_debt_reference_date(debt) or today
-        by_month.setdefault((ref.year, ref.month), []).append(manual_debt_bullet(debt))
+        by_month.setdefault((ref.year, ref.month), []).append(
+            f"- {debt_location(debt.lease)}: {manual_debt_bullet(debt).removeprefix('- ')}"
+        )
 
     if not by_month:
         return "Задолженностей на сегодня нет."
@@ -5384,8 +5505,8 @@ def build_message_context(
 ) -> dict[str, str]:
     today = date.today()
     cutoff = configured_notification_cutoff_date(session)
-    charge = charge or first_open_rent_charge(lease, cutoff)
-    line = line or first_open_utility_line(session, lease, cutoff)
+    charge = charge or first_open_tenant_rent_charge(session, lease, cutoff)
+    line = line or first_open_tenant_utility_line(session, lease, cutoff)
     current_rent_debt = 0.0
     ip_due = 0.0
     personal_due = 0.0
@@ -5417,9 +5538,9 @@ def build_message_context(
                 for item in utility_lines
             )
 
-    rent_debts = outstanding_rent_charges(lease, today, cutoff)
-    utility_debts = outstanding_utility_lines(session, lease, today, cutoff)
-    manual_debts = outstanding_manual_debts(session, lease, cutoff)
+    rent_debts = outstanding_tenant_rent_charges(session, lease, today, cutoff)
+    utility_debts = outstanding_tenant_utility_lines(session, lease, today, cutoff)
+    manual_debts = outstanding_tenant_manual_debts(session, lease, cutoff)
     total_rent_debt = sum(max(0.0, item.ip_due - item.ip_paid) + max(0.0, item.personal_due - item.personal_paid) for item in rent_debts)
     total_utility_debt = sum(max(0.0, item.total_amount - item.paid_amount) for item in utility_debts)
     total_manual_debt = sum(manual_debt_debt(item) for item in manual_debts)
@@ -5430,7 +5551,8 @@ def build_message_context(
         for item in utility_debts
     ]
     rent_details = [
-        f"{month_title(item.due_date)} — {money_text(max(0.0, item.ip_due - item.ip_paid) + max(0.0, item.personal_due - item.personal_paid))}"
+        f"{debt_location(item.lease)}, {month_title(item.due_date)} — "
+        f"{money_text(max(0.0, item.ip_due - item.ip_paid) + max(0.0, item.personal_due - item.personal_paid))}"
         for item in rent_debts
     ]
 
@@ -5513,13 +5635,22 @@ def render_message_text(
 def serialize_message_target(session: Session, lease: Lease) -> dict[str, Any]:
     cutoff = configured_notification_cutoff_date(session)
     today = date.today()
-    charge = first_open_rent_charge(lease, cutoff)
-    line = first_open_utility_line(session, lease, cutoff)
-    rent_issues = outstanding_rent_charges(lease, today, cutoff)
-    utility_issues = [*outstanding_utility_lines(session, lease, today, cutoff), *issued_utility_lines(session, lease, cutoff)]
-    manual_issues = outstanding_manual_debts(session, lease, cutoff)
-    rent_debt = money(max(0.0, (charge.ip_due - charge.ip_paid) if charge else 0.0) + max(0.0, (charge.personal_due - charge.personal_paid) if charge else 0.0))
-    utility_debt = money(max(0.0, (line.total_amount - line.paid_amount) if line else 0.0))
+    charge = first_open_tenant_rent_charge(session, lease, cutoff)
+    line = first_open_tenant_utility_line(session, lease, cutoff)
+    rent_issues = outstanding_tenant_rent_charges(session, lease, today, cutoff)
+    utility_issues = [
+        *outstanding_tenant_utility_lines(session, lease, today, cutoff),
+        *issued_tenant_utility_lines(session, lease, cutoff),
+    ]
+    utility_issues = list({item.id: item for item in utility_issues}.values())
+    manual_issues = outstanding_tenant_manual_debts(session, lease, cutoff)
+    rent_debt = money(
+        sum(
+            max(0.0, item.ip_due - item.ip_paid) + max(0.0, item.personal_due - item.personal_paid)
+            for item in rent_issues
+        )
+    )
+    utility_debt = money(sum(max(0.0, item.total_amount - item.paid_amount) for item in utility_issues))
     manual_debt_total = money(sum(manual_debt_debt(item) for item in manual_issues))
     return {
         "lease_id": lease.id,
@@ -5556,6 +5687,9 @@ def serialize_message_target(session: Session, lease: Lease) -> dict[str, Any]:
                 "status": item.status,
                 "due_date": item.due_date.isoformat(),
                 "label": debt_month_heading(item.due_date),
+                "lease_id": item.lease_id,
+                "object": item.lease.apartment.object.name,
+                "apartment": item.lease.apartment.name,
                 "debt": money(max(0.0, item.ip_due - item.ip_paid) + max(0.0, item.personal_due - item.personal_paid)),
                 "channel_summary": rent_channel_summary_text(item),
             }
@@ -5567,6 +5701,9 @@ def serialize_message_target(session: Session, lease: Lease) -> dict[str, Any]:
                 "status": item.status,
                 "due_date": item.due_date.isoformat() if item.due_date else "",
                 "label": f"ком. услуги {utility_line_period_label(item)}",
+                "lease_id": item.lease_id,
+                "object": item.lease.apartment.object.name,
+                "apartment": item.lease.apartment.name,
                 "debt": money(max(0.0, item.total_amount - item.paid_amount)),
                 "service": item.bill.service.name,
                 "period_label": utility_line_period_label(item),
@@ -5592,9 +5729,9 @@ def resolve_message_request(
 
     charge = session.get(RentCharge, int(payload["charge_id"])) if payload.get("charge_id") else None
     line = session.get(UtilityBillLine, int(payload["utility_line_id"])) if payload.get("utility_line_id") else None
-    if charge and charge.lease_id != lease.id:
+    if charge and charge.lease.tenant_id != lease.tenant_id:
         raise HTTPException(400, "Этот арендный долг относится к другому жильцу")
-    if line and line.lease_id != lease.id:
+    if line and line.lease.tenant_id != lease.tenant_id:
         raise HTTPException(400, "Этот коммунальный счёт относится к другому жильцу")
     custom_text = (payload.get("custom_text") or "").strip()
     return lease, template_key, charge, line, custom_text
@@ -5681,6 +5818,20 @@ def lease_for_dialog(session: Session, lease_id: int) -> Lease | None:
         .where(Lease.id == lease_id)
         .limit(1)
     )
+
+
+def tenant_dialog_lease(session: Session, lease: Lease) -> Lease:
+    active = session.scalar(
+        select(Lease)
+        .options(
+            joinedload(Lease.apartment).joinedload(Apartment.object),
+            joinedload(Lease.tenant),
+        )
+        .where(Lease.tenant_id == lease.tenant_id, Lease.active.is_(True))
+        .order_by(Lease.start_date.desc(), Lease.id.desc())
+        .limit(1)
+    )
+    return active or lease
 
 
 def latest_dialog_chat_id(session: Session, lease: Lease) -> str:
@@ -5783,7 +5934,12 @@ def bot_dialog_for_message_log(
     if log.lease_id:
         lease = lease_for_dialog(session, int(log.lease_id))
         if lease:
-            return ensure_bot_dialog_for_lease(session, dialogs, lease, chat_id=log.recipient_chat_id)
+            return ensure_bot_dialog_for_lease(
+                session,
+                dialogs,
+                tenant_dialog_lease(session, lease),
+                chat_id=log.recipient_chat_id,
+            )
     if log.recipient_chat_id:
         return ensure_bot_dialog_for_chat(session, dialogs, log.recipient_chat_id)
     return None
@@ -5797,7 +5953,12 @@ def bot_dialog_for_ai_message(
     if message.lease_id:
         lease = lease_for_dialog(session, int(message.lease_id))
         if lease:
-            return ensure_bot_dialog_for_lease(session, dialogs, lease, chat_id=message.conversation.chat_id if message.conversation else "")
+            return ensure_bot_dialog_for_lease(
+                session,
+                dialogs,
+                tenant_dialog_lease(session, lease),
+                chat_id=message.conversation.chat_id if message.conversation else "",
+            )
     conversation = message.conversation
     if conversation and conversation.chat_id:
         return ensure_bot_dialog_for_chat(
@@ -6315,7 +6476,7 @@ def utility_issue_targets_for_bills(session: Session, bills: list[UtilityBill]) 
             continue
         existing_lines = [
             item
-            for item in outstanding_utility_lines(session, lease)
+            for item in outstanding_tenant_utility_lines(session, lease)
             if item.id not in {selected.id for selected in selected_lines}
         ]
         combined_lines = sorted(
@@ -6755,15 +6916,16 @@ def owner_situation_keyboard(situation: PaymentSituation) -> dict[str, Any]:
     }
 
 
-def financial_notification_sent_today(session: Session, lease_id: int, today: date) -> bool:
+def financial_notification_sent_today(session: Session, lease: Lease, today: date) -> bool:
     local_start = datetime.combine(today, time.min, tzinfo=LOCAL_TZ)
     utc_start = local_start.astimezone(timezone.utc).replace(tzinfo=None)
     utc_end = (local_start + timedelta(days=1)).astimezone(timezone.utc).replace(tzinfo=None)
+    lease_ids = [item.id for item in debt_leases_for_tenant(session, lease)]
     return bool(
         session.scalar(
             select(MessageLog.id)
             .where(
-                MessageLog.lease_id == lease_id,
+                MessageLog.lease_id.in_(lease_ids),
                 MessageLog.channel == "telegram",
                 MessageLog.note.like("auto-financial:%"),
                 MessageLog.created_at >= utc_start,
@@ -6790,7 +6952,7 @@ def send_payment_situation_message(
     lease = situation_lease(target)
     if target is None or lease is None:
         return False
-    if financial_notification_sent_today(session, lease.id, today):
+    if financial_notification_sent_today(session, lease, today):
         return False
     if situation.notification_count >= MAX_AUTOMATIC_SITUATION_REMINDERS:
         return False
@@ -6935,11 +7097,12 @@ def run_owner_due_payment_digest(session: Session, today: date, now: datetime) -
     today_key = today.isoformat()
     if today_key in sent_set:
         return 0
+    active_tenant_ids = select(Lease.tenant_id).where(Lease.active.is_(True))
     charges = session.scalars(
         select(RentCharge)
         .join(Lease)
         .join(Apartment)
-        .where(Lease.active.is_(True), Apartment.active.is_(True), RentCharge.due_date == today)
+        .where(Lease.tenant_id.in_(active_tenant_ids), Apartment.active.is_(True), RentCharge.due_date == today)
         .order_by(RentCharge.due_date, RentCharge.id)
     ).all()
     missed = []
@@ -6977,8 +7140,9 @@ def run_owner_payment_digest(session: Session, today: date, now: datetime) -> in
     if today_key in sent_set:
         return 0
 
+    active_tenant_ids = select(Lease.tenant_id).where(Lease.active.is_(True))
     for charge in session.scalars(
-        select(RentCharge).join(Lease).where(Lease.active.is_(True))
+        select(RentCharge).join(Lease).where(Lease.tenant_id.in_(active_tenant_ids))
     ).all():
         update_rent_charge_status(charge, today)
         if situation_debt(charge) > EPS:
@@ -6988,7 +7152,9 @@ def run_owner_payment_digest(session: Session, today: date, now: datetime) -> in
                 today,
             )
     for line in session.scalars(
-        select(UtilityBillLine).join(Lease, UtilityBillLine.lease_id == Lease.id).where(Lease.active.is_(True))
+        select(UtilityBillLine)
+        .join(Lease, UtilityBillLine.lease_id == Lease.id)
+        .where(Lease.tenant_id.in_(active_tenant_ids))
     ).all():
         update_utility_line_status(line, today)
         if line.lease_id and situation_debt(line) > EPS:
@@ -7453,11 +7619,12 @@ def run_due_reminders(session: Session, today: date | None = None) -> dict[str, 
         "failed": 0,
     }
 
+    active_tenant_ids = select(Lease.tenant_id).where(Lease.active.is_(True))
     charges = session.scalars(
         select(RentCharge)
         .join(Lease)
         .join(Apartment)
-        .where(Lease.active.is_(True), Apartment.active.is_(True))
+        .where(Lease.tenant_id.in_(active_tenant_ids), Apartment.active.is_(True))
         .order_by(RentCharge.due_date, RentCharge.id)
     ).all()
     for charge in charges:
@@ -7547,7 +7714,7 @@ def run_due_reminders(session: Session, today: date | None = None) -> dict[str, 
         select(UtilityBillLine)
         .join(Lease, UtilityBillLine.lease_id == Lease.id)
         .join(Apartment, UtilityBillLine.apartment_id == Apartment.id)
-        .where(Lease.active.is_(True), Apartment.active.is_(True))
+        .where(Lease.tenant_id.in_(active_tenant_ids), Apartment.active.is_(True))
         .order_by(UtilityBillLine.id)
     ).all()
     for line in lines:
@@ -7821,16 +7988,21 @@ def personal_rent_candidates_for_payment(session: Session, lease: Lease, paid_at
     generate_rent_charges(session, until=paid_day + timedelta(days=40))
     current_charge: RentCharge | None = None
     candidates: list[RentCharge] = []
+    lease_ids = [item.id for item in debt_leases_for_tenant(session, lease)]
     charges = session.scalars(
         select(RentCharge)
-        .where(RentCharge.lease_id == lease.id, RentCharge.due_date >= cutoff)
+        .where(RentCharge.lease_id.in_(lease_ids), RentCharge.due_date >= cutoff)
         .order_by(RentCharge.due_date.desc(), RentCharge.id.desc())
     ).all()
     for charge in charges:
         personal_debt = money(max(0.0, charge.personal_due - charge.personal_paid))
         if personal_debt <= EPS:
             continue
-        if charge.due_date.year == paid_day.year and charge.due_date.month == paid_day.month:
+        if (
+            charge.lease_id == lease.id
+            and charge.due_date.year == paid_day.year
+            and charge.due_date.month == paid_day.month
+        ):
             current_charge = charge
         elif charge.due_date <= paid_day:
             candidates.append(charge)
@@ -7921,9 +8093,9 @@ def create_personal_priority_receipts(
             line = item
             receipts.append(
                 PaymentReceipt(
-                    lease_id=lease.id,
+                    lease_id=line.lease_id,
                     utility_line_id=line.id,
-                    apartment_id=lease.apartment_id,
+                    apartment_id=line.apartment_id,
                     amount=portion,
                     channel="utilities",
                     paid_at=paid_at,
@@ -7939,9 +8111,9 @@ def create_personal_priority_receipts(
             charge = item
             receipts.append(
                 PaymentReceipt(
-                    lease_id=lease.id,
+                    lease_id=charge.lease_id,
                     rent_charge_id=charge.id,
-                    apartment_id=lease.apartment_id,
+                    apartment_id=charge.lease.apartment_id,
                     amount=portion,
                     channel="personal",
                     paid_at=paid_at,
@@ -7956,7 +8128,8 @@ def create_personal_priority_receipts(
 
     session.add_all(receipts)
     session.flush()
-    recalculate_lease_balances(session, lease.id)
+    for lease_id in sorted({receipt.lease_id for receipt in receipts if receipt.lease_id}):
+        recalculate_lease_balances(session, lease_id)
     return receipts
 
 
@@ -8163,10 +8336,11 @@ def handle_tenant_receipt_message(session: Session, message: dict[str, Any], lin
         )
 
     if lease:
+        lease_ids = [item.id for item in debt_leases_for_tenant(session, lease)]
         situations = session.scalars(
             select(PaymentSituation)
             .where(
-                PaymentSituation.lease_id == lease.id,
+                PaymentSituation.lease_id.in_(lease_ids),
                 PaymentSituation.status.not_in(PAYMENT_SITUATION_FINAL_STATUSES),
             )
             .order_by(PaymentSituation.updated_at.desc(), PaymentSituation.id.desc())
@@ -9555,9 +9729,10 @@ def owner_agent_context(session: Session, chat_id: int | str, dashboard: dict[st
         )
         charges = session.scalars(
             select(RentCharge)
-            .where(RentCharge.lease_id == lease.id)
+            .join(Lease)
+            .where(Lease.tenant_id == lease.tenant_id)
             .order_by(RentCharge.due_date.desc(), RentCharge.id.desc())
-            .limit(4)
+            .limit(8)
         ).all()
         for charge in reversed(charges):
             update_rent_charge_status(charge)
@@ -9567,7 +9742,8 @@ def owner_agent_context(session: Session, chat_id: int | str, dashboard: dict[st
             )
             if debt > EPS or charge.due_date >= date.today():
                 lease_lines.append(
-                    f"  charge_id={charge.id}; срок={charge.due_date.isoformat()}; "
+                    f"  charge_id={charge.id}; квартира={debt_location(charge.lease)}; "
+                    f"срок={charge.due_date.isoformat()}; "
                     f"статус={charge.status}; долг={debt}; "
                     f"отсрочка={charge.deferral_until.isoformat() if charge.deferral_until else 'нет'}"
                 )
@@ -9609,13 +9785,6 @@ def owner_debt_details_text(session: Session, dashboard: dict[str, Any], query: 
         for raw_tenant_id, chat_id in get_tenant_links(session).items()
         if str(raw_tenant_id).isdigit() and str(chat_id).strip()
     }
-    linked_lease_ids = {
-        lease.id
-        for lease in session.scalars(
-            select(Lease).where(Lease.active.is_(True), Lease.tenant_id.in_(linked_tenant_ids))
-        ).all()
-    }
-
     def unique_items(keys: list[str]) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         seen: set[tuple[str, int]] = set()
@@ -9645,10 +9814,10 @@ def owner_debt_details_text(session: Session, dashboard: dict[str, Any], query: 
             tenant = str(item.get("tenant") or "").strip()
             due = str(item.get("due_date") or "").strip()
             due_text = f", срок {due}" if due else ""
-            lease_id = int(item.get("lease_id") or 0)
+            tenant_id = int(item.get("tenant_id") or 0)
             delivery = (
                 "Telegram привязан"
-                if lease_id and lease_id in linked_lease_ids
+                if tenant_id and tenant_id in linked_tenant_ids
                 else "Telegram не привязан: сначала нужен /start"
             )
             lines.append(
@@ -9764,10 +9933,12 @@ def handle_tenant_ai_message(session: Session, chat_id: int | str, lease: Lease,
     settings = get_settings(session)
     policy = tenant_response_policy(intent, settings, now=local_now())
     state = agent_tenant_state(session, lease)
+    situation = active_payment_situation_for_lease(session, lease.id)
+    outcome_lease_id = situation.lease_id if situation else lease.id
     if intent == "payment_promise":
-        update_latest_reminder_outcome(session, lease_id=lease.id, outcome="promised")
+        update_latest_reminder_outcome(session, lease_id=outcome_lease_id, outcome="promised")
     else:
-        update_latest_reminder_outcome(session, lease_id=lease.id, outcome="replied")
+        update_latest_reminder_outcome(session, lease_id=outcome_lease_id, outcome="replied")
     if not policy["use_llm"]:
         night = not (8 <= local_now().hour < 21)
         answer = tenant_acknowledgement(intent, night=night)
@@ -9775,7 +9946,6 @@ def handle_tenant_ai_message(session: Session, chat_id: int | str, lease: Lease,
         if policy["escalate"]:
             summary = f"{intent}: {text[:700]}"
             notify_owner_about_tenant_dialogue(session, lease, text, summary)
-            situation = active_payment_situation_for_lease(session, lease.id)
             if situation:
                 situation.status = "question" if intent != "deferral_request" else "escalated"
                 situation.escalated_at = utc_now()
@@ -9814,7 +9984,6 @@ def handle_tenant_ai_message(session: Session, chat_id: int | str, lease: Lease,
         manifest=selected.manifest,
     )
     update_tenant_state_from_envelope(state, envelope, text)
-    situation = active_payment_situation_for_lease(session, lease.id)
     if situation:
         situation.last_tenant_response_at = utc_now()
         situation.tenant_response_count = int(situation.tenant_response_count or 0) + 1
@@ -10344,10 +10513,12 @@ def execute_agent_action(session: Session, proposal: AgentActionProposal) -> str
 
 
 def active_payment_situation_for_lease(session: Session, lease_id: int) -> PaymentSituation | None:
+    lease = session.get(Lease, lease_id)
+    lease_ids = [item.id for item in debt_leases_for_tenant(session, lease)] if lease else [lease_id]
     situations = session.scalars(
         select(PaymentSituation)
         .where(
-            PaymentSituation.lease_id == lease_id,
+            PaymentSituation.lease_id.in_(lease_ids),
             PaymentSituation.status.not_in(PAYMENT_SITUATION_FINAL_STATUSES),
         )
         .order_by(PaymentSituation.updated_at.desc(), PaymentSituation.id.desc())
@@ -12284,6 +12455,7 @@ def rent_charges_payload(
         start_date = parse_date(start)
     if end:
         end_date = parse_date(end)
+    active_tenant_ids = select(Lease.tenant_id).where(Lease.active.is_(True))
     query = (
         select(RentCharge)
         .options(
@@ -12292,7 +12464,7 @@ def rent_charges_payload(
         )
         .join(Lease)
         .join(Apartment)
-        .where(Lease.active.is_(True), Apartment.active.is_(True))
+        .where(Lease.tenant_id.in_(active_tenant_ids), Apartment.active.is_(True))
         .where(RentCharge.due_date >= start_date, RentCharge.due_date <= end_date)
         .order_by(RentCharge.due_date, RentCharge.id)
     )
@@ -12462,7 +12634,7 @@ def ensure_rent_charge_for_month(session: Session, lease: Lease, year: int, mont
 
 def ensure_utility_line_target(session: Session, lease: Lease, line_id: int) -> UtilityBillLine:
     line = session.get(UtilityBillLine, line_id)
-    if not line or line.lease_id != lease.id:
+    if not line or not line.lease or line.lease.tenant_id != lease.tenant_id:
         raise HTTPException(404, "Коммунальный счёт не найден")
     return line
 
@@ -12551,12 +12723,12 @@ def create_manual_payment(payload: dict[str, Any], session: Session = Depends(ge
         target_year = int(payload.get("target_year") or date.today().year)
         if target_charge_id:
             target_charge = session.get(RentCharge, target_charge_id)
-            if not target_charge or target_charge.lease_id != lease.id:
+            if not target_charge or target_charge.lease.tenant_id != lease.tenant_id:
                 raise HTTPException(404, "Арендный месяц не найден")
             receipt = PaymentReceipt(
-                lease_id=lease.id,
+                lease_id=target_charge.lease_id,
                 rent_charge_id=target_charge.id,
-                apartment_id=lease.apartment_id,
+                apartment_id=target_charge.lease.apartment_id,
                 amount=amount,
                 channel=channel,
                 paid_at=paid_at,
@@ -12567,7 +12739,7 @@ def create_manual_payment(payload: dict[str, Any], session: Session = Depends(ge
             )
             session.add(receipt)
             session.flush()
-            recalculate_lease_balances(session, lease.id)
+            recalculate_lease_balances(session, target_charge.lease_id)
             sync_expense_fund_receipt(session, receipt)
             receipts = [receipt]
         elif target_month:
@@ -12611,9 +12783,9 @@ def create_manual_payment(payload: dict[str, Any], session: Session = Depends(ge
         if target_line_id:
             target_line = ensure_utility_line_target(session, lease, target_line_id)
             receipt = PaymentReceipt(
-                lease_id=lease.id,
+                lease_id=target_line.lease_id,
                 utility_line_id=target_line.id,
-                apartment_id=lease.apartment_id,
+                apartment_id=target_line.apartment_id,
                 amount=amount,
                 channel=UTILITY_ADVANCE_CHANNEL if utility_line_is_advance(target_line) else "utilities",
                 paid_at=paid_at,
@@ -12624,7 +12796,7 @@ def create_manual_payment(payload: dict[str, Any], session: Session = Depends(ge
             session.add(receipt)
             session.flush()
             sync_utility_advance_credit_for_receipt(session, receipt)
-            recalculate_lease_balances(session, lease.id)
+            recalculate_lease_balances(session, int(target_line.lease_id))
             receipts = [receipt]
         else:
             receipts = create_utility_receipts(
@@ -12669,9 +12841,10 @@ def list_manual_debts_for_lease(lease_id: int, session: Session = Depends(get_se
     lease = session.get(Lease, lease_id)
     if not lease:
         raise HTTPException(404, "аренда не найдена")
+    lease_ids = [item.id for item in debt_leases_for_tenant(session, lease)]
     debts = session.scalars(
         select(ManualDebt)
-        .where(ManualDebt.lease_id == lease.id, ManualDebt.active.is_(True))
+        .where(ManualDebt.lease_id.in_(lease_ids), ManualDebt.active.is_(True))
         .order_by(ManualDebt.due_date.desc(), ManualDebt.created_at.desc(), ManualDebt.id.desc())
     ).all()
     return [serialize_manual_debt(debt, session) for debt in debts]

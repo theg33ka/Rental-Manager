@@ -217,6 +217,31 @@ class HermesCoreTests(unittest.TestCase):
             self.assertEqual(broken_case.case_type, "broken_payment_promise")
             self.assertEqual(strategy.broken_promises_count, 1)
 
+    def test_old_contract_debt_stays_in_cases_after_tenant_transfer(self) -> None:
+        with self.Session() as session:
+            old_lease, old_charge = self.add_lease(session, object_name="Старый дом", apartment_name="1")
+            old_lease.active = False
+            old_lease.end_date = date(2026, 6, 30)
+            new_object = RentalObject(name="Новый дом")
+            new_apartment = Apartment(object=new_object, name="2")
+            current_lease = Lease(
+                apartment=new_apartment,
+                tenant=old_lease.tenant,
+                start_date=date(2026, 7, 1),
+                payment_day=1,
+                ip_amount=10000,
+                personal_amount=2000,
+                active=True,
+            )
+            session.add_all([new_object, new_apartment, current_lease])
+            session.flush()
+
+            cases = reconcile_operational_cases(session, date(2026, 7, 15))
+
+            old_case = next(item for item in cases if item.case_key == f"rent:{old_charge.id}")
+            self.assertEqual(old_case.tenant_id, current_lease.tenant_id)
+            self.assertEqual(old_case.contract_id, old_lease.id)
+
     def test_one_shot_preference_is_parsed_consumed_once_and_persistent_remains(self) -> None:
         with self.Session() as session:
             one_shot = capture_owner_preference(
@@ -266,10 +291,33 @@ class HermesCoreTests(unittest.TestCase):
             payload = json.loads(context.text)
             self.assertEqual(len(payload["cases"]), 1)
 
-    def test_tenant_context_contains_only_current_contract(self) -> None:
+    def test_tenant_context_contains_all_contracts_of_same_tenant_only(self) -> None:
         with self.Session() as session:
             lease_one, _ = self.add_lease(session, object_name="Дом A", apartment_name="1", tenant_name="Первый")
             lease_two, _ = self.add_lease(session, object_name="Дом B", apartment_name="2", tenant_name="Второй")
+            old_object = RentalObject(name="Дом до переезда")
+            old_apartment = Apartment(object=old_object, name="Старая")
+            old_lease = Lease(
+                apartment=old_apartment,
+                tenant=lease_one.tenant,
+                start_date=date(2026, 1, 1),
+                end_date=date(2026, 4, 30),
+                payment_day=1,
+                ip_amount=5000,
+                personal_amount=0,
+                active=False,
+            )
+            old_charge = RentCharge(
+                lease=old_lease,
+                period_start=date(2026, 4, 1),
+                period_end=date(2026, 4, 30),
+                due_date=date(2026, 4, 1),
+                ip_due=5000,
+                personal_due=0,
+                status="overdue",
+            )
+            session.add_all([old_object, old_apartment, old_lease, old_charge])
+            session.flush()
 
             context = build_tenant_context(
                 session,
@@ -282,8 +330,10 @@ class HermesCoreTests(unittest.TestCase):
             payload = json.loads(context.text)
 
             self.assertEqual(payload["contract"]["id"], lease_one.id)
+            self.assertIn(old_lease.id, context.manifest.included_entities["contracts"])
             self.assertNotIn(lease_two.id, context.manifest.included_entities["contracts"])
             self.assertEqual(context.manifest.output_limit, 240)
+            self.assertIn("Старая", context.text)
             self.assertNotIn("Второй", context.text)
 
     def test_deterministic_reminder_has_duplicate_and_deferral_guards(self) -> None:

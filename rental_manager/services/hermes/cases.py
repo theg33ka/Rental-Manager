@@ -199,6 +199,7 @@ def _lease_refs(lease: Lease) -> LeaseRefs:
 
 
 def _rent_candidates(session: Session, today: date) -> list[CaseCandidate]:
+    active_tenant_ids = select(Lease.tenant_id).where(Lease.active.is_(True))
     charges = session.scalars(
         select(RentCharge)
         .options(
@@ -206,7 +207,7 @@ def _rent_candidates(session: Session, today: date) -> list[CaseCandidate]:
             joinedload(RentCharge.lease).joinedload(Lease.tenant),
         )
         .join(Lease)
-        .where(Lease.active.is_(True))
+        .where(Lease.tenant_id.in_(active_tenant_ids))
         .order_by(RentCharge.due_date, RentCharge.id)
     ).all()
     result: list[CaseCandidate] = []
@@ -258,6 +259,7 @@ def _rent_candidates(session: Session, today: date) -> list[CaseCandidate]:
 
 
 def _utility_candidates(session: Session, today: date) -> list[CaseCandidate]:
+    active_tenant_ids = select(Lease.tenant_id).where(Lease.active.is_(True))
     lines = session.scalars(
         select(UtilityBillLine)
         .options(
@@ -265,7 +267,8 @@ def _utility_candidates(session: Session, today: date) -> list[CaseCandidate]:
             joinedload(UtilityBillLine.lease).joinedload(Lease.tenant),
             joinedload(UtilityBillLine.bill).joinedload(UtilityBill.service),
         )
-        .where(UtilityBillLine.lease_id.is_not(None))
+        .join(Lease, UtilityBillLine.lease_id == Lease.id)
+        .where(UtilityBillLine.lease_id.is_not(None), Lease.tenant_id.in_(active_tenant_ids))
         .order_by(UtilityBillLine.due_date, UtilityBillLine.id)
     ).all()
     result: list[CaseCandidate] = []
@@ -304,13 +307,15 @@ def _utility_candidates(session: Session, today: date) -> list[CaseCandidate]:
 
 
 def _manual_debt_candidates(session: Session, today: date) -> list[CaseCandidate]:
+    active_tenant_ids = select(Lease.tenant_id).where(Lease.active.is_(True))
     debts = session.scalars(
         select(ManualDebt)
         .options(
             joinedload(ManualDebt.lease).joinedload(Lease.apartment).joinedload(Apartment.object),
             joinedload(ManualDebt.lease).joinedload(Lease.tenant),
         )
-        .where(ManualDebt.active.is_(True))
+        .join(Lease)
+        .where(ManualDebt.active.is_(True), Lease.tenant_id.in_(active_tenant_ids))
         .order_by(ManualDebt.due_date, ManualDebt.id)
     ).all()
     result: list[CaseCandidate] = []
@@ -338,10 +343,15 @@ def _manual_debt_candidates(session: Session, today: date) -> list[CaseCandidate
 
 
 def _payment_situation_candidates(session: Session, today: date) -> list[CaseCandidate]:
+    active_tenant_ids = select(Lease.tenant_id).where(Lease.active.is_(True))
     situations = session.scalars(
         select(PaymentSituation)
         .options(joinedload(PaymentSituation.lease).joinedload(Lease.apartment).joinedload(Apartment.object), joinedload(PaymentSituation.lease).joinedload(Lease.tenant))
-        .where(PaymentSituation.status.not_in({"paid", "closed", "resolved", "cancelled"}))
+        .join(Lease)
+        .where(
+            PaymentSituation.status.not_in({"paid", "closed", "resolved", "cancelled"}),
+            Lease.tenant_id.in_(active_tenant_ids),
+        )
     ).all()
     result: list[CaseCandidate] = []
     for situation in situations:

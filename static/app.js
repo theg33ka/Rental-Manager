@@ -2049,7 +2049,7 @@ function renderManualDebtModal() {
   const selectedChannel = editing?.channel || "ip";
   const debtRows = (state.manualDebt.debts || []).map((debt) => `
     <tr class="${editing?.id === debt.id ? "row-selected" : ""}">
-      <td>${escapeHtml(debt.kind_label)}</td>
+      <td>${escapeHtml(debt.object)}, ${escapeHtml(debt.apartment)}<br><span class="muted">${escapeHtml(debt.kind_label)}</span></td>
       <td>${escapeHtml(debt.channel_label || "")}</td>
       <td>${escapeHtml(debt.title || "")}<br><span class="muted">${escapeHtml(debt.period_label || formatDate(debt.due_date))}</span></td>
       <td>${money(debt.amount)}<br><span class="muted">оплачено ${money(debt.paid_amount)}</span></td>
@@ -2072,7 +2072,7 @@ function renderManualDebtModal() {
         <button class="mini" type="button" onclick="closeManualDebt()">Закрыть</button>
       </div>
       <div class="table-wrap">
-        ${debtRows ? table(["Тип", "Канал", "Описание", "Сумма", "Остаток", "Статус", "Действия"], debtRows) : '<p class="muted">Ручных долгов пока нет.</p>'}
+        ${debtRows ? table(["Квартира / тип", "Канал", "Описание", "Сумма", "Остаток", "Статус", "Действия"], debtRows) : '<p class="muted">Ручных долгов пока нет.</p>'}
       </div>
       <form id="manualDebtForm" class="form-grid compact" onsubmit="submitManualDebt(event)">
         <label>Назначение
@@ -2130,7 +2130,8 @@ async function submitManualDebt(event) {
   event.preventDefault();
   if (!state.manualDebt) return;
   const payload = formData(event.currentTarget);
-  payload.lease_id = state.manualDebt.leaseId;
+  const editing = (state.manualDebt.debts || []).find((item) => item.id === state.manualDebt.editingDebtId);
+  payload.lease_id = editing?.lease_id || state.manualDebt.leaseId;
   payload.amount = Number(payload.amount);
   payload.paid_amount = Number(payload.paid_amount || 0);
   const editingDebtId = state.manualDebt.editingDebtId;
@@ -2772,7 +2773,7 @@ function rentActions(charge) {
   return `
     <button class="mini primary" onclick="openManualAllocationForRentCharge(${charge.id})">Зачесть вручную</button>
     <button class="mini" onclick="deferRent(${charge.id})">Отсрочка</button>
-    <button class="mini" onclick="openPaymentHistory(${charge.lease_id})">История</button>
+    <button class="mini" onclick="openPaymentHistory(${charge.lease_id}, ${charge.tenant_id || "null"})">История</button>
   `;
 }
 
