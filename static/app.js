@@ -1631,19 +1631,31 @@ function issueDate(item, issueKind) {
 function collectTenantAttentionGroups(dashboard) {
   const groups = new Map();
   const ensureGroup = (item) => {
-    if (!groups.has(item.lease_id)) {
-      groups.set(item.lease_id, {
-        leaseId: item.lease_id,
+    const groupKey = item.tenant_id ? `tenant:${item.tenant_id}` : `lease:${item.lease_id}`;
+    if (!groups.has(groupKey)) {
+      const activeLease = (state.bootstrap?.leases || []).find((lease) => lease.tenant_id === item.tenant_id && lease.active);
+      groups.set(groupKey, {
+        groupKey,
+        tenantId: item.tenant_id || null,
+        leaseId: activeLease?.id || item.lease_id,
         tenant: item.tenant,
-        object: item.object,
-        apartment: item.apartment,
+        object: activeLease?.object || item.object,
+        apartment: activeLease?.apartment || item.apartment,
+        apartmentMap: new Map(),
         issueMap: new Map(),
         rentMap: new Map(),
         utilityMap: new Map(),
         manualDebtMap: new Map(),
       });
     }
-    return groups.get(item.lease_id);
+    const group = groups.get(groupKey);
+    group.apartmentMap.set(item.lease_id, { leaseId: item.lease_id, object: item.object, apartment: item.apartment });
+    if (item.lease_active) {
+      group.leaseId = item.lease_id;
+      group.object = item.object;
+      group.apartment = item.apartment;
+    }
+    return group;
   };
   const addIssue = (issueKind, item) => {
     if (!item?.lease_id) return;
@@ -1686,8 +1698,13 @@ function collectTenantAttentionGroups(dashboard) {
       const rentItems = [...group.rentMap.values()].sort((left, right) => String(left.due_date).localeCompare(String(right.due_date)));
       const utilityItems = [...group.utilityMap.values()].sort((left, right) => String(left.bill_period_end || left.due_date).localeCompare(String(right.bill_period_end || right.due_date)));
       const manualDebtItems = [...group.manualDebtMap.values()].sort((left, right) => String(left.due_date || left.period_end).localeCompare(String(right.due_date || right.period_end)));
+      const apartments = [...group.apartmentMap.values()].sort((left, right) =>
+        `${left.object} ${left.apartment}`.localeCompare(`${right.object} ${right.apartment}`, "ru")
+      );
       return {
         ...group,
+        apartments,
+        hasMultipleApartments: apartments.length > 1,
         issues,
         rentItems,
         utilityItems,
@@ -1758,23 +1775,27 @@ function nextReminderSummary(group) {
 }
 
 function manualAllocationOptions(group) {
+  const location = (item) => group.hasMultipleApartments ? `${item.object}, ${item.apartment} · ` : "";
   const rentOptions = group.rentItems.map((item) => ({
     value: `rent:${item.id}`,
     kind: "rent",
     id: item.id,
-    label: formatMonth(item.due_date),
+    leaseId: item.lease_id,
+    label: `${location(item)}${formatMonth(item.due_date)}`,
   }));
   const utilityOptions = group.utilityItems.map((item) => ({
     value: `utility:${item.id}`,
     kind: "utility",
     id: item.id,
-    label: `ком. услуги ${item.period_label || item.bill_period_label}`,
+    leaseId: item.lease_id,
+    label: `${location(item)}ком. услуги ${item.period_label || item.bill_period_label}`,
   }));
   const manualDebtOptions = (group.manualDebtItems || []).map((item) => ({
     value: `manual_debt:${item.id}`,
     kind: "manual_debt",
     id: item.id,
-    label: `${item.title || item.kind_label}: ${item.period_label || formatDate(item.due_date || item.period_end || item.period_start)}`,
+    leaseId: item.lease_id,
+    label: `${location(item)}${item.title || item.kind_label}: ${item.period_label || formatDate(item.due_date || item.period_end || item.period_start)}`,
   }));
   return [...rentOptions, ...utilityOptions, ...manualDebtOptions];
 }
@@ -1861,13 +1882,16 @@ function renderManualAllocationModal() {
   const options = manualAllocationOptions(group).map((item) =>
     `<option value="${item.value}" ${item.value === target?.value ? "selected" : ""}>${escapeHtml(item.label)}</option>`
   ).join("");
+  const residence = group.hasMultipleApartments
+    ? group.apartments.map((item) => `${item.object}, ${item.apartment}`).join(" → ")
+    : `${group.object}, ${group.apartment}`;
   root.hidden = false;
   root.innerHTML = `
     <div class="modal-card">
       <div class="section-title">
         <div>
           <h3>Зачесть вручную</h3>
-          <span>${escapeHtml(group.object)}, ${escapeHtml(group.apartment)}, ${escapeHtml(group.tenant)}</span>
+          <span>${escapeHtml(residence)}, ${escapeHtml(group.tenant)}</span>
         </div>
         <button class="mini" type="button" onclick="closeManualAllocation()">Закрыть</button>
       </div>
@@ -1879,7 +1903,6 @@ function renderManualAllocationModal() {
           <select name="channel" id="manualAllocationChannelSelect">
             <option value="personal">По номеру</option>
             <option value="ip">ИП</option>
-            <option value="expense_fund">Мне на расходы</option>
           </select>
         </label>
         <label>Источник
@@ -1894,6 +1917,9 @@ function renderManualAllocationModal() {
         </label>
         <label>Сумма
           <input type="number" min="0" step="0.01" name="amount" required />
+        </label>
+        <label class="check wide" ${target?.kind !== "rent" ? "hidden" : ""}>
+          <input type="checkbox" name="is_expense" /> Расход — создать запись с источником «арендный бюджет»
         </label>
         <label class="wide">Комментарий
           <textarea name="notes" rows="2" placeholder="Например: наличка, перевод с моей карты, быстрое закрытие из дашборда"></textarea>
@@ -1915,7 +1941,7 @@ async function submitManualAllocation(event) {
   const target = group ? selectedManualAllocationTarget(group) : null;
   if (!group || !target) return;
   const payload = formData(form);
-  payload.lease_id = group.leaseId;
+  payload.lease_id = target.leaseId || group.leaseId;
   payload.amount = Number(payload.amount);
   payload.paid_at = payload.paid_at || localDateTimeNow();
   if (target.kind === "rent") {
@@ -2058,7 +2084,6 @@ function renderManualDebtModal() {
           <select name="channel">
             <option value="ip" ${selectedChannel === "ip" ? "selected" : ""}>ИП</option>
             <option value="personal" ${selectedChannel === "personal" ? "selected" : ""}>По номеру</option>
-            <option value="expense_fund" ${selectedChannel === "expense_fund" ? "selected" : ""}>Мне на расходы</option>
           </select>
         </label>
         <label ${kind === "rent" ? "" : "hidden"}>Месяц
@@ -2150,10 +2175,18 @@ function dashboardItemDebt(item) {
   return Math.max(0, Number(item?.debt || 0));
 }
 
-function tenantAttentionDebtTotal(group) {
+function attentionItemIsFuture(item) {
+  return isFutureDue(item?.due_date || item?.period_end || item?.period_start);
+}
+
+function tenantAttentionDebtBreakdown(group) {
   return [group.rentItems, group.utilityItems, group.manualDebtItems]
     .flat()
-    .reduce((total, item) => total + dashboardItemDebt(item), 0);
+    .reduce((totals, item) => {
+      const bucket = attentionItemIsFuture(item) ? "future" : "current";
+      totals[bucket] += dashboardItemDebt(item);
+      return totals;
+    }, { current: 0, future: 0 });
 }
 
 function joinRussianList(values) {
@@ -2170,21 +2203,46 @@ function summarizedAttentionIssues(group) {
     ["utility_issued", "Выставлена коммуналка", "Выставлены платежи по коммуналке"],
   ];
   const summarizedKinds = new Set(["rent_overdue", ...utilityGroups.map(([kind]) => kind)]);
-  const result = group.issues.filter((issue) => !summarizedKinds.has(issue.kind));
+  const locationLabel = (item) => [item.object, item.apartment].filter(Boolean).join(", ");
+  const result = group.issues
+    .filter((issue) => !summarizedKinds.has(issue.kind))
+    .map((issue) => group.hasMultipleApartments
+      ? { ...issue, text: `${locationLabel(issue.item)} — ${issue.text}` }
+      : issue);
 
   if (rentOverdue.length) {
-    const months = [...new Set(rentOverdue.map((issue) => formatMonth(issue.item.due_date)))];
-    result.push({
-      ...rentOverdue[0],
-      title: "Просрочена аренда",
-      text: `Просрочена аренда за ${joinRussianList(months)}`,
+    const byApartment = new Map();
+    rentOverdue.forEach((issue) => {
+      const key = locationLabel(issue.item);
+      if (!byApartment.has(key)) byApartment.set(key, []);
+      byApartment.get(key).push(issue);
+    });
+    byApartment.forEach((issues, location) => {
+      const months = [...new Set(issues.map((issue) => formatMonth(issue.item.due_date)))];
+      result.push({
+        ...issues[0],
+        title: group.hasMultipleApartments ? `Просрочена аренда · ${location}` : "Просрочена аренда",
+        text: `Просрочена аренда за ${joinRussianList(months)}`,
+      });
     });
   }
   utilityGroups.forEach(([kind, title, text]) => {
     const issues = group.issues.filter((issue) => issue.kind === kind);
     if (!issues.length) return;
-    const total = issues.reduce((sum, issue) => sum + dashboardItemDebt(issue.item), 0);
-    result.push({ ...issues[0], title, text: `${text}: ${money(total)}` });
+    const byApartment = new Map();
+    issues.forEach((issue) => {
+      const key = locationLabel(issue.item);
+      if (!byApartment.has(key)) byApartment.set(key, []);
+      byApartment.get(key).push(issue);
+    });
+    byApartment.forEach((apartmentIssues, location) => {
+      const total = apartmentIssues.reduce((sum, issue) => sum + dashboardItemDebt(issue.item), 0);
+      result.push({
+        ...apartmentIssues[0],
+        title: group.hasMultipleApartments ? `${title} · ${location}` : title,
+        text: `${text}: ${money(total)}`,
+      });
+    });
   });
   return result.sort((left, right) =>
     issuePriority(right.kind, right.item) - issuePriority(left.kind, left.item) || String(left.date).localeCompare(String(right.date))
@@ -2211,12 +2269,20 @@ function tenantAttentionCard(group) {
       </div>
     </div>
   `;
-  const totalDebt = tenantAttentionDebtTotal(group);
+  const debt = tenantAttentionDebtBreakdown(group);
+  const shownDebt = debt.current || debt.future;
+  const debtLabel = debt.current ? "Текущий долг" : "Предстоящий остаток";
+  const futureDebt = debt.future && debt.current
+    ? `<p class="attention-future-debt">Предстоящие платежи: <strong>${money(debt.future)}</strong></p>`
+    : "";
+  const residence = group.hasMultipleApartments
+    ? group.apartments.map((item) => `${item.object}, ${item.apartment}`).join(" → ")
+    : `${group.object}, ${group.apartment}`;
   return attentionCard(
     group.topIssue?.tone || issueTone(group.topIssue?.kind, group.topIssue?.item),
-    `${escapeHtml(group.object)}, ${escapeHtml(group.apartment)}<br><span class="muted">${escapeHtml(group.tenant)}</span>`,
-    `<div class="attention-card__debt"><span>Общий долг</span><strong>${money(totalDebt)}</strong></div><p class="attention-lead">${attentionLeadText(group)}</p><div class="attention-issue-list">${issueList}</div>${reminderBlock}`,
-    `<div class="attention-card__footer-actions"><button class="mini primary" onclick="openManualAllocation(${group.leaseId})">Зачесть вручную</button><button class="mini" onclick="openPaymentHistory(${group.leaseId})">История</button>${group.primaryRent ? `<button class="mini" onclick="deferRent(${group.primaryRent.id})">Отсрочка</button>` : `<button class="mini" type="button" disabled>Отсрочка</button>`}</div>`,
+    `${escapeHtml(residence)}<br><span class="muted">${escapeHtml(group.tenant)}</span>`,
+    `<div class="attention-card__debt"><span>${debtLabel}</span><strong>${money(shownDebt)}</strong></div>${futureDebt}<p class="attention-lead">${attentionLeadText(group)}</p><div class="attention-issue-list">${issueList}</div>${reminderBlock}`,
+    `<div class="attention-card__footer-actions"><button class="mini primary" onclick="openManualAllocation(${group.leaseId})">Зачесть вручную</button><button class="mini" onclick="openPaymentHistory(${group.leaseId}, ${group.tenantId || "null"})">История</button>${group.primaryRent ? `<button class="mini" onclick="deferRent(${group.primaryRent.id})">Отсрочка</button>` : `<button class="mini" type="button" disabled>Отсрочка</button>`}</div>`,
     `<span class="pill">${group.issues.length} проблем</span>${group.topIssue ? monthMeta(group.topIssue.date) : ""}`,
   );
 }
@@ -2243,11 +2309,12 @@ function staleReadingCard(item) {
 }
 
 function suspiciousReceiptCard(item) {
+  const messageArgs = `${item.id}, ${item.lease_id || "null"}, ${item.tenant_id || "null"}`;
   return attentionCard(
     "receipt",
     "Подозрительный чек",
     `<p class="attention-lead">${money(item.amount)}</p><div class="attention-issue-list"><article class="attention-issue"><strong>Проверить</strong><div>${escapeHtml(item.recipient_name || "получатель не распознан")}. ${escapeHtml(item.notes || "")}</div></article></div>`,
-    `<div class="attention-card__footer-actions"><button class="mini" onclick="openMessagesTab()">Открыть сообщения</button><button class="mini danger-soft" title="Скрыть чек" onclick="ignoreSuspiciousReceipt(${item.id})">×</button></div>`,
+    `<div class="attention-card__footer-actions"><button class="mini" onclick="openReceiptMessage(${messageArgs})">Открыть сообщение</button>${item.document_url ? `<button class="mini" onclick="openReceiptDocument(${item.id})">Документ</button>` : ""}<button class="mini danger-soft" title="Скрыть чек" onclick="ignoreSuspiciousReceipt(${item.id})">×</button></div>`,
     `<span class="pill">нужна ручная проверка</span>`,
   );
 }
@@ -2305,15 +2372,15 @@ function dashboardDebtTotal(dashboard) {
     ...(dashboard.rent_partial || []),
     ...(dashboard.rent_today || []),
     ...(dashboard.rent_deferred || []),
-  ].reduce((total, item) => total
+  ].filter((item) => !attentionItemIsFuture(item)).reduce((total, item) => total
     + Math.max(0, Number(item.ip_due || 0) - Number(item.ip_paid || 0))
     + Math.max(0, Number(item.personal_due || 0) - Number(item.personal_paid || 0)), 0);
-  const utilityDebt = (dashboard.utility_issued || []).reduce(
+  const utilityDebt = (dashboard.utility_issued || []).filter((item) => !attentionItemIsFuture(item)).reduce(
     (total, item) => total + Math.max(0, Number(item.total_amount || 0) - Number(item.paid_amount || 0)),
     0,
   );
-  const manualDebt = (dashboard.manual_debts || []).reduce(
-    (total, item) => total + Number(item.outstanding_amount ?? item.amount ?? 0),
+  const manualDebt = (dashboard.manual_debts || []).filter((item) => !attentionItemIsFuture(item)).reduce(
+    (total, item) => total + Number(item.debt ?? item.outstanding_amount ?? item.amount ?? 0),
     0,
   );
   return rentDebt + utilityDebt + manualDebt;
@@ -2325,6 +2392,19 @@ function metricCard(label, value, meta, tone = "") {
       <span>${escapeHtml(label)}</span>
       <strong>${value}</strong>
       <small class="metric-meta">${escapeHtml(meta)}</small>
+    </article>
+  `;
+}
+
+function expectedMetricCard(total, rent, utility) {
+  return `
+    <article class="metric metric-accent metric-expected">
+      <span>Ожидается</span>
+      <strong>${money(total)}</strong>
+      <div class="metric-expected__values">
+        <small><span>Аренда</span><b>${money(rent)}</b></small>
+        <small><span>Коммуналка</span><b>${money(utility)}</b></small>
+      </div>
     </article>
   `;
 }
@@ -2384,14 +2464,20 @@ function renderDashboard() {
   const dashboard = state.bootstrap.dashboard;
   const month = dashboard.month_summary || {};
   const received = Number(month.salary_paid || 0) + Number(month.bill_payment_paid || 0) + Number(month.advance_paid || 0);
-  const expected = Number(month.salary_due || 0) + Number(month.bill_payment_due || 0) + Number(month.advance_due || 0);
+  const rentExpected = Math.max(0, Number(month.salary_due || 0) - Number(month.salary_paid || 0));
+  const utilityExpected = Math.max(
+    0,
+    Number(month.bill_payment_due || 0) + Number(month.advance_due || 0)
+      - Number(month.bill_payment_paid || 0) - Number(month.advance_paid || 0),
+  );
+  const expected = rentExpected + utilityExpected;
   const debt = dashboardDebtTotal(dashboard);
   const occupied = Number(month.occupied || dashboard.object_summary?.occupied || 0);
   const totalApartments = Number(month.total_apartments || dashboard.object_summary?.total || 0);
   const occupancy = totalApartments ? Math.round((occupied / totalApartments) * 100) : 0;
   qs("#summaryGrid").innerHTML = [
     metricCard("Поступило", money(received), "Принятые оплаты за месяц", "success"),
-    metricCard("Ожидается", money(Math.max(0, expected - received)), "Остаток плановых поступлений", "accent"),
+    expectedMetricCard(expected, rentExpected, utilityExpected),
     metricCard("Задолженность", money(debt), debt ? "Требует контроля" : "Просрочек нет", debt ? "danger" : "success"),
     metricCard("Заполняемость", `${occupancy}%`, `${occupied} из ${totalApartments} квартир`, occupancy < 90 ? "accent" : "success"),
   ].join("");
@@ -2442,7 +2528,7 @@ function renderMonthlyReportTray(reports = []) {
         <button class="report-open" type="button" onclick="openMonthlyReport(${report.year}, ${report.month}, '${report.kind || "full"}')"><strong>${report.title}</strong></button>
         ${isOwner() ? `<button class="mini report-accept" title="Отчёт принят" onclick="acceptMonthlyReport(event, ${report.year}, ${report.month}, '${report.kind || "full"}')">✓</button>` : ""}
       </div>
-      <button class="report-summary" type="button" onclick="openMonthlyReport(${report.year}, ${report.month}, '${report.kind || "full"}')">${monthlySeverityText(report)} · ${report.issue_count} проблем</button>
+      <button class="report-summary" type="button" onclick="openMonthlyReport(${report.year}, ${report.month}, '${report.kind || "full"}')">${report.quick ? "ждёт проверки · открыть отчёт" : `${monthlySeverityText(report)} · ${report.issue_count} проблем`}</button>
     </article>
   `).join("");
 }
@@ -2693,9 +2779,11 @@ function receiptStatusLabel(status) {
   return statusText[status] || status || "неизвестно";
 }
 
-async function openPaymentHistory(leaseId) {
+async function openPaymentHistory(leaseId, tenantId = null) {
   openRentTab();
-  state.paymentHistory = await api(`/api/leases/${leaseId}/payment-history`);
+  state.paymentHistory = await api(
+    tenantId ? `/api/tenants/${tenantId}/payment-history` : `/api/leases/${leaseId}/payment-history`,
+  );
   state.editingPaymentReceiptId = null;
   renderRentHistory();
   qs("#rentHistoryPanel")?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -2755,8 +2843,10 @@ function renderRentHistory() {
               <select name="channel">
                 <option value="ip" ${receipt.channel === "ip" ? "selected" : ""}>ИП</option>
                 <option value="personal" ${receipt.channel === "personal" ? "selected" : ""}>По номеру</option>
-                <option value="expense_fund" ${receipt.channel === "expense_fund" ? "selected" : ""}>Мне на расходы</option>
               </select>
+            </label>
+            <label class="check wide">
+              <input type="checkbox" name="is_expense" ${receipt.is_expense ? "checked" : ""} /> Расход — создать запись с источником «арендный бюджет»
             </label>
             <label class="wide">Комментарий
               <input name="notes" value="${escapeAttr(receipt.notes || "")}" />
@@ -2828,6 +2918,7 @@ async function savePaymentReceiptEdit(event, receiptId) {
     return;
   }
   payload.amount = Number(payload.amount);
+  payload.is_expense = Boolean(payload.is_expense);
   if (payload.target_ref) {
     const [targetKind, targetId] = payload.target_ref.split(":");
     payload.target_kind = targetKind;
@@ -2849,7 +2940,7 @@ async function savePaymentReceiptEdit(event, receiptId) {
   });
   state.editingPaymentReceiptId = null;
   toast(acceptPayment ? "Платёж проверен и зачтён" : "Платёж обновлён");
-  await openPaymentHistory(history.lease_id);
+  await openPaymentHistory(history.lease_id, history.tenant_id || null);
   await loadAll();
 }
 
@@ -2858,7 +2949,7 @@ async function deletePaymentReceipt(receiptId) {
   await api(`/api/payment-receipts/${receiptId}`, { method: "DELETE" });
   toast("Платёж удалён");
   if (state.paymentHistory) {
-    await openPaymentHistory(state.paymentHistory.lease_id);
+    await openPaymentHistory(state.paymentHistory.lease_id, state.paymentHistory.tenant_id || null);
   }
   await loadAll();
 }
@@ -2868,6 +2959,58 @@ async function ignoreSuspiciousReceipt(receiptId) {
   await api(`/api/payment-receipts/${receiptId}/ignore`, { method: "POST", body: "{}" });
   toast("Чек скрыт из дашборда");
   await loadAll();
+}
+
+function receiptById(receiptId) {
+  return state.suspiciousReceipts.find((item) => item.id === receiptId)
+    || (state.bootstrap?.dashboard?.suspicious_receipts || []).find((item) => item.id === receiptId)
+    || null;
+}
+
+function closeReceiptDocument() {
+  const root = qs("#receiptDocumentModal");
+  if (!root) return;
+  restoreModalFocus(root);
+  root.hidden = true;
+  root.innerHTML = "";
+}
+
+function openReceiptDocument(receiptId) {
+  const root = qs("#receiptDocumentModal");
+  if (!root) return;
+  const receipt = receiptById(receiptId);
+  const filename = (receipt?.file_path || "Документ платежа").split("/").pop();
+  const documentUrl = receipt?.document_url || `/api/payment-receipts/${receiptId}/document`;
+  root.hidden = false;
+  root.innerHTML = `
+    <div class="modal-card receipt-document-modal">
+      <div class="section-title">
+        <div><h3>${escapeHtml(filename)}</h3><span>${escapeHtml(receipt?.tenant || "Платёжный документ")} · ${money(receipt?.amount || 0)}</span></div>
+        <div class="attention-actions">
+          <a class="button mini" href="${escapeAttr(documentUrl)}" target="_blank" rel="noopener">Открыть отдельно</a>
+          <button class="mini" type="button" onclick="closeReceiptDocument()">Закрыть</button>
+        </div>
+      </div>
+      <iframe class="receipt-document-frame" src="${escapeAttr(documentUrl)}" title="${escapeAttr(filename)}"></iframe>
+    </div>
+  `;
+  openAccessibleModal(root, closeReceiptDocument);
+}
+
+async function openReceiptMessage(receiptId, leaseId = null, tenantId = null) {
+  openDialogsTab();
+  await loadBotDialogs();
+  const receipt = receiptById(receiptId);
+  const resolvedLeaseId = leaseId || receipt?.lease_id || null;
+  const resolvedTenantId = tenantId || receipt?.tenant_id || null;
+  const dialog = state.botDialogs.find((item) => Number(item.lease_id) === Number(resolvedLeaseId))
+    || state.botDialogs.find((item) => Number(item.tenant_id) === Number(resolvedTenantId));
+  if (!dialog) {
+    toast("Диалог этого жильца не найден");
+    return;
+  }
+  await selectBotDialog(dialog.id);
+  qs("#botDialogMessages")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
 function renderSuspiciousReceipts() {
@@ -2893,6 +3036,8 @@ function renderSuspiciousReceipts() {
       </div>
       <p>${receipt.notes || "Бот засомневался и позвал владельца. Правильно сделал."}</p>
       <div class="attention-actions">
+        <button class="mini" onclick="openReceiptMessage(${receipt.id}, ${receipt.lease_id || "null"}, ${receipt.tenant_id || "null"})">Открыть сообщение</button>
+        ${receipt.document_url ? `<button class="mini" onclick="openReceiptDocument(${receipt.id})">Документ</button>` : ""}
         <button class="mini primary" onclick="moderateReceipt(${receipt.id}, 'accept_rent')">Зачесть в аренду</button>
         <button class="mini primary" onclick="moderateReceipt(${receipt.id}, 'accept_utility')">Зачесть в коммуналку</button>
         <button class="mini danger-soft" onclick="moderateReceipt(${receipt.id}, 'reject')">Отклонить</button>
@@ -2996,6 +3141,7 @@ function updateManualPaymentKind() {
   const targetYear = qs("#manualPaymentTargetYearInput");
   const monthLabel = qs("#manualPaymentTargetMonthLabel");
   const yearLabel = qs("#manualPaymentTargetYearLabel");
+  const expenseLabel = qs("#manualPaymentExpenseLabel");
   if (!channelSelect) return;
   channelSelect.disabled = kind !== "rent";
   if (kind !== "rent") {
@@ -3008,6 +3154,11 @@ function updateManualPaymentKind() {
   [monthLabel, yearLabel].forEach((node) => {
     if (node) node.hidden = kind !== "rent";
   });
+  if (expenseLabel) {
+    expenseLabel.hidden = kind !== "rent";
+    const checkbox = expenseLabel.querySelector('input[name="is_expense"]');
+    if (checkbox && kind !== "rent") checkbox.checked = false;
+  }
 }
 
 async function submitManualPayment(event) {
@@ -3478,6 +3629,15 @@ function prefillTariff(serviceId) {
   form.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
+function expenseSourceLabel(value) {
+  return {
+    personal: "личные",
+    rental_budget: "арендный бюджет",
+    expense_fund_income: "пополнение на расходы",
+    other: "другое",
+  }[value] || value || "";
+}
+
 function renderExpenses() {
   const fund = state.bootstrap.dashboard.expense_fund || {};
   const summary = `
@@ -3494,7 +3654,7 @@ function renderExpenses() {
       <td>${expense.apartment || ""}</td>
       <td>${expense.category}</td>
       <td>${money(expense.amount)}</td>
-      <td>${expense.source_funds}</td>
+      <td>${expenseSourceLabel(expense.source_funds)}</td>
       <td>${statusPill(expense.compensation_status === "compensated" ? "paid" : expense.compensation_status === "pending" ? "partial" : "issued")}</td>
       <td>${expense.description || ""}</td>
       <td class="actions">${expense.compensation_status !== "compensated" && expense.source_funds === "personal" ? `<button class="mini primary" onclick="compensateExpense(${expense.id})">Компенсировано</button>` : ""}</td>
@@ -4215,29 +4375,33 @@ async function transferLease(id) {
   await loadAll({ refreshSections: registryRefreshSections });
 }
 
+function openWorkspaceTab(tabName) {
+  const tab = qs(`.tab[data-tab="${tabName}"]`);
+  if (!tab) return;
+  if (tab.dataset.group && tab.dataset.group !== activeNavGroup) {
+    activateNavGroup(tab.dataset.group, false);
+  }
+  tab.click();
+}
+
 function openReportsTab() {
-  const tab = qs('.tab[data-tab="reports"]');
-  if (tab) tab.click();
+  openWorkspaceTab("reports");
 }
 
 function openTenantsTab() {
-  const tab = qs('.tab[data-tab="tenants"]');
-  if (tab) tab.click();
+  openWorkspaceTab("tenants");
 }
 
 function openRentTab() {
-  const tab = qs('.tab[data-tab="rent"]');
-  if (tab) tab.click();
+  openWorkspaceTab("rent");
 }
 
 function openMetersTab() {
-  const tab = qs('.tab[data-tab="meters"]');
-  if (tab) tab.click();
+  openWorkspaceTab("meters");
 }
 
 function openUtilitiesTab() {
-  const tab = qs('.tab[data-tab="utilities"]');
-  if (tab) tab.click();
+  openWorkspaceTab("utilities");
 }
 
 function useTimelineReading(serviceId, edge, dateValue) {
@@ -4256,13 +4420,15 @@ function useTimelineReading(serviceId, edge, dateValue) {
 }
 
 function openExpensesTab() {
-  const tab = qs('.tab[data-tab="expenses"]');
-  if (tab) tab.click();
+  openWorkspaceTab("expenses");
 }
 
 function openMessagesTab() {
-  const tab = qs('.tab[data-tab="messages"]');
-  if (tab) tab.click();
+  openWorkspaceTab("messages");
+}
+
+function openDialogsTab() {
+  openWorkspaceTab("dialogs");
 }
 
 function issueSeverityText(severity) {
@@ -4271,11 +4437,19 @@ function issueSeverityText(severity) {
   return severity;
 }
 
-function openMonthlyReport(year, month, kind = "full") {
-  const report =
+async function openMonthlyReport(year, month, kind = "full") {
+  let report =
     state.bootstrap.dashboard.monthly_reports.find((item) => item.year === year && item.month === month && (item.kind || "full") === kind) ||
     state.bootstrap.dashboard.monthly_reports.find((item) => item.year === year && item.month === month);
   if (!report) return;
+  if (report.quick) {
+    report = await api(`/api/reports/monthly/${year}/${month}?kind=${encodeURIComponent(kind)}`);
+    const reportIndex = state.bootstrap.dashboard.monthly_reports.findIndex(
+      (item) => item.year === year && item.month === month && (item.kind || "full") === (report.kind || "full"),
+    );
+    if (reportIndex >= 0) state.bootstrap.dashboard.monthly_reports[reportIndex] = report;
+    renderMonthlyReportTray(state.bootstrap.dashboard.monthly_reports);
+  }
   openReportsTab();
   qs("#reportStart").value = report.period_start;
   qs("#reportEnd").value = report.period_end;
@@ -4659,6 +4833,83 @@ window.addEventListener("unhandledrejection", (event) => {
 
 window.addEventListener("error", (event) => {
   if (event?.message) toast(event.message);
+});
+
+Object.assign(window, {
+  acceptMonthlyReport,
+  cancelPaymentReceiptEdit,
+  clearIssueBillPreview,
+  clearMessagePreview,
+  closeManualAllocation,
+  closeManualDebt,
+  closePaymentHistory,
+  closeQuickActions,
+  closeReceiptDocument,
+  compensateExpense,
+  confirmIssueBill,
+  decideHermesProposal,
+  deferRent,
+  deleteLease,
+  deleteManualDebt,
+  deletePaymentReceipt,
+  deleteUtilityBill,
+  deleteUtilityGroup,
+  disableHermesPreference,
+  editHermesStrategy,
+  editManualDebt,
+  editPaymentReceipt,
+  editUtilityAdvanceOverride,
+  hermesCaseAction,
+  hermesCommitmentAction,
+  hermesSkillAction,
+  ignoreSuspiciousReceipt,
+  issueBill,
+  moderateReceipt,
+  moveOut,
+  openDialogsTab,
+  openExpensesTab,
+  openManualAllocation,
+  openManualAllocationForRentCharge,
+  openManualDebt,
+  openManualPaymentTool,
+  openMessagesTab,
+  openMetersTab,
+  openMonthlyReport,
+  openOnboardTool,
+  openPaymentHistory,
+  openReceiptDocument,
+  openReceiptMessage,
+  openRentTab,
+  openReportsTab,
+  openTenantsTab,
+  openUtilitiesTab,
+  payUtility,
+  prefillTariff,
+  previewCustomMessage,
+  previewGroupReminder,
+  previewTemplateMessage,
+  providerPaid,
+  resetHermesStrategy,
+  resetManualDebtForm,
+  runQuickAction,
+  saveLeaseAutomation,
+  savePaymentReceiptEdit,
+  saveUtilityServiceSettings,
+  selectBotDialog,
+  sendPreviewedMessage,
+  showHermesCase,
+  showHermesRun,
+  startLeaseEdit,
+  submitManualAllocation,
+  submitManualDebt,
+  toggleApartmentActive,
+  toggleHermesPreference,
+  toggleLeaseIgnored,
+  transferLease,
+  updateHermesCaseFilter,
+  updateManualAllocationTarget,
+  updateManualDebtKind,
+  useTimelineReading,
 });
 
 bindEvents();

@@ -590,6 +590,28 @@ section {
   font-weight: 500;
 }
 
+.metric-expected__values {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.metric-expected__values small {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.metric-expected__values b {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .metric.metric-danger strong { color: #d9938d; }
 .metric.metric-success strong { color: #95b49d; }
 .metric.metric-accent strong { color: #ddc18e; }
@@ -1232,6 +1254,18 @@ td.actions .button {
   width: min(820px, calc(100vw - 32px));
   max-height: calc(100vh - 48px);
   overflow: auto;
+}
+
+.receipt-document-modal {
+  width: min(1100px, calc(100vw - 32px));
+}
+
+.receipt-document-frame {
+  width: 100%;
+  min-height: min(72vh, 820px);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
 }
 
 .auth-overlay {

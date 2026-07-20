@@ -15,6 +15,13 @@ test.beforeEach(async ({ page }) => {
 test("основной экран и навигация доступны", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Состояние портфеля" })).toBeVisible();
   await expect(page.locator("#summaryGrid .metric")).toHaveCount(4);
+  await expect(page.locator("#summaryGrid .metric-expected__values small")).toHaveCount(2);
+  const handlers = await page.evaluate(() => ({
+    history: typeof window.openPaymentHistory,
+    dialogs: typeof window.openReceiptMessage,
+    report: typeof window.openMonthlyReport,
+  }));
+  expect(handlers).toEqual({ history: "function", dialogs: "function", report: "function" });
   await page.getByRole("button", { name: "▦ Портфель и финансы", exact: true }).click();
   await page.getByRole("button", { name: "Портфель", exact: true }).click();
   await expect(page.locator("#tenants")).toBeVisible();
@@ -98,7 +105,7 @@ test("дашборд группирует объекты и сворачивае
     };
   });
 
-  expect(result.cardText).toContain("Общий долг");
+  expect(result.cardText).toContain("Текущий долг");
   expect(result.cardText).toContain("72 000");
   expect(result.cardText).toContain("Просрочена аренда за май и июнь");
   expect(result.cardText).toContain("Просрочены платежи по коммуналке");

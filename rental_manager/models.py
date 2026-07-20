@@ -117,6 +117,7 @@ class PaymentReceipt(Base):
     paid_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     source: Mapped[str] = mapped_column(String(40), default="manual")
     status: Mapped[str] = mapped_column(String(40), default="accepted")
+    is_expense: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     recipient_name: Mapped[str] = mapped_column(String(180), default="")
     recipient_details: Mapped[str] = mapped_column(Text, default="")
     file_path: Mapped[str] = mapped_column(String(500), default="")

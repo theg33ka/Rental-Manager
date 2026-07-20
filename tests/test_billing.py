@@ -15,11 +15,11 @@ from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import sessionmaker
 
 from rental_manager.database import Base
-from rental_manager.main import apartment_month_state, build_all_debts_breakdown, build_dashboard, create_manual_payment, create_move_out_utility_lines, delete_utility_bill, ensure_utility_advance_drafts_for_bills, expense_period_summary, issue_utility_bill, month_dashboard_summary, move_out, owner_charge_status_label, owner_expected_ip_for_charge, panel_role_for_pin, preview_issue_utility_bill, process_move_out_notifications, provider_reading_statuses_for_month, render_message_text, rent_report, resolve_broadcast_recipients, transfer_lease, update_payment_receipt, utility_bill_for_month
+from rental_manager.main import apartment_month_state, bot_dialog_messages_payload, build_all_debts_breakdown, build_dashboard, create_manual_payment, create_move_out_utility_lines, delete_utility_bill, ensure_utility_advance_drafts_for_bills, expense_period_summary, issue_utility_bill, month_dashboard_summary, move_out, owner_charge_status_label, owner_expected_ip_for_charge, panel_role_for_pin, payment_receipt_document, preview_issue_utility_bill, process_move_out_notifications, provider_reading_statuses_for_month, render_message_text, rent_report, resolve_broadcast_recipients, tenant_payment_history, transfer_lease, update_payment_receipt, utility_bill_for_month
 from rental_manager.main import apply_database_import_payload, current_database_snapshot, inspect_database_import_payload, parse_database_import_bytes
 from rental_manager.main import api_performance, app_state, record_perf_request
 from rental_manager.main import dashboard_income_trend
-from rental_manager.models import AppSetting, Apartment, Expense, Lease, MessageLog, Meter, MeterReading, PaymentReceipt, RentalObject, RentCharge, Tenant, UtilityBill, UtilityBillLine, UtilityService, Tariff
+from rental_manager.models import AiConversation, AiMessage, AppSetting, Apartment, Expense, Lease, MessageLog, Meter, MeterReading, PaymentReceipt, RentalObject, RentCharge, Tenant, UtilityBill, UtilityBillLine, UtilityService, Tariff
 from rental_manager.services.billing import (
     IGNORE_LEASE_MARK,
     LEGACY_IMPORT_MARK,
@@ -1333,6 +1333,143 @@ class PaymentReceiptReviewTests(DatabaseTestCase):
                 update_payment_receipt(receipt.id, {"status": "accepted"}, session)
 
         self.assertEqual(error.exception.status_code, 400)
+
+    def test_future_rent_payment_can_create_and_remove_linked_expense(self) -> None:
+        with self.Session() as session:
+            rental_object = RentalObject(name="Дом авансов", short_code="ДА")
+            apartment = Apartment(name="ДА1", sort_order=1, odn_share_percent=100, active=True, object=rental_object)
+            tenant = Tenant(full_name="Жилец с авансом")
+            lease = Lease(
+                apartment=apartment,
+                tenant=tenant,
+                start_date=date(2026, 7, 1),
+                payment_day=5,
+                ip_amount=20000,
+                personal_amount=5000,
+                active=True,
+            )
+            session.add_all([rental_object, apartment, tenant, lease])
+            session.commit()
+
+            result = create_manual_payment(
+                {
+                    "lease_id": lease.id,
+                    "kind": "rent",
+                    "target_month": 10,
+                    "target_year": 2026,
+                    "channel": "personal",
+                    "amount": 3000,
+                    "paid_at": "2026-07-20T12:30:00",
+                    "is_expense": True,
+                },
+                session=session,
+            )
+            receipt_id = result["created"][0]["id"]
+            receipt = session.get(PaymentReceipt, receipt_id)
+            expense = session.scalar(select(Expense).where(Expense.source_funds == "rental_budget"))
+
+            self.assertEqual(receipt.rent_charge.due_date, date(2026, 10, 5))
+            self.assertTrue(receipt.is_expense)
+            self.assertEqual(receipt.channel, "personal")
+            self.assertIsNotNone(expense)
+            self.assertEqual(expense.apartment_id, apartment.id)
+            self.assertEqual(expense.expense_date, date(2026, 7, 20))
+            self.assertEqual(expense.amount, 3000)
+
+            update_payment_receipt(receipt.id, {"is_expense": False}, session=session)
+            linked_expense = session.scalar(select(Expense).where(Expense.source_funds == "rental_budget"))
+
+        self.assertIsNone(linked_expense)
+
+    def test_tenant_payment_history_combines_old_and_current_apartments(self) -> None:
+        with self.Session() as session:
+            rental_object = RentalObject(name="Баня", short_code="Б")
+            old_apartment = Apartment(name="Баня3", sort_order=3, odn_share_percent=50, active=True, object=rental_object)
+            current_apartment = Apartment(name="Баня4", sort_order=4, odn_share_percent=50, active=True, object=rental_object)
+            tenant = Tenant(full_name="Никита")
+            old_lease = Lease(
+                apartment=old_apartment,
+                tenant=tenant,
+                start_date=date(2026, 1, 1),
+                end_date=date(2026, 7, 10),
+                payment_day=5,
+                ip_amount=20000,
+                personal_amount=5000,
+                active=False,
+            )
+            current_lease = Lease(
+                apartment=current_apartment,
+                tenant=tenant,
+                start_date=date(2026, 7, 11),
+                payment_day=5,
+                ip_amount=20000,
+                personal_amount=5000,
+                active=True,
+            )
+            session.add_all([rental_object, old_apartment, current_apartment, tenant, old_lease, current_lease])
+            session.flush()
+            session.add_all([
+                PaymentReceipt(lease_id=old_lease.id, apartment_id=old_apartment.id, amount=1000, channel="personal", status="accepted", paid_at=datetime(2026, 7, 1, 12, 0)),
+                PaymentReceipt(lease_id=current_lease.id, apartment_id=current_apartment.id, amount=2000, channel="ip", status="accepted", paid_at=datetime(2026, 7, 15, 12, 0)),
+            ])
+            session.commit()
+
+            history = tenant_payment_history(tenant.id, session=session)
+
+        self.assertEqual(history["lease_id"], current_lease.id)
+        self.assertEqual(history["tenant_id"], tenant.id)
+        self.assertEqual(history["apartment"], "Баня, Баня3 → Баня, Баня4")
+        self.assertEqual({item["lease_id"] for item in history["receipts"]}, {old_lease.id, current_lease.id})
+
+    def test_bot_dialog_keeps_assistant_messages_after_tenant_move(self) -> None:
+        with self.Session() as session:
+            rental_object = RentalObject(name="Баня", short_code="Б")
+            old_apartment = Apartment(name="Баня3", sort_order=3, odn_share_percent=50, active=True, object=rental_object)
+            current_apartment = Apartment(name="Баня4", sort_order=4, odn_share_percent=50, active=True, object=rental_object)
+            tenant = Tenant(full_name="Никита")
+            old_lease = Lease(apartment=old_apartment, tenant=tenant, start_date=date(2026, 1, 1), end_date=date(2026, 7, 10), payment_day=5, active=False)
+            current_lease = Lease(apartment=current_apartment, tenant=tenant, start_date=date(2026, 7, 11), payment_day=5, active=True)
+            session.add_all([rental_object, old_apartment, current_apartment, tenant, old_lease, current_lease])
+            session.flush()
+            session.add(AppSetting(key="telegram_tenant_links", value=json.dumps({str(tenant.id): "456"})))
+            conversation = AiConversation(chat_id="456", role="tenant", lease_id=old_lease.id, tenant_id=tenant.id)
+            session.add(conversation)
+            session.flush()
+            session.add(AiMessage(conversation_id=conversation.id, lease_id=old_lease.id, role="assistant", channel="telegram", text="Сообщение бота до переезда"))
+            session.commit()
+
+            payload = bot_dialog_messages_payload(session, f"lease:{current_lease.id}")
+
+        self.assertTrue(any(item["author"] == "Бот" and item["text"] == "Сообщение бота до переезда" for item in payload["messages"]))
+
+    def test_receipt_document_is_served_inline_only_from_receipt_storage(self) -> None:
+        with self.Session() as session:
+            receipt = PaymentReceipt(
+                amount=1000,
+                channel="personal",
+                paid_at=datetime(2026, 7, 20, 12, 0),
+                source="telegram",
+                status="suspicious",
+                file_path="data/telegram_receipts/check.pdf",
+            )
+            session.add(receipt)
+            session.commit()
+            test_root = Path(self.tmp.name)
+            stored_file = test_root / "data" / "telegram_receipts" / "check.pdf"
+            stored_file.parent.mkdir(parents=True, exist_ok=True)
+            stored_file.write_bytes(b"%PDF-1.4\n%%EOF")
+
+            with patch("rental_manager.main.ROOT_DIR", test_root):
+                response = payment_receipt_document(receipt.id, session=session)
+                self.assertEqual(Path(response.path), stored_file)
+                self.assertIn("inline", response.headers["content-disposition"])
+
+                receipt.file_path = "outside.pdf"
+                session.commit()
+                with self.assertRaises(HTTPException) as error:
+                    payment_receipt_document(receipt.id, session=session)
+
+        self.assertEqual(error.exception.status_code, 404)
 
 
 class DashboardCutoffTests(DatabaseTestCase):

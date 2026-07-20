@@ -1774,6 +1774,15 @@ td.actions .button {
   white-space: nowrap;
 }
 
+.attention-future-debt {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin: -3px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .attention-card__panel {
   display: grid;
   gap: 10px;

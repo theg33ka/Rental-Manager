@@ -219,8 +219,8 @@
       @keyframes loading-rotate { to { transform: rotate(360deg); } }
       @keyframes loading-dot { 0%, 100% { opacity: .35; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-2px); } }
     </style>
-    <link rel="stylesheet" href="/static/styles.css?v=2026-07-16-dashboard" />
-    <link rel="stylesheet" href="/static/premium.css?v=2026-07-16-dashboard" />
+    <link rel="stylesheet" href="/static/styles.css?v=2026-07-20-debts-v4" />
+    <link rel="stylesheet" href="/static/premium.css?v=2026-07-20-debts-v4" />
   </head>
   <body class="auth-locked app-loading">
     <div id="loadingOverlay" class="loading-overlay" role="status" aria-live="polite">
@@ -439,7 +439,7 @@
             </label>
             <label>Канал аренды
               <select name="channel" id="manualPaymentChannelSelect">
-                <option value="personal">Перевод</option><option value="ip">ИП</option><option value="expense_fund">Мне на расходы</option>
+                <option value="personal">По номеру</option><option value="ip">ИП</option>
               </select>
             </label>
             <label>Источник
@@ -449,6 +449,7 @@
             <label id="manualPaymentTargetMonthLabel">Зачесть за месяц<select name="target_month" id="manualPaymentTargetMonthSelect"></select></label>
             <label id="manualPaymentTargetYearLabel">Год<input type="number" min="2020" step="1" name="target_year" id="manualPaymentTargetYearInput" /></label>
             <label>Сумма<input type="number" min="0" step="0.01" name="amount" required /></label>
+            <label class="check wide" id="manualPaymentExpenseLabel"><input type="checkbox" name="is_expense" /> Расход — создать запись с источником «арендный бюджет»</label>
             <label class="wide">Комментарий<textarea name="notes" rows="2" placeholder="Наличные, перевод с карты, взаимозачёт"></textarea></label>
             <button class="primary wide" type="submit">Зачесть платёж</button>
           </form>
@@ -952,9 +953,10 @@
     </div>
     <div id="manualAllocationModal" class="modal-shell" hidden></div>
     <div id="manualDebtModal" class="modal-shell" hidden></div>
+    <div id="receiptDocumentModal" class="modal-shell" hidden></div>
     <div id="quickActionsModal" class="modal-shell" hidden></div>
     <div id="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/static/js/bootstrap.js?v=2026-07-11-security"></script>
+    <script type="module" src="/static/js/bootstrap.js?v=2026-07-20-debts-v4"></script>
   </body>
 </html>
 
