@@ -1737,6 +1737,30 @@ class UtilityAdvanceTests(DatabaseTestCase):
         self.assertEqual(receipts[0].source, "utility_advance")
         self.assertEqual(receipts[0].utility_line_id, line.id)
 
+    def test_manual_rent_channel_utility_closes_utility_debt(self) -> None:
+        with self.Session() as session:
+            lease, bill, line = self._seed_bill(session, total_amount=1250)
+            bill.status = "issued"
+            line.status = "issued"
+            line.due_date = date(2026, 7, 7)
+
+            result = create_manual_payment(
+                {
+                    "lease_id": lease.id,
+                    "kind": "rent",
+                    "channel": "utility",
+                    "amount": 1250,
+                    "paid_at": "2026-07-10T12:00:00",
+                },
+                session=session,
+            )
+            session.refresh(line)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(line.paid_amount, 1250)
+        self.assertEqual(line.status, "paid")
+        self.assertEqual(result["created"][0]["channel"], "utilities")
+
     def test_utility_advance_keeps_leftover_balance_after_issue(self) -> None:
         with self.Session() as session:
             lease, bill, line = self._seed_bill(session, total_amount=1000)

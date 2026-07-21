@@ -1866,6 +1866,13 @@ function updateManualAllocationTarget(value) {
   renderManualAllocationModal();
 }
 
+function updateManualAllocationChannel(value) {
+  const expenseLabel = qs("#manualAllocationExpenseLabel");
+  const expenseCheckbox = expenseLabel?.querySelector('input[name="is_expense"]');
+  if (expenseLabel) expenseLabel.hidden = value === "utility";
+  if (value === "utility" && expenseCheckbox) expenseCheckbox.checked = false;
+}
+
 function renderManualAllocationModal() {
   const root = qs("#manualAllocationModal");
   if (!root) return;
@@ -1902,9 +1909,10 @@ function renderManualAllocationModal() {
           <select id="manualAllocationTargetSelect" onchange="updateManualAllocationTarget(this.value)" required>${options}</select>
         </label>
         <label ${target?.kind !== "rent" ? "hidden" : ""}>Канал аренды
-          <select name="channel" id="manualAllocationChannelSelect">
+          <select name="channel" id="manualAllocationChannelSelect" onchange="updateManualAllocationChannel(this.value)">
             <option value="personal">По номеру</option>
             <option value="ip">ИП</option>
+            <option value="utility">Коммуналка</option>
           </select>
         </label>
         <label>Источник
@@ -1920,7 +1928,7 @@ function renderManualAllocationModal() {
         <label>Сумма
           <input type="number" min="0" step="0.01" name="amount" required />
         </label>
-        <label class="check wide" ${target?.kind !== "rent" ? "hidden" : ""}>
+        <label id="manualAllocationExpenseLabel" class="check wide" ${target?.kind !== "rent" ? "hidden" : ""}>
           <input type="checkbox" name="is_expense" /> Расход — создать запись с источником «арендный бюджет»
         </label>
         <label class="wide">Комментарий
@@ -1947,8 +1955,13 @@ async function submitManualAllocation(event) {
   payload.amount = Number(payload.amount);
   payload.paid_at = payload.paid_at || localDateTimeNow();
   if (target.kind === "rent") {
-    payload.kind = "rent";
-    payload.rent_charge_id = target.id;
+    if (payload.channel === "utility") {
+      payload.kind = "utility";
+      delete payload.channel;
+    } else {
+      payload.kind = "rent";
+      payload.rent_charge_id = target.id;
+    }
   } else if (target.kind === "utility") {
     payload.kind = "utility";
     payload.utility_line_id = target.id;

@@ -12713,6 +12713,8 @@ def create_manual_payment(payload: dict[str, Any], session: Session = Depends(ge
     paid_at = datetime.fromisoformat(payload["paid_at"]) if payload.get("paid_at") else utc_now()
     notes = (payload.get("notes") or "").strip()
     is_expense = str(payload.get("is_expense") or "").strip().lower() in {"1", "true", "yes", "on"}
+    if kind == "rent" and str(payload.get("channel") or "").strip() in {"utility", "utilities"}:
+        kind = "utility"
 
     if kind == "rent":
         channel = (payload.get("channel") or "").strip()
@@ -12799,16 +12801,19 @@ def create_manual_payment(payload: dict[str, Any], session: Session = Depends(ge
             recalculate_lease_balances(session, int(target_line.lease_id))
             receipts = [receipt]
         else:
-            receipts = create_utility_receipts(
-                session,
-                lease,
-                amount,
-                paid_at=paid_at,
-                source=source,
-                status="accepted",
-                notes=notes or "ручной платёж",
-                exact_only=False,
-            )
+            try:
+                receipts = create_utility_receipts(
+                    session,
+                    lease,
+                    amount,
+                    paid_at=paid_at,
+                    source=source,
+                    status="accepted",
+                    notes=notes or "ручной платёж",
+                    exact_only=False,
+                )
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
             sync_utility_advance_credits_for_receipts(session, receipts)
     elif kind == UTILITY_ADVANCE_CHANNEL:
         receipt = PaymentReceipt(

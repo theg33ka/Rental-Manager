@@ -116,6 +116,32 @@ test("дашборд группирует объекты и сворачивае
 });
 
 
+test("ручной зачёт аренды позволяет направить платёж в коммуналку", async ({ page }) => {
+  await page.evaluate(() => {
+    const charge = {
+      id: 501,
+      lease_id: 10,
+      object: "Баня",
+      apartment: "Баня 4",
+      tenant: "Никита",
+      due_date: "2026-07-06",
+    };
+    const group = rentChargeManualGroup(charge);
+    state.manualAllocation = {
+      leaseId: charge.lease_id,
+      group,
+      target: `rent:${charge.id}`,
+      paidAt: localDateTimeNow(),
+    };
+    renderManualAllocationModal();
+  });
+
+  const channel = page.locator("#manualAllocationChannelSelect");
+  await expect(channel).toBeVisible();
+  await expect(channel.locator('option[value="utility"]')).toHaveText("Коммуналка");
+});
+
+
 test("AI settings save models, limits, auto audit and prompt adaptations", async ({ page }) => {
   await page.locator('.sidebar .nav-group[data-group="administration"]').click();
   await page.locator('.section-tabs .tab[data-tab="settings"]').click();
