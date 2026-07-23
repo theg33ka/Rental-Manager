@@ -12932,6 +12932,8 @@ def update_payment_receipt(receipt_id: int, payload: dict[str, Any], session: Se
             if not target_charge:
                 raise HTTPException(404, "Арендный месяц не найден")
             channel = (payload.get("channel") or receipt.channel or "ip").strip()
+            if channel in {"utility", "utilities"}:
+                raise HTTPException(400, "Для канала «Коммуналка» выберите коммунальное начисление")
             if channel not in {"ip", "personal"}:
                 raise HTTPException(400, "для аренды канал платежа должен быть ip или personal")
             receipt.rent_charge_id = target_charge.id
@@ -12954,6 +12956,8 @@ def update_payment_receipt(receipt_id: int, payload: dict[str, Any], session: Se
             raise HTTPException(400, "неизвестная цель зачёта")
     elif payload.get("channel") and receipt.rent_charge_id:
         channel = payload.get("channel")
+        if channel in {"utility", "utilities"}:
+            raise HTTPException(400, "Для канала «Коммуналка» выберите коммунальное начисление")
         if channel not in {"ip", "personal"}:
             raise HTTPException(400, "для аренды канал платежа должен быть ip или personal")
         receipt.channel = channel

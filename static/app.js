@@ -2841,6 +2841,7 @@ function renderRentHistory() {
   }
   const rows = state.paymentHistory.receipts.map((receipt) => {
     const editing = state.editingPaymentReceiptId === receipt.id;
+    const utilityChannel = receipt.channel === "utilities" || Boolean(receipt.utility_line_id);
     const editorRow = editing ? `
       <tr class="receipt-editor-row">
         <td colspan="8">
@@ -2852,15 +2853,16 @@ function renderRentHistory() {
               <input type="datetime-local" name="paid_at" value="${escapeAttr((receipt.paid_at || "").slice(0, 16))}" required />
             </label>
             <label>Зачесть за
-              <select name="target_ref">${paymentReceiptTargetOptions(receipt)}</select>
+              <select id="paymentReceiptTarget-${receipt.id}" name="target_ref" onchange="updatePaymentReceiptTarget(${receipt.id}, this.value)">${paymentReceiptTargetOptions(receipt)}</select>
             </label>
             <label>Канал
-              <select name="channel">
+              <select id="paymentReceiptChannel-${receipt.id}" name="channel" data-rent-channel="${receipt.channel === "ip" ? "ip" : "personal"}" onchange="updatePaymentReceiptChannel(${receipt.id}, this.value)">
                 <option value="ip" ${receipt.channel === "ip" ? "selected" : ""}>ИП</option>
                 <option value="personal" ${receipt.channel === "personal" ? "selected" : ""}>По номеру</option>
+                <option value="utilities" ${utilityChannel ? "selected" : ""}>Коммуналка</option>
               </select>
             </label>
-            <label class="check wide">
+            <label id="paymentReceiptExpenseLabel-${receipt.id}" class="check wide" ${utilityChannel ? "hidden" : ""}>
               <input type="checkbox" name="is_expense" ${receipt.is_expense ? "checked" : ""} /> Расход — создать запись с источником «арендный бюджет»
             </label>
             <label class="wide">Комментарий
@@ -2920,6 +2922,31 @@ function cancelPaymentReceiptEdit() {
   renderRentHistory();
 }
 
+function updatePaymentReceiptExpenseVisibility(receiptId, isUtility) {
+  const label = qs(`#paymentReceiptExpenseLabel-${receiptId}`);
+  const checkbox = label?.querySelector('input[name="is_expense"]');
+  if (label) label.hidden = isUtility;
+  if (isUtility && checkbox) checkbox.checked = false;
+}
+
+function updatePaymentReceiptChannel(receiptId, channel) {
+  const select = qs(`#paymentReceiptChannel-${receiptId}`);
+  if (select && channel !== "utilities") select.dataset.rentChannel = channel;
+  updatePaymentReceiptExpenseVisibility(receiptId, channel === "utilities");
+}
+
+function updatePaymentReceiptTarget(receiptId, targetRef) {
+  const channel = qs(`#paymentReceiptChannel-${receiptId}`);
+  const isUtility = String(targetRef || "").startsWith("utility:");
+  if (channel && isUtility) {
+    if (channel.value !== "utilities") channel.dataset.rentChannel = channel.value;
+    channel.value = "utilities";
+  } else if (channel?.value === "utilities") {
+    channel.value = channel.dataset.rentChannel || "personal";
+  }
+  updatePaymentReceiptExpenseVisibility(receiptId, isUtility);
+}
+
 async function savePaymentReceiptEdit(event, receiptId) {
   event.preventDefault();
   const history = state.paymentHistory;
@@ -2932,6 +2959,10 @@ async function savePaymentReceiptEdit(event, receiptId) {
     toast("Укажите, за что зачесть платёж");
     return;
   }
+  if (payload.channel === "utilities" && !String(payload.target_ref || "").startsWith("utility:")) {
+    toast("Для канала «Коммуналка» выберите коммунальное начисление");
+    return;
+  }
   payload.amount = Number(payload.amount);
   payload.is_expense = Boolean(payload.is_expense);
   if (payload.target_ref) {
@@ -2941,6 +2972,8 @@ async function savePaymentReceiptEdit(event, receiptId) {
       payload.rent_charge_id = Number(targetId);
     } else if (targetKind === "utility") {
       payload.utility_line_id = Number(targetId);
+      payload.channel = "utilities";
+      payload.is_expense = false;
     }
   } else {
     delete payload.channel;
@@ -4923,6 +4956,8 @@ Object.assign(window, {
   transferLease,
   updateHermesCaseFilter,
   updateManualAllocationTarget,
+  updatePaymentReceiptChannel,
+  updatePaymentReceiptTarget,
   updateManualDebtKind,
   useTimelineReading,
 });

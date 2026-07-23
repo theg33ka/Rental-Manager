@@ -1334,6 +1334,79 @@ class PaymentReceiptReviewTests(DatabaseTestCase):
 
         self.assertEqual(error.exception.status_code, 400)
 
+    def test_rent_receipt_can_be_reassigned_to_utility(self) -> None:
+        with self.Session() as session:
+            rental_object = RentalObject(name="Дом редактора", short_code="ДР")
+            apartment = Apartment(name="ДР1", sort_order=1, odn_share_percent=100, active=True, object=rental_object)
+            tenant = Tenant(full_name="Жилец редактора")
+            lease = Lease(
+                apartment=apartment,
+                tenant=tenant,
+                start_date=date(2026, 7, 1),
+                payment_day=5,
+                ip_amount=20000,
+                personal_amount=0,
+            )
+            charge = RentCharge(
+                lease=lease,
+                period_start=date(2026, 7, 5),
+                period_end=date(2026, 8, 4),
+                due_date=date(2026, 7, 5),
+                ip_due=20000,
+                personal_due=0,
+                status="overdue",
+            )
+            service = UtilityService(object=rental_object, name="Электричество", kind="electricity", active=True)
+            bill = UtilityBill(
+                service=service,
+                period_start=date(2026, 6, 1),
+                period_end=date(2026, 6, 30),
+                status="issued",
+            )
+            line = UtilityBillLine(
+                bill=bill,
+                apartment=apartment,
+                lease=lease,
+                total_amount=2500,
+                paid_amount=0,
+                status="overdue",
+                due_date=date(2026, 7, 7),
+            )
+            session.add_all([rental_object, apartment, tenant, lease, charge, service, bill, line])
+            session.flush()
+            receipt = PaymentReceipt(
+                lease_id=lease.id,
+                apartment_id=apartment.id,
+                rent_charge_id=charge.id,
+                amount=2500,
+                channel="personal",
+                paid_at=datetime(2026, 7, 20, 12, 0),
+                source="manual",
+                status="accepted",
+                is_expense=True,
+            )
+            session.add(receipt)
+            session.commit()
+
+            result = update_payment_receipt(
+                receipt.id,
+                {
+                    "target_kind": "utility",
+                    "utility_line_id": line.id,
+                    "channel": "utilities",
+                    "is_expense": True,
+                },
+                session,
+            )
+            session.refresh(receipt)
+            session.refresh(line)
+
+            self.assertEqual(result["channel"], "utilities")
+            self.assertEqual(receipt.utility_line_id, line.id)
+            self.assertIsNone(receipt.rent_charge_id)
+            self.assertFalse(receipt.is_expense)
+            self.assertEqual(line.paid_amount, 2500)
+
     def test_future_rent_payment_can_create_and_remove_linked_expense(self) -> None:
         with self.Session() as session:
             rental_object = RentalObject(name="Дом авансов", short_code="ДА")

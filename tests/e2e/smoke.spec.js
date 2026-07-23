@@ -141,6 +141,44 @@ test("ручной зачёт аренды позволяет направить
   await expect(channel.locator('option[value="utility"]')).toHaveText("Коммуналка");
 });
 
+test("редактор платежа позволяет выбрать канал коммуналки", async ({ page }) => {
+  await page.evaluate(() => {
+    openRentTab();
+    state.paymentHistory = {
+      lease_id: 10,
+      tenant_id: 14,
+      tenant: "Никита",
+      apartment: "Баня 4",
+      targets: {
+        rent: [{ id: 501, label: "Баня 4 · июль", debt: 20000 }],
+        utility: [{ id: 601, label: "Баня 4 · электричество", debt: 2500 }],
+      },
+      receipts: [{
+        id: 701,
+        amount: 2500,
+        paid_at: "2026-07-20T12:00:00",
+        channel: "personal",
+        channel_label: "По номеру",
+        source: "manual",
+        source_label: "Вручную",
+        status: "accepted",
+        notes: "",
+        rent_charge_id: 501,
+        utility_line_id: null,
+      }],
+    };
+    state.editingPaymentReceiptId = 701;
+    renderRentHistory();
+  });
+
+  const target = page.locator("#paymentReceiptTarget-701");
+  const channel = page.locator("#paymentReceiptChannel-701");
+  await expect(channel.locator('option[value="utilities"]')).toHaveText("Коммуналка");
+  await target.selectOption("utility:601");
+  await expect(channel).toHaveValue("utilities");
+  await expect(page.locator("#paymentReceiptExpenseLabel-701")).toBeHidden();
+});
+
 
 test("AI settings save models, limits, auto audit and prompt adaptations", async ({ page }) => {
   await page.locator('.sidebar .nav-group[data-group="administration"]').click();
