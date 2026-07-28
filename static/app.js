@@ -2832,6 +2832,15 @@ function paymentReceiptTargetOptions(receipt) {
   `;
 }
 
+function paymentReceiptUtilityTarget(lineId) {
+  return (state.paymentHistory?.targets?.utility || []).find((target) => Number(target.id) === Number(lineId)) || null;
+}
+
+function paymentReceiptIsUtilityAdvance(receipt) {
+  return receipt.channel === "utility_advance"
+    || paymentReceiptUtilityTarget(receipt.utility_line_id)?.line_type === "advance";
+}
+
 function renderRentHistory() {
   const root = qs("#rentHistoryPanel");
   if (!root) return;
@@ -2841,7 +2850,8 @@ function renderRentHistory() {
   }
   const rows = state.paymentHistory.receipts.map((receipt) => {
     const editing = state.editingPaymentReceiptId === receipt.id;
-    const utilityChannel = receipt.channel === "utilities" || Boolean(receipt.utility_line_id);
+    const utilityAdvance = paymentReceiptIsUtilityAdvance(receipt);
+    const utilityChannel = receipt.channel === "utilities" || utilityAdvance || Boolean(receipt.utility_line_id);
     const editorRow = editing ? `
       <tr class="receipt-editor-row">
         <td colspan="8">
@@ -2859,7 +2869,8 @@ function renderRentHistory() {
               <select id="paymentReceiptChannel-${receipt.id}" name="channel" data-rent-channel="${receipt.channel === "ip" ? "ip" : "personal"}" onchange="updatePaymentReceiptChannel(${receipt.id}, this.value)">
                 <option value="ip" ${receipt.channel === "ip" ? "selected" : ""}>ИП</option>
                 <option value="personal" ${receipt.channel === "personal" ? "selected" : ""}>По номеру</option>
-                <option value="utilities" ${utilityChannel ? "selected" : ""}>Коммуналка</option>
+                <option value="utilities" ${utilityChannel && !utilityAdvance ? "selected" : ""}>Коммуналка</option>
+                <option value="utility_advance" ${utilityAdvance ? "selected" : ""}>Аванс коммуналки</option>
               </select>
             </label>
             <label id="paymentReceiptExpenseLabel-${receipt.id}" class="check wide" ${utilityChannel ? "hidden" : ""}>
@@ -2931,17 +2942,19 @@ function updatePaymentReceiptExpenseVisibility(receiptId, isUtility) {
 
 function updatePaymentReceiptChannel(receiptId, channel) {
   const select = qs(`#paymentReceiptChannel-${receiptId}`);
-  if (select && channel !== "utilities") select.dataset.rentChannel = channel;
-  updatePaymentReceiptExpenseVisibility(receiptId, channel === "utilities");
+  const isUtility = channel === "utilities" || channel === "utility_advance";
+  if (select && !isUtility) select.dataset.rentChannel = channel;
+  updatePaymentReceiptExpenseVisibility(receiptId, isUtility);
 }
 
 function updatePaymentReceiptTarget(receiptId, targetRef) {
   const channel = qs(`#paymentReceiptChannel-${receiptId}`);
   const isUtility = String(targetRef || "").startsWith("utility:");
   if (channel && isUtility) {
-    if (channel.value !== "utilities") channel.dataset.rentChannel = channel.value;
-    channel.value = "utilities";
-  } else if (channel?.value === "utilities") {
+    if (!["utilities", "utility_advance"].includes(channel.value)) channel.dataset.rentChannel = channel.value;
+    const lineId = Number(String(targetRef).split(":")[1]);
+    channel.value = paymentReceiptUtilityTarget(lineId)?.line_type === "advance" ? "utility_advance" : "utilities";
+  } else if (["utilities", "utility_advance"].includes(channel?.value)) {
     channel.value = channel.dataset.rentChannel || "personal";
   }
   updatePaymentReceiptExpenseVisibility(receiptId, isUtility);
@@ -2972,7 +2985,9 @@ async function savePaymentReceiptEdit(event, receiptId) {
       payload.rent_charge_id = Number(targetId);
     } else if (targetKind === "utility") {
       payload.utility_line_id = Number(targetId);
-      payload.channel = "utilities";
+      payload.channel = paymentReceiptUtilityTarget(payload.utility_line_id)?.line_type === "advance"
+        ? "utility_advance"
+        : "utilities";
       payload.is_expense = false;
     }
   } else {

@@ -2691,7 +2691,6 @@ def sync_utility_advance_credit_for_receipt(session: Session, receipt: PaymentRe
     line = session.get(UtilityBillLine, receipt.utility_line_id) if receipt.utility_line_id else None
     should_have_credit = (
         receipt.status == "accepted"
-        and receipt.channel == UTILITY_ADVANCE_CHANNEL
         and line is not None
         and utility_line_is_advance(line)
     )
@@ -2700,6 +2699,7 @@ def sync_utility_advance_credit_for_receipt(session: Session, receipt: PaymentRe
             session.delete(existing)
         return
 
+    receipt.channel = UTILITY_ADVANCE_CHANNEL
     if not existing:
         existing = UtilityAdvanceLedger(
             payment_receipt_id=receipt.id,
@@ -12950,7 +12950,7 @@ def update_payment_receipt(receipt_id: int, payload: dict[str, Any], session: Se
             receipt.utility_line_id = target_line.id
             receipt.lease_id = target_line.lease_id
             receipt.apartment_id = target_line.apartment_id
-            receipt.channel = "utilities"
+            receipt.channel = UTILITY_ADVANCE_CHANNEL if utility_line_is_advance(target_line) else "utilities"
             receipt.is_expense = False
         else:
             raise HTTPException(400, "неизвестная цель зачёта")
@@ -13333,7 +13333,7 @@ def utility_bills_payload(
     include_line_payments: bool = True,
     include_line_reminders: bool = True,
 ) -> list[dict[str, Any]]:
-    bills = session.scalars(
+    query = (
         select(UtilityBill)
         .options(
             joinedload(UtilityBill.service).joinedload(UtilityService.object),
@@ -13341,7 +13341,27 @@ def utility_bills_payload(
             selectinload(UtilityBill.lines).joinedload(UtilityBillLine.lease).joinedload(Lease.tenant),
         )
         .order_by(UtilityBill.created_at.desc(), UtilityBill.id.desc())
-    ).all()
+    )
+    bills = session.scalars(query).all()
+    advance_draft_periods = {
+        (bill.service.object_id, bill.period_start, bill.period_end)
+        for bill in bills
+        if bill.status == "draft" and utility_bill_is_advance(bill)
+    }
+    usage_drafts = [
+        bill
+        for bill in bills
+        if bill.status == "draft" and not utility_bill_is_advance(bill)
+        and (
+            bill.service.object_id,
+            *next_utility_advance_period(bill.period_start, bill.period_end),
+        )
+        in advance_draft_periods
+    ]
+    if usage_drafts:
+        ensure_utility_advance_drafts_for_bills(session, usage_drafts)
+        session.flush()
+        bills = session.scalars(query).all()
     for bill in bills:
         for line in bill.lines:
             update_utility_line_status(line)
@@ -13813,12 +13833,16 @@ def build_utility_advance_line_payload(
     period_factor = min(1.0, max(0.0, line_days / full_days))
     prorated_recommended = money(recommended * period_factor)
     balance_before = utility_advance_balance(session, apartment.id)
-    amount = money(max(0.0, prorated_recommended - balance_before))
+    balance_applied_to_current = money(min(balance_before, max(0.0, current_amount)))
+    balance_after_current = money(max(0.0, balance_before - balance_applied_to_current))
+    amount = money(max(0.0, prorated_recommended - balance_after_current))
     metadata = {
         **forecast_meta,
         "advance_recommended_amount": recommended,
         "advance_prorated_amount": prorated_recommended,
         "advance_balance_before": balance_before,
+        "advance_balance_applied_to_current": balance_applied_to_current,
+        "advance_balance_after_current": balance_after_current,
         "advance_amount": amount,
         "advance_period_start": advance_start.isoformat(),
         "advance_period_end": advance_end.isoformat(),

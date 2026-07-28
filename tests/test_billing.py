@@ -15,11 +15,11 @@ from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import sessionmaker
 
 from rental_manager.database import Base
-from rental_manager.main import apartment_month_state, bot_dialog_messages_payload, build_all_debts_breakdown, build_dashboard, create_manual_payment, create_move_out_utility_lines, delete_utility_bill, ensure_utility_advance_drafts_for_bills, expense_period_summary, issue_utility_bill, month_dashboard_summary, move_out, owner_charge_status_label, owner_expected_ip_for_charge, panel_role_for_pin, payment_receipt_document, preview_issue_utility_bill, process_move_out_notifications, provider_reading_statuses_for_month, render_message_text, rent_report, resolve_broadcast_recipients, tenant_payment_history, transfer_lease, update_payment_receipt, utility_bill_for_month
+from rental_manager.main import apartment_month_state, bot_dialog_messages_payload, build_all_debts_breakdown, build_dashboard, create_manual_payment, create_move_out_utility_lines, delete_utility_bill, ensure_utility_advance_drafts_for_bills, expense_period_summary, issue_utility_bill, month_dashboard_summary, move_out, owner_charge_status_label, owner_expected_ip_for_charge, panel_role_for_pin, payment_receipt_document, preview_issue_utility_bill, process_move_out_notifications, provider_reading_statuses_for_month, render_message_text, rent_report, resolve_broadcast_recipients, tenant_payment_history, transfer_lease, update_payment_receipt, utility_bill_for_month, utility_bills_payload
 from rental_manager.main import apply_database_import_payload, current_database_snapshot, inspect_database_import_payload, parse_database_import_bytes
 from rental_manager.main import api_performance, app_state, record_perf_request
 from rental_manager.main import dashboard_income_trend
-from rental_manager.models import AiConversation, AiMessage, AppSetting, Apartment, Expense, Lease, MessageLog, Meter, MeterReading, PaymentReceipt, RentalObject, RentCharge, Tenant, UtilityBill, UtilityBillLine, UtilityService, Tariff
+from rental_manager.models import AiConversation, AiMessage, AppSetting, Apartment, Expense, Lease, MessageLog, Meter, MeterReading, PaymentReceipt, RentalObject, RentCharge, Tenant, UtilityAdvanceLedger, UtilityBill, UtilityBillLine, UtilityService, Tariff
 from rental_manager.services.billing import (
     IGNORE_LEASE_MARK,
     LEGACY_IMPORT_MARK,
@@ -1858,6 +1858,105 @@ class UtilityAdvanceTests(DatabaseTestCase):
         self.assertEqual(line.status, "paid")
         self.assertEqual(leftover.amount, 400)
         self.assertEqual(applied.amount, 1000)
+
+    def test_editing_legacy_advance_payment_repairs_channel_and_draft_balance(self) -> None:
+        with self.Session() as session:
+            lease, bill, usage_line = self._seed_bill(session, total_amount=1000)
+            previous_advance_bill = UtilityBill(
+                service=bill.service,
+                bill_type="advance",
+                period_start=date(2026, 5, 1),
+                period_end=date(2026, 6, 1),
+                status="issued",
+                total_cost=600,
+                provider_paid=True,
+            )
+            previous_advance_line = UtilityBillLine(
+                apartment=lease.apartment,
+                lease=lease,
+                line_type="advance",
+                total_amount=600,
+                paid_amount=0,
+                status="issued",
+            )
+            previous_advance_bill.lines.append(previous_advance_line)
+            stale_current_advance_bill = UtilityBill(
+                service=bill.service,
+                bill_type="advance",
+                period_start=date(2026, 6, 30),
+                period_end=date(2026, 7, 30),
+                status="draft",
+                total_cost=400,
+                provider_paid=True,
+            )
+            stale_current_advance_bill.lines.append(
+                UtilityBillLine(
+                    apartment=lease.apartment,
+                    lease=lease,
+                    line_type="advance",
+                    total_amount=400,
+                    paid_amount=0,
+                    status="draft",
+                )
+            )
+            session.add_all([previous_advance_bill, stale_current_advance_bill])
+            session.flush()
+            receipt = PaymentReceipt(
+                lease_id=lease.id,
+                apartment_id=lease.apartment_id,
+                utility_line_id=previous_advance_line.id,
+                amount=600,
+                channel="utilities",
+                paid_at=datetime(2026, 6, 5, 11, 17),
+                source="manual",
+                status="accepted",
+                notes="аванс коммуналки",
+            )
+            session.add(receipt)
+            session.commit()
+
+            update_payment_receipt(
+                receipt.id,
+                {
+                    "target_kind": "utility",
+                    "utility_line_id": previous_advance_line.id,
+                    "channel": "utilities",
+                },
+                session=session,
+            )
+            session.refresh(receipt)
+            ledger_entry = session.scalar(
+                select(UtilityAdvanceLedger).where(
+                    UtilityAdvanceLedger.payment_receipt_id == receipt.id,
+                    UtilityAdvanceLedger.kind == "advance_payment",
+                )
+            )
+            bills_payload = utility_bills_payload(session)
+            new_advance_bill = next(
+                item
+                for item in bills_payload
+                if item["bill_type"] == "advance" and item["period_start"] == "2026-06-30"
+            )
+            new_advance_payload = new_advance_bill["lines"][0]
+            new_advance_line = session.get(UtilityBillLine, new_advance_payload["id"])
+            metadata = json.loads(new_advance_line.metadata_json)
+
+            payload = issue_utility_bill(bill.id, session=session)
+            session.refresh(usage_line)
+            repaired_channel = receipt.channel
+            ledger_amount = ledger_entry.amount if ledger_entry else None
+            new_advance_amount = new_advance_payload["total_amount"]
+            applied_to_usage = usage_line.paid_amount
+
+        self.assertEqual(repaired_channel, "utility_advance")
+        self.assertIsNotNone(ledger_entry)
+        self.assertEqual(ledger_amount, 600)
+        self.assertEqual(metadata["advance_balance_before"], 600)
+        self.assertEqual(metadata["advance_balance_applied_to_current"], 600)
+        self.assertEqual(metadata["advance_balance_after_current"], 0)
+        self.assertEqual(new_advance_amount, 1000)
+        self.assertEqual(payload["applied_advances"], 600)
+        self.assertEqual(applied_to_usage, 600)
 
     def test_issue_utility_bill_reports_partial_telegram_failures(self) -> None:
         with self.Session() as session:

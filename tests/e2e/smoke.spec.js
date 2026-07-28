@@ -47,6 +47,13 @@ test("основной экран не содержит критичных ош�
   expect(results.violations.filter((item) => ["critical", "serious"].includes(item.impact))).toEqual([]);
 });
 
+test("активные счета расположены выше лога коммуналки", async ({ page }) => {
+  await page.locator('.sidebar .nav-group[data-group="utilities"]').click();
+  await page.locator('.section-tabs .tab[data-tab="utilities"]').click();
+  await expect(page.locator("#utilities")).toBeVisible();
+  await expect(page.locator("#utilities > #utilityBills + #utilityTimeline")).toHaveCount(1);
+});
+
 
 test("дашборд группирует объекты и сворачивает однотипные долги", async ({ page }) => {
   const result = await page.evaluate(() => {
@@ -151,7 +158,10 @@ test("редактор платежа позволяет выбрать кана
       apartment: "Баня 4",
       targets: {
         rent: [{ id: 501, label: "Баня 4 · июль", debt: 20000 }],
-        utility: [{ id: 601, label: "Баня 4 · электричество", debt: 2500 }],
+        utility: [
+          { id: 601, label: "Баня 4 · электричество", debt: 2500, line_type: "usage" },
+          { id: 602, label: "Баня 4 · аванс коммуналки", debt: 1800, line_type: "advance" },
+        ],
       },
       receipts: [{
         id: 701,
@@ -177,6 +187,9 @@ test("редактор платежа позволяет выбрать кана
   await target.selectOption("utility:601");
   await expect(channel).toHaveValue("utilities");
   await expect(page.locator("#paymentReceiptExpenseLabel-701")).toBeHidden();
+  await target.selectOption("utility:602");
+  await expect(channel).toHaveValue("utility_advance");
+  await expect(channel.locator('option[value="utility_advance"]')).toHaveText("Аванс коммуналки");
 });
 
 

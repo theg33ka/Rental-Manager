@@ -30,7 +30,7 @@ from rental_manager.main import (
     panel_role_for_pin,
     telegram_webhook,
 )
-from rental_manager.models import AppSetting, Expense, PanelSession
+from rental_manager.models import Apartment, AppSetting, Expense, Lease, PanelSession, PaymentReceipt, RentalObject, Tenant, UtilityBill, UtilityBillLine, UtilityService
 from rental_manager.security.pins import PIN_SETTING_KEYS, hash_pin, is_pin_hash, verify_pin
 from rental_manager.security.secrets import ENCRYPTION_ENV, ENCRYPTION_KEY_FILE_ENV, decrypt_secret
 from rental_manager.security.sessions import (
@@ -384,6 +384,98 @@ class MigrationTests(unittest.TestCase):
             self.assertIn("processed_telegram_updates", tables)
             self.assertTrue(verify_pin(pin_rows[PIN_SETTING_KEYS["owner"]], "12" + "98"))
             self.assertTrue(verify_pin(pin_rows[PIN_SETTING_KEYS["guest"]], "12" + "12"))
+
+    def test_upgrade_repairs_legacy_utility_advance_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "advance-migration.db"
+            env = os.environ.copy()
+            env["RENTAL_MANAGER_DATABASE_URL"] = f"sqlite:///{db_path.as_posix()}"
+            project_root = Path(__file__).resolve().parents[1]
+            result = subprocess.run(
+                [sys.executable, "-m", "alembic", "upgrade", "20260720_01"],
+                cwd=project_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            engine = create_engine(f"sqlite:///{db_path.as_posix()}", future=True)
+            Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+            with Session() as session:
+                rental_object = RentalObject(name="Баня", short_code="Б")
+                apartment = Apartment(object=rental_object, name="Баня 2", sort_order=2, odn_share_percent=100, active=True)
+                tenant = Tenant(full_name="Мишаня", active=True)
+                lease = Lease(
+                    apartment=apartment,
+                    tenant=tenant,
+                    start_date=date(2026, 1, 1),
+                    payment_day=4,
+                    active=True,
+                )
+                service = UtilityService(object=rental_object, kind="electricity", name="Свет", active=True)
+                bill = UtilityBill(
+                    service=service,
+                    bill_type="advance",
+                    period_start=date(2026, 7, 4),
+                    period_end=date(2026, 8, 4),
+                    status="issued",
+                    total_cost=8601.5,
+                    provider_paid=True,
+                )
+                line = UtilityBillLine(
+                    apartment=apartment,
+                    lease=lease,
+                    line_type="advance",
+                    total_amount=8601.5,
+                    status="paid",
+                )
+                bill.lines.append(line)
+                session.add_all([rental_object, apartment, tenant, lease, service, bill])
+                session.flush()
+                receipt = PaymentReceipt(
+                    lease_id=lease.id,
+                    apartment_id=apartment.id,
+                    utility_line_id=line.id,
+                    amount=8601.5,
+                    channel="utilities",
+                    status="accepted",
+                    notes="аванс коммуналки 4 число",
+                )
+                session.add(receipt)
+                session.commit()
+                receipt_id = receipt.id
+            engine.dispose()
+
+            result = subprocess.run(
+                [sys.executable, "-m", "alembic", "upgrade", "head"],
+                cwd=project_root,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            connection = sqlite3.connect(db_path)
+            try:
+                channel = connection.execute(
+                    "SELECT channel FROM payment_receipts WHERE id = ?",
+                    (receipt_id,),
+                ).fetchone()[0]
+                ledger_row = connection.execute(
+                    """
+                    SELECT amount, kind
+                    FROM utility_advance_ledger
+                    WHERE payment_receipt_id = ?
+                    """,
+                    (receipt_id,),
+                ).fetchone()
+            finally:
+                connection.close()
+
+            self.assertEqual(channel, "utility_advance")
+            self.assertEqual(ledger_row, (8601.5, "advance_payment"))
 
 
 if __name__ == "__main__":
