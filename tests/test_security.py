@@ -173,6 +173,30 @@ class SecurityTestCase(unittest.TestCase):
 
             self.assertEqual(main.get_setting_value(session, "deepseek_api_key"), "settings-key")
 
+    def test_settings_status_does_not_decrypt_saved_secrets(self) -> None:
+        with self.Session() as session, patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_BOT_TOKEN": "",
+                "TELEGRAM_WEBHOOK_SECRET": "",
+                "DEEPSEEK_API_KEY": "",
+            },
+            clear=False,
+        ):
+            session.add(AppSetting(key="deepseek_api_key", value="enc:v1:unreadable"))
+            session.commit()
+
+            settings = main.get_settings(session)
+            bootstrap = main.build_bootstrap_payload(
+                SimpleNamespace(state=SimpleNamespace(panel_role="owner")),
+                session,
+            )
+
+        self.assertTrue(settings["deepseek_api_key_configured"])
+        self.assertNotIn("deepseek_api_key", settings)
+        self.assertEqual(bootstrap["auth"]["role"], "owner")
+        self.assertIn("dashboard", bootstrap)
+
     def test_deepseek_settings_reject_unknown_model(self) -> None:
         with self.Session() as session, self.assertRaises(HTTPException) as raised:
             main.save_settings(session, {"deepseek_model": "deepseek-chat"})

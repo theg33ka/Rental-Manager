@@ -30,6 +30,25 @@ test("основной экран и навигация доступны", async
 });
 
 
+test("ошибка загрузки после верного PIN не возвращает экран входа", async ({ page }) => {
+  await page.evaluate(() => logoutPanel());
+  await expect(page.locator("#authOverlay")).toBeVisible();
+  await page.route(/\/api\/app-state\?sections=bootstrap$/, async (route) => {
+    await route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({ detail: "bootstrap failed" }),
+    });
+  });
+
+  await page.locator('#pinLoginForm input[name="pin_code"]').fill(process.env.E2E_OWNER_PIN || ("12" + "98"));
+  await page.locator('#pinLoginForm button[type="submit"]').click();
+
+  await expect(page.locator("#authOverlay")).toBeHidden();
+  await expect(page.locator("#loadingOverlay")).toBeHidden();
+});
+
+
 test("мобильный web сохраняет полную навигацию и тёмную палитру", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.locator(".mobile-nav")).toBeVisible();

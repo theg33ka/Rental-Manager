@@ -4664,7 +4664,8 @@ async function submitPinLogin(event) {
     if (remember) remember.checked = true;
     await loadAll();
   } catch (error) {
-    showAuthOverlay();
+    if (state.auth?.authenticated) hideAuthOverlay();
+    else showAuthOverlay();
     toast(error.message);
   }
 }

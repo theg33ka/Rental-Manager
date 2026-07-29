@@ -1161,6 +1161,14 @@ def get_setting_value(session: Session, key: str) -> str:
     return str(INTERNAL_SETTINGS[key])
 
 
+def secret_setting_is_configured(session: Session, key: str) -> bool:
+    env_name = ENV_SETTING_KEYS.get(key)
+    if env_name and str(os.environ.get(env_name) or "").strip():
+        return True
+    row = session.get(AppSetting, key)
+    return bool(row and str(row.value or "").strip())
+
+
 def get_internal_json(session: Session, key: str, fallback: Any) -> Any:
     raw = get_setting_value(session, key)
     try:
@@ -1199,7 +1207,7 @@ def get_settings(session: Session) -> dict[str, str | bool]:
             raw = str(DEFAULT_SETTINGS[key])
         settings[key] = setting_bool_value(raw) if key in BOOLEAN_SETTINGS else raw
     for key in SECRET_SETTINGS:
-        settings[f"{key}_configured"] = bool(get_setting_value(session, key))
+        settings[f"{key}_configured"] = secret_setting_is_configured(session, key)
     for role, input_key in (("owner", "panel_owner_pin_code"), ("guest", "panel_guest_pin_code")):
         settings[f"{input_key}_configured"] = bool(
             configured_environment_pin_hash(role) or get_setting_value(session, PIN_SETTING_KEYS[role])
