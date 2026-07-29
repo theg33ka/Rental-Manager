@@ -469,6 +469,58 @@ class UtilityBillingTests(DatabaseTestCase):
         self.assertEqual(bill.lines[0].odn_consumption, 1100.0)
         self.assertEqual(bill.lines[0].total_amount, 5016.0)
 
+    def test_issued_advance_does_not_block_electricity_bill(self) -> None:
+        with self.seed() as session:
+            obj = session.get(RentalObject, 1)
+            apartment = session.get(Apartment, 1)
+            service = session.scalar(
+                select(UtilityService).where(
+                    UtilityService.object_id == obj.id,
+                    UtilityService.kind == "electricity",
+                )
+            )
+            lease = self._lease(session, apartment)
+            self._read_all_meters(
+                session,
+                service,
+                object_start=1000,
+                object_end=2200,
+                apartment_end_values={apartment.id: 110},
+            )
+            issued_advance = UtilityBill(
+                service=service,
+                bill_type="advance",
+                period_start=date(2026, 4, 1),
+                period_end=date(2026, 5, 1),
+                status="issued",
+                total_cost=1000,
+                provider_paid=True,
+            )
+            issued_advance.lines.append(
+                UtilityBillLine(
+                    apartment=apartment,
+                    lease=lease,
+                    line_type="advance",
+                    total_amount=1000,
+                    paid_amount=1000,
+                    status="paid",
+                )
+            )
+            session.add(issued_advance)
+            session.flush()
+
+            bill, warnings = calculate_utility_bill(
+                session,
+                service.id,
+                date(2026, 4, 1),
+                date(2026, 5, 1),
+                allow_estimate=False,
+            )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(bill.lines), 1)
+        self.assertEqual(bill.lines[0].total_amount, 5016.0)
+
     def test_utility_bill_fails_when_apartment_consumption_exceeds_object(self) -> None:
         with self.seed() as session:
             obj = session.get(RentalObject, 1)
@@ -1858,6 +1910,51 @@ class UtilityAdvanceTests(DatabaseTestCase):
         self.assertEqual(line.status, "paid")
         self.assertEqual(leftover.amount, 400)
         self.assertEqual(applied.amount, 1000)
+
+    def test_fully_covered_bill_message_lists_usage_advance_and_remaining_balance(self) -> None:
+        with self.Session() as session:
+            lease, bill, _line = self._seed_bill(session, total_amount=1000)
+            create_manual_payment(
+                {
+                    "lease_id": lease.id,
+                    "kind": "utility_advance",
+                    "amount": 3000,
+                    "paid_at": "2026-06-10T12:00:00",
+                },
+                session=session,
+            )
+            session.add(
+                AppSetting(
+                    key="telegram_tenant_links",
+                    value=json.dumps({str(lease.tenant_id): "100"}),
+                )
+            )
+            session.commit()
+
+            preview = preview_issue_utility_bill(bill.id, session=session)
+            expected_text = preview["targets"][0]["text"]
+
+            self.assertIn("электричество за период", expected_text.lower())
+            self.assertIn("аванс коммуналки на следующий период", expected_text.lower())
+            self.assertIn("списано 2 000,00 ₽", expected_text)
+            self.assertIn("Осталось в авансе: 1 000,00 ₽", expected_text)
+            self.assertIn("Доплачивать сейчас ничего не нужно", expected_text)
+            self.assertNotIn("Всего: 0,00 ₽", expected_text)
+
+            with patch("rental_manager.main.send_telegram_text", return_value={"ok": True}) as mocked_send:
+                issue_utility_bill(bill.id, session=session)
+
+            log = session.scalar(
+                select(MessageLog)
+                .where(
+                    MessageLog.lease_id == lease.id,
+                    MessageLog.note == "utility-issue",
+                )
+                .order_by(MessageLog.id.desc())
+            )
+
+        self.assertEqual(mocked_send.call_args.args[2], expected_text)
+        self.assertEqual(log.text, expected_text)
 
     def test_editing_legacy_advance_payment_repairs_channel_and_draft_balance(self) -> None:
         with self.Session() as session:

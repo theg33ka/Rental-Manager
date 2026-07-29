@@ -5756,11 +5756,12 @@ def send_tenant_message(
     utility_lines_override: list[UtilityBillLine] | None = None,
     utility_due_date_override: date | None = None,
     keyboard: dict[str, Any] | None = None,
+    text_override: str | None = None,
 ) -> dict[str, Any]:
     chat_id = lease_chat_id(session, lease)
     if not chat_id:
         raise HTTPException(400, f"{lease.tenant.full_name} ещё не привязан к боту. Пусть сначала напишет /start.")
-    text = render_message_text(
+    text = text_override if text_override is not None else render_message_text(
         session,
         template_key,
         lease,
@@ -6450,8 +6451,14 @@ def utility_message_projection_context(
     session: Session,
     selected_lines: list[UtilityBillLine],
     combined_lines: list[UtilityBillLine],
+    projected_debts: dict[int, float] | None = None,
 ) -> dict[str, str]:
-    projected_debts = projected_utility_debts_for_issue_preview(session, selected_lines, combined_lines)
+    if projected_debts is None:
+        projected_debts = projected_utility_debts_for_issue_preview(
+            session,
+            selected_lines,
+            combined_lines,
+        )
     visible_lines = [line for line in combined_lines if projected_debts.get(line.id, 0.0) > EPS]
     return {
         "utility_debt_details": "\n".join(
@@ -6461,6 +6468,73 @@ def utility_message_projection_context(
         "utility_total": money_text(sum(projected_debts.get(line.id, 0.0) for line in visible_lines)),
         "utility_debt_count": str(len(visible_lines)),
     }
+
+
+def fully_advance_covered_utility_message(
+    session: Session,
+    lease: Lease,
+    selected_lines: list[UtilityBillLine],
+    combined_lines: list[UtilityBillLine],
+    projected_debts: dict[int, float],
+) -> str | None:
+    if sum(projected_debts.get(line.id, 0.0) for line in combined_lines) > EPS:
+        return None
+
+    usage_lines = [
+        line
+        for line in selected_lines
+        if not utility_line_is_advance(line) and utility_line_debt_amount(line) > EPS
+    ]
+    if not usage_lines:
+        return None
+
+    gross_usage = money(sum(utility_line_debt_amount(line) for line in usage_lines))
+    usage_bill = usage_lines[0].bill
+    advance_start, advance_end = next_utility_advance_period(
+        usage_bill.period_start,
+        usage_bill.period_end,
+    )
+    line_period = lease_utility_advance_period(lease, advance_start, advance_end)
+    if not line_period:
+        return None
+    line_start, line_end = line_period
+    _advance_due, advance_metadata = build_utility_advance_line_payload(
+        session,
+        lease.apartment,
+        lease,
+        advance_start,
+        advance_end,
+        line_start,
+        line_end,
+        current_amount=gross_usage,
+    )
+    planned_advance = money(advance_metadata.get("advance_prorated_amount", 0.0))
+    advance_balance = utility_advance_balance(session, lease.apartment_id)
+    covered_total = money(gross_usage + planned_advance)
+    if planned_advance <= EPS or covered_total > advance_balance + EPS:
+        return None
+
+    details = [
+        utility_message_line(line, utility_line_debt_amount(line))
+        for line in sorted(
+            usage_lines,
+            key=lambda item: (item.bill.period_end, item.bill.service.name, item.id),
+        )
+    ]
+    period = f"{line_start:%d.%m.%Y} -> {line_end:%d.%m.%Y}"
+    details.append(
+        f"{debt_location(lease)}, аванс коммуналки на следующий период ({period}): "
+        f"{money_text(planned_advance)}"
+    )
+    remaining = money(advance_balance - covered_total)
+    return (
+        "Сформированы счета по коммунальным платежам:\n"
+        + "\n".join(details)
+        + "\n\n"
+        + f"Из ранее внесённого аванса списано {money_text(covered_total)}. "
+        + f"Осталось в авансе: {money_text(remaining)}.\n"
+        + "Доплачивать сейчас ничего не нужно."
+    )
 
 
 def utility_issue_targets_for_bills(session: Session, bills: list[UtilityBill]) -> list[dict[str, Any]]:
@@ -6491,15 +6565,33 @@ def utility_issue_targets_for_bills(session: Session, bills: list[UtilityBill]) 
             [*existing_lines, *selected_lines],
             key=lambda item: (item.bill.period_end, item.bill.service.name, item.id),
         )
-        text = render_message_text(
+        projected_debts = projected_utility_debts_for_issue_preview(
             session,
-            "message_utility_bill",
-            lease,
-            line=selected_lines[0],
-            utility_lines_override=combined_lines,
-            utility_due_date_override=due,
-            context_overrides=utility_message_projection_context(session, selected_lines, combined_lines),
+            selected_lines,
+            combined_lines,
         )
+        text = fully_advance_covered_utility_message(
+            session,
+            lease,
+            selected_lines,
+            combined_lines,
+            projected_debts,
+        )
+        if text is None:
+            text = render_message_text(
+                session,
+                "message_utility_bill",
+                lease,
+                line=selected_lines[0],
+                utility_lines_override=combined_lines,
+                utility_due_date_override=due,
+                context_overrides=utility_message_projection_context(
+                    session,
+                    selected_lines,
+                    combined_lines,
+                    projected_debts,
+                ),
+            )
         previews.append(
             {
                 "lease_id": lease.id,
@@ -14083,6 +14175,7 @@ def issue_utility_bill(bill_id: int, session: Session = Depends(get_session)) ->
                 utility_lines_override=[line for line_id in preview["all_line_ids"] if (line := session.get(UtilityBillLine, line_id))],
                 utility_due_date_override=due,
                 keyboard=tenant_situation_keyboard(situation) if situation else None,
+                text_override=preview["text"],
             )
             sent += 1
         except HTTPException as exc:
