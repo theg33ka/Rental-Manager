@@ -4807,7 +4807,8 @@ function bindEvents() {
       payload.object_id = Number(targetValue.slice("object:".length));
       delete payload.service_id;
       result = await api("/api/utility-bills/calculate-object", { method: "POST", body: JSON.stringify(payload) });
-      toast(`Черновики объекта созданы: ${result.created?.length || 0}`);
+      const errors = result.errors?.length ? ` Не созданы: ${result.errors.join("; ")}` : "";
+      toast(`Черновики объекта созданы: ${result.created?.length || 0}.${errors}`);
     } else {
       payload.service_id = Number(targetValue.replace("service:", ""));
       result = await api("/api/utility-bills/calculate", { method: "POST", body: JSON.stringify(payload) });

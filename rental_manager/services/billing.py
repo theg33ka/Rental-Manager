@@ -522,6 +522,7 @@ def calculate_utility_bill(
         .join(UtilityBill)
         .where(
             UtilityBill.service_id == service_id,
+            UtilityBill.bill_type != "advance",
             UtilityBill.status != "draft",
             UtilityBill.period_start < period_end,
             UtilityBill.period_end > period_start,
