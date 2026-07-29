@@ -13630,7 +13630,12 @@ def create_utility_bill(payload: dict[str, Any], session: Session = Depends(get_
         raise HTTPException(400, str(exc)) from exc
     session.add(bill)
     session.flush()
-    advance_bills = ensure_utility_advance_drafts_for_bills(session, [bill])
+    usage_bills = [
+        item
+        for item in utility_issue_group_bills(session, bill)
+        if not utility_bill_is_advance(item) and item.status == "draft"
+    ]
+    advance_bills = ensure_utility_advance_drafts_for_bills(session, usage_bills)
     session.commit()
     session.refresh(bill)
     result = serialize_bill(bill)
@@ -13689,7 +13694,12 @@ def create_object_utility_bills(payload: dict[str, Any], session: Session = Depe
         raise HTTPException(400, "Черновики за этот период уже есть: " + ", ".join(skipped))
 
     session.flush()
-    advance_bills = ensure_utility_advance_drafts_for_bills(session, created_bills)
+    usage_bills = [
+        item
+        for item in utility_issue_group_bills(session, created_bills[0])
+        if not utility_bill_is_advance(item) and item.status == "draft"
+    ]
+    advance_bills = ensure_utility_advance_drafts_for_bills(session, usage_bills)
     session.commit()
     return {
         "object_id": object_id,

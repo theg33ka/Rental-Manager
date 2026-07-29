@@ -15,7 +15,7 @@ from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import sessionmaker
 
 from rental_manager.database import Base
-from rental_manager.main import apartment_month_state, bot_dialog_messages_payload, build_all_debts_breakdown, build_dashboard, create_manual_payment, create_move_out_utility_lines, delete_utility_bill, ensure_utility_advance_drafts_for_bills, expense_period_summary, issue_utility_bill, month_dashboard_summary, move_out, owner_charge_status_label, owner_expected_ip_for_charge, panel_role_for_pin, payment_receipt_document, preview_issue_utility_bill, process_move_out_notifications, provider_reading_statuses_for_month, render_message_text, rent_report, resolve_broadcast_recipients, tenant_payment_history, transfer_lease, update_payment_receipt, utility_bill_for_month, utility_bills_payload
+from rental_manager.main import apartment_month_state, bot_dialog_messages_payload, build_all_debts_breakdown, build_dashboard, create_manual_payment, create_move_out_utility_lines, create_utility_bill, delete_utility_bill, ensure_utility_advance_drafts_for_bills, expense_period_summary, issue_utility_bill, month_dashboard_summary, move_out, owner_charge_status_label, owner_expected_ip_for_charge, panel_role_for_pin, payment_receipt_document, preview_issue_utility_bill, process_move_out_notifications, provider_reading_statuses_for_month, render_message_text, rent_report, resolve_broadcast_recipients, tenant_payment_history, transfer_lease, update_payment_receipt, utility_bill_for_month, utility_bills_payload
 from rental_manager.main import apply_database_import_payload, current_database_snapshot, inspect_database_import_payload, parse_database_import_bytes
 from rental_manager.main import api_performance, app_state, record_perf_request
 from rental_manager.main import dashboard_income_trend
@@ -520,6 +520,63 @@ class UtilityBillingTests(DatabaseTestCase):
         self.assertEqual(warnings, [])
         self.assertEqual(len(bill.lines), 1)
         self.assertEqual(bill.lines[0].total_amount, 5016.0)
+
+    def test_single_service_recalculation_keeps_other_drafts_in_advance_forecast(self) -> None:
+        with self.seed() as session:
+            obj = session.get(RentalObject, 1)
+            apartment = session.get(Apartment, 1)
+            electricity = session.scalar(
+                select(UtilityService).where(
+                    UtilityService.object_id == obj.id,
+                    UtilityService.kind == "electricity",
+                )
+            )
+            lease = self._lease(session, apartment)
+            self._read_all_meters(
+                session,
+                electricity,
+                object_start=1000,
+                object_end=2200,
+                apartment_end_values={apartment.id: 110},
+            )
+            water = UtilityService(
+                object=obj,
+                kind="water",
+                name="Холодная вода",
+                provider_due_day=24,
+                resident_due_days=7,
+                active=True,
+            )
+            water_bill = UtilityBill(
+                service=water,
+                period_start=date(2026, 4, 1),
+                period_end=date(2026, 5, 1),
+                status="draft",
+                total_cost=500,
+            )
+            water_bill.lines.append(
+                UtilityBillLine(
+                    apartment=apartment,
+                    lease=lease,
+                    total_amount=500,
+                    status="draft",
+                )
+            )
+            session.add(water_bill)
+            session.flush()
+
+            result = create_utility_bill(
+                {
+                    "service_id": electricity.id,
+                    "period_start": "2026-04-01",
+                    "period_end": "2026-05-01",
+                    "allow_estimate": False,
+                },
+                session=session,
+            )
+
+        self.assertEqual(len(result["advance_bills"]), 1)
+        self.assertEqual(result["advance_bills"][0]["lines"][0]["total_amount"], 5516.0)
 
     def test_utility_bill_fails_when_apartment_consumption_exceeds_object(self) -> None:
         with self.seed() as session:
