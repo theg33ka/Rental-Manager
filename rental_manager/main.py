@@ -683,18 +683,25 @@ def startup() -> None:
         f"deepseek_env_key_configured={str(bool(os.environ.get('DEEPSEEK_API_KEY', '').strip())).lower()}",
     )
     install_domain_event_listeners()
+    runtime_log("BOOT", "startup_step=database_init")
     init_db()
     with SessionLocal() as session:
+        runtime_log("BOOT", "startup_step=schema_check")
         ensure_database_schema(session)
+        runtime_log("BOOT", "startup_step=release_seed_check")
         seeded_release = seed_release_baseline_if_empty(session)
         if not seeded_release:
             seed_if_empty(session)
+        runtime_log("BOOT", "startup_step=runtime_defaults")
         ensure_runtime_defaults(session)
         validate_production_security(session)
+        runtime_log("BOOT", "startup_step=rent_sync")
         generate_rent_charges(session)
+        runtime_log("BOOT", "startup_step=hermes_reconcile")
         reconcile_operational_cases(session)
         reconcile_owner_commitments(session)
         session.commit()
+    runtime_log("BOOT", "startup_step=ready")
     queue_startup_maintenance()
     queue_runtime_telegram_webhook_refresh()
     record_background_event(
@@ -813,7 +820,8 @@ SCHEMA_ADDITIONS = {
 
 def ensure_database_schema(session: Session) -> None:
     bind = session.get_bind()
-    if bind is not None:
+    bootstrap_requested = os.environ.get("RENTAL_MANAGER_BOOTSTRAP_SCHEMA", "").strip().lower() in {"1", "true", "yes"}
+    if bind is not None and (bind.dialect.name == "sqlite" or bootstrap_requested):
         Base.metadata.create_all(bind=bind)
     ensure_schema_additions(session)
 
@@ -831,21 +839,21 @@ def ensure_schema_additions(session: Session) -> None:
         session.commit()
         return
 
+    existing_columns = {
+        (str(row.table_name), str(row.column_name))
+        for row in session.execute(
+            text(
+                """
+                SELECT table_name, column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                """
+            )
+        )
+    }
     for table_name, additions in SCHEMA_ADDITIONS.items():
         for column_name, ddl in additions:
-            exists = session.execute(
-                text(
-                    """
-                    SELECT 1
-                    FROM information_schema.columns
-                    WHERE table_name = :table_name
-                      AND column_name = :column_name
-                    LIMIT 1
-                    """
-                ),
-                {"table_name": table_name, "column_name": column_name},
-            ).first()
-            if not exists:
+            if (table_name, column_name) not in existing_columns:
                 session.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {ddl}"))
     session.commit()
 
