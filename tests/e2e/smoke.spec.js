@@ -63,6 +63,23 @@ test("мобильный web сохраняет навигацию, поиск �
 });
 
 
+test("белая и неоновая темы переключаются и запоминаются", async ({ page }) => {
+  await expect(page.locator("body")).toHaveAttribute("data-palette", "neon");
+  await page.locator(".topbar [data-theme-toggle]").click();
+  await expect(page.locator("body")).toHaveAttribute("data-palette", "white");
+  await expect(page.locator("body")).toHaveCSS("color", "rgb(23, 32, 51)");
+  await expect(page.locator(".topbar [data-theme-toggle]")).toHaveAttribute("aria-label", "Включить неоновую тему");
+  const whiteThemeA11y = await new AxeBuilder({ page }).analyze();
+  expect(whiteThemeA11y.violations.filter((item) => ["critical", "serious"].includes(item.impact))).toEqual([]);
+
+  await page.reload();
+  await expect(page.locator("#loadingOverlay")).toBeHidden();
+  await expect(page.locator("body")).toHaveAttribute("data-palette", "white");
+  await page.locator(".topbar [data-theme-toggle]").click();
+  await expect(page.locator("body")).toHaveAttribute("data-palette", "neon");
+});
+
+
 test("основной экран не содержит критичных ошибок доступности", async ({ page }) => {
   const results = await new AxeBuilder({ page }).analyze();
   expect(results.violations.filter((item) => ["critical", "serious"].includes(item.impact))).toEqual([]);

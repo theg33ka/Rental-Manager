@@ -372,6 +372,23 @@ body[data-palette="neon"] .loading-overlay {
     rgba(4, 7, 13, 0.94);
 }
 
+.auth-theme-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.auth-theme-row .eyebrow {
+  margin: 0;
+}
+
+.auth-theme-toggle {
+  min-height: 32px;
+  padding: 5px 9px;
+  font-size: 12px;
+}
+
 @media (max-width: 1280px) {
   .home-quick-actions {
     grid-template-columns: repeat(2, minmax(0, 1fr));

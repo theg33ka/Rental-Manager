@@ -18,7 +18,7 @@
 - Telegram owner/tenant flows, webhook и reminders;
 - DeepSeek adapter, owner operations и proposal confirmation;
 - Hermes Core: events, cases, commitments, preferences, briefing, skills, safety, usage/runs и web/Android endpoints;
-- browser UI в `static`: неоновая тема по умолчанию, отдельные постоянные разделы «Главная» и «Сегодня», адаптивная навигация и нативный Android Java-клиент.
+- browser UI в `static`: новый интерфейс с белой и неоновой темами, неоновая выбрана по умолчанию; отдельные постоянные разделы «Главная» и «Сегодня», адаптивная навигация и нативный Android Java-клиент.
 
 Web-панель является текущей полной поверхностью управления Payment Profiles. Android получает созданные объекты и квартиры через общий registry, но отдельного редактора профилей в нём пока нет.
 

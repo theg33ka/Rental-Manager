@@ -221,9 +221,16 @@
     </style>
     <link rel="stylesheet" href="/static/styles.css?v=2026-07-23-edit-utility-v8" />
     <link rel="stylesheet" href="/static/premium.css?v=2026-07-23-edit-utility-v8" />
-    <link rel="stylesheet" href="/static/neon-ui.css?v=2026-08-29-neon-ui-v1" />
+    <link rel="stylesheet" href="/static/neon-ui.css?v=2026-08-29-themes-v2" />
+    <link rel="stylesheet" href="/static/white-ui.css?v=2026-08-29-themes-v2" />
   </head>
-  <body class="auth-locked app-loading">
+  <body class="auth-locked app-loading" data-palette="neon">
+    <script>
+      try {
+        const savedPalette = localStorage.getItem("rental-manager-palette");
+        if (["white", "neon"].includes(savedPalette)) document.body.dataset.palette = savedPalette;
+      } catch (_) {}
+    </script>
     <div id="loadingOverlay" class="loading-overlay" role="status" aria-live="polite">
       <div class="loading-card">
         <div class="loading-scene" aria-hidden="true">
@@ -287,6 +294,7 @@
               <input id="globalSearch" type="search" placeholder="Квартира, жилец, начисление" autocomplete="off" />
             </label>
             <button id="quickActionsBtn" class="primary" type="button">+ Действие</button>
+            <button class="icon-button theme-toggle" data-theme-toggle type="button" title="Включить белую тему" aria-label="Включить белую тему">☼</button>
             <button class="icon-button" id="refreshBtn" title="Обновить данные" aria-label="Обновить данные">↻</button>
             <span class="pill role-badge" id="authRoleBadge">PIN не введён</span>
             <button id="logoutBtn" class="quiet-button" type="button" hidden>Выйти</button>
@@ -816,6 +824,7 @@
             <label>Цветовая палитра
               <select name="color_palette" id="paletteSelect">
                 <option value="neon">Неоновая</option>
+                <option value="white">Белая</option>
               </select>
             </label>
             <label class="check wide"><input type="checkbox" name="notifications_enabled" id="notificationsEnabledInput" /> Автоматические напоминания арендаторам</label>
@@ -997,7 +1006,10 @@
     <div id="authOverlay" class="auth-overlay">
       <div class="auth-card auth-card--login">
         <div class="auth-card__hero">
-          <p class="eyebrow">Rental Manager</p>
+          <div class="auth-theme-row">
+            <p class="eyebrow">Rental Manager</p>
+            <button class="quiet-button auth-theme-toggle" data-theme-toggle type="button" title="Включить белую тему" aria-label="Включить белую тему">Белая тема</button>
+          </div>
           <h2>Вход в пульт аренды</h2>
           <p class="muted">PIN владельца открывает полный контроль. Гостевой PIN показывает только обзор и отчёты.</p>
         </div>
@@ -1026,7 +1038,7 @@
     <div id="quickActionsModal" class="modal-shell" hidden></div>
     <div id="portfolioEditorModal" class="modal-shell" hidden></div>
     <div id="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/static/js/bootstrap.js?v=2026-08-29-neon-ui-v1"></script>
+    <script type="module" src="/static/js/bootstrap.js?v=2026-08-29-themes-v2"></script>
   </body>
 </html>
 

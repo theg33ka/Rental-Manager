@@ -676,6 +676,41 @@ function syncAiSupervisorControls() {
 }
 
 
+function normalizePalette(value) {
+  return ["white", "neon"].includes(String(value)) ? String(value) : "neon";
+}
+
+function storedPalette() {
+  try {
+    const value = localStorage.getItem("rental-manager-palette");
+    return ["white", "neon"].includes(String(value)) ? String(value) : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function setPalette(value, { remember = true } = {}) {
+  const palette = normalizePalette(value);
+  document.body.dataset.palette = palette;
+  state.settings.color_palette = palette;
+  const select = qs("#paletteSelect");
+  if (select) select.value = palette;
+  qsa("[data-theme-toggle]").forEach((button) => {
+    const nextLabel = palette === "neon" ? "Включить белую тему" : "Включить неоновую тему";
+    button.title = nextLabel;
+    button.setAttribute("aria-label", nextLabel);
+    button.textContent = button.classList.contains("auth-theme-toggle")
+      ? (palette === "neon" ? "Белая тема" : "Неоновая тема")
+      : (palette === "neon" ? "☼" : "✦");
+  });
+  if (remember) {
+    try {
+      localStorage.setItem("rental-manager-palette", palette);
+    } catch (_) {}
+  }
+  return palette;
+}
+
 function applySettings(settings = {}) {
   state.settings = {
     color_palette: "neon",
@@ -738,11 +773,9 @@ function applySettings(settings = {}) {
     deepseek_api_key_configured: false,
     ...settings,
   };
-  const palette = "neon";
-  state.settings.color_palette = palette;
-  document.body.dataset.palette = palette;
-  const select = qs("#paletteSelect");
-  if (select) select.value = palette;
+  const savedPalette = storedPalette();
+  const palette = savedPalette || normalizePalette(state.settings.color_palette);
+  setPalette(palette, { remember: false });
   const appBase = qs("#appBaseUrlInput");
   const ownerChat = qs("#telegramOwnerChatIdInput");
   const token = qs("#telegramBotTokenInput");
@@ -5223,8 +5256,12 @@ function bindEvents() {
   on("#aiSupervisorEnabledInput", "change", syncAiSupervisorControls);
   on("#aiSupervisorCadenceSelect", "change", syncAiSupervisorControls);
   on("#paletteSelect", "change", (event) => {
-    applySettings({ ...state.settings, color_palette: event.currentTarget.value });
+    setPalette(event.currentTarget.value);
   });
+  qsa("[data-theme-toggle]").forEach((button) => {
+    button.addEventListener("click", () => setPalette(document.body.dataset.palette === "neon" ? "white" : "neon"));
+  });
+  setPalette(document.body.dataset.palette || "neon", { remember: false });
 
   ["reportStart", "reportEnd"].forEach((id) => on(`#${id}`, "change", setReportLinks));
   renderDatabaseImportInspection();
