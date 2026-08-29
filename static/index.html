@@ -221,6 +221,7 @@
     </style>
     <link rel="stylesheet" href="/static/styles.css?v=2026-07-23-edit-utility-v8" />
     <link rel="stylesheet" href="/static/premium.css?v=2026-07-23-edit-utility-v8" />
+    <link rel="stylesheet" href="/static/neon-ui.css?v=2026-08-29-neon-ui-v1" />
   </head>
   <body class="auth-locked app-loading">
     <div id="loadingOverlay" class="loading-overlay" role="status" aria-live="polite">
@@ -240,7 +241,7 @@
         </div>
         <p class="eyebrow">Rental Manager</p>
         <h2 id="loadingTitle">Подключаюсь к серверу</h2>
-        <p id="loadingDetail" class="muted">Проверяю, отвечает ли пульт, а не просто делает вид.</p>
+        <p id="loadingDetail" class="muted">Проверяю подключение и загружаю рабочие данные.</p>
         <div class="loading-progress-meta">
           <span>Загрузка данных</span>
           <strong id="loadingProgressPercent">6%</strong>
@@ -254,15 +255,19 @@
           <div class="brand-mark" aria-hidden="true">RM</div>
           <div>
             <strong>Rental Manager</strong>
-            <span>Operations</span>
+            <span>Управление арендой</span>
           </div>
         </div>
         <nav class="tabs sidebar-nav" aria-label="Основные разделы">
-          <button class="nav-group active" data-group="overview"><span class="nav-icon">⌂</span><span>Центр управления</span></button>
-          <button class="nav-group" data-group="rentals"><span class="nav-icon">▦</span><span>Портфель и финансы</span></button>
-          <button class="nav-group" data-group="utilities"><span class="nav-icon">◫</span><span>Коммунальные услуги</span></button>
-          <button class="nav-group" data-group="communications"><span class="nav-icon">◌</span><span>Коммуникации</span></button>
-          <button class="nav-group" data-group="administration"><span class="nav-icon">⚙</span><span>Управление системой</span></button>
+          <button class="nav-group active" data-group="overview" data-tab="home"><span class="nav-icon">⌂</span><span>Главная</span></button>
+          <button class="nav-group" data-group="overview" data-tab="dashboard"><span class="nav-icon">◎</span><span>Сегодня</span></button>
+          <button class="nav-group" data-group="rentals" data-tab="tenants"><span class="nav-icon">▦</span><span>Портфель</span></button>
+          <button class="nav-group" data-group="rentals" data-tab="rent"><span class="nav-icon">₽</span><span>Деньги</span></button>
+          <button class="nav-group" data-group="utilities" data-tab="meters"><span class="nav-icon">◫</span><span>Коммуналка</span></button>
+          <button class="nav-group" data-group="communications" data-tab="dialogs"><span class="nav-icon">◌</span><span>Связь</span></button>
+          <button class="nav-group" data-group="overview" data-tab="reports"><span class="nav-icon">▤</span><span>Отчёты</span></button>
+          <button class="nav-group" data-group="administration" data-tab="hermes"><span class="nav-icon">✦</span><span>Hermes</span></button>
+          <button class="nav-group" data-group="administration" data-tab="settings"><span class="nav-icon">⚙</span><span>Настройки</span></button>
         </nav>
         <div class="sidebar-foot">
           <span class="connection-dot" aria-hidden="true"></span>
@@ -273,13 +278,13 @@
       <div class="workspace">
         <header class="topbar">
           <div class="topbar-title">
-            <p class="eyebrow" id="pageContext">Операционный центр</p>
-            <h1 id="pageTitle">Состояние портфеля</h1>
+            <p class="eyebrow" id="pageContext">Главная</p>
+            <h1 id="pageTitle">Обзор портфеля</h1>
           </div>
           <div class="top-actions">
             <label class="global-search" aria-label="Поиск на текущем экране">
               <span aria-hidden="true">⌕</span>
-              <input id="globalSearch" type="search" placeholder="Поиск на экране" autocomplete="off" />
+              <input id="globalSearch" type="search" placeholder="Квартира, жилец, начисление" autocomplete="off" />
             </label>
             <button id="quickActionsBtn" class="primary" type="button">+ Действие</button>
             <button class="icon-button" id="refreshBtn" title="Обновить данные" aria-label="Обновить данные">↻</button>
@@ -290,11 +295,12 @@
         </header>
 
         <nav class="section-tabs" aria-label="Разделы рабочей области">
-          <button class="tab active" data-group="overview" data-tab="dashboard">Операционный центр</button>
+          <button class="tab active" data-group="overview" data-tab="home">Главная</button>
+          <button class="tab" data-group="overview" data-tab="dashboard">Сегодня</button>
           <button class="tab" data-group="rentals" data-tab="tenants">Портфель</button>
           <button class="tab" data-group="rentals" data-tab="rent">Финансы</button>
           <button class="tab" data-group="utilities" data-tab="meters">Показания</button>
-          <button class="tab" data-group="utilities" data-tab="utilities">Счета</button>
+          <button class="tab" data-group="utilities" data-tab="utilities">Коммуналка</button>
           <button class="tab" data-group="utilities" data-tab="tariffs">Тарифы</button>
           <button class="tab" data-group="administration" data-tab="expenses">Расходы</button>
           <button class="tab" data-group="overview" data-tab="reports">Аналитика и отчёты</button>
@@ -306,16 +312,16 @@
         </nav>
 
         <main>
-      <section class="panel active" id="dashboard">
+      <section class="panel active" id="home">
         <div class="page-heading">
           <div>
-            <p class="eyebrow">Сегодня · операционная сводка</p>
-            <h2>Всё важное — в одном контуре</h2>
-            <p class="muted">Поступления, обязательства и задачи, требующие решения.</p>
+            <p class="eyebrow">Главная · обзор портфеля</p>
+            <h2>Состояние бизнеса</h2>
+            <p class="muted">Деньги, заполняемость и ближайшие решения.</p>
           </div>
           <div class="page-heading-actions">
-            <button class="primary" type="button" onclick="openRentTab()">Открыть финансы</button>
-            <button type="button" onclick="openReportsTab()">Отчёты</button>
+            <button class="primary" type="button" onclick="openTodayTab()">Открыть Сегодня</button>
+            <button type="button" onclick="openTenantsTab()">Портфель</button>
           </div>
         </div>
         <div class="summary-grid" id="summaryGrid"></div>
@@ -329,13 +335,6 @@
           </section>
           <section class="dashboard-card" id="monthSummaryCard"></section>
         </div>
-        <section class="dashboard-card">
-          <div class="section-title">
-            <div><p class="eyebrow">Контроль периода</p><h2>Месячные отчёты</h2></div>
-            <span>Закройте вопросы до фиксации периода</span>
-          </div>
-          <div class="monthly-report-tray" id="monthlyReportTray"></div>
-        </section>
         <div class="dashboard-columns">
           <section class="dashboard-card">
             <div class="section-title">
@@ -344,14 +343,44 @@
             </div>
             <div id="objectCards" class="object-summary"></div>
           </section>
-          <section class="dashboard-card attention-section">
+          <section class="dashboard-card home-decisions-card">
             <div class="section-title">
-              <div><p class="eyebrow">Очередь решений</p><h2>Требует внимания</h2></div>
-              <span>Сначала критичное</span>
+              <div><p class="eyebrow">Предпросмотр</p><h2>Ближайшие решения</h2></div>
+              <button class="mini" type="button" onclick="openTodayTab()">Открыть Сегодня</button>
             </div>
-            <div id="attentionList" class="attention-grid"></div>
+            <div id="homeAttentionPreview" class="home-attention-preview"></div>
           </section>
         </div>
+        <section class="dashboard-card home-report-card">
+          <div class="section-title">
+            <div><p class="eyebrow">Контроль периода</p><h2>Месячные отчёты</h2></div>
+            <span>Вопросы до принятия месяца</span>
+          </div>
+          <div class="monthly-report-tray" id="monthlyReportTray"></div>
+        </section>
+        <section class="home-quick-actions" aria-label="Быстрые действия">
+          <button type="button" onclick="runQuickAction('payment')"><span>₽</span><strong>Зачесть платёж</strong></button>
+          <button type="button" onclick="runQuickAction('reading')"><span>◫</span><strong>Внести показания</strong></button>
+          <button type="button" onclick="runQuickAction('message')"><span>◌</span><strong>Написать жильцу</strong></button>
+          <button type="button" onclick="runQuickAction('expense')"><span>▤</span><strong>Добавить расход</strong></button>
+        </section>
+      </section>
+
+      <section class="panel" id="dashboard">
+        <div class="page-heading today-heading">
+          <div>
+            <p class="eyebrow">Сегодня · очередь решений</p>
+            <h2>Требует действия</h2>
+            <p class="muted">Просрочки, чеки, показания и другие незавершённые ситуации.</p>
+          </div>
+          <div class="today-heading__meta"><strong id="todayDecisionCount">0</strong><span id="todayDecisionLabel">открытых решений</span></div>
+        </div>
+        <section class="dashboard-card attention-section today-decision-card">
+          <div class="section-title">
+            <div><p class="eyebrow">Очередь решений</p><h2>Сначала критичное</h2></div>
+          </div>
+          <div id="attentionList" class="attention-grid"></div>
+        </section>
       </section>
 
       <section class="panel" id="tenants">
@@ -387,6 +416,7 @@
             <form id="objectForm" class="form-grid compact">
               <label>Название<input name="name" required placeholder="Например, Белая" /></label>
               <label>Код<input name="short_code" maxlength="20" placeholder="BL" /></label>
+              <label>Реквизиты по умолчанию<select name="payment_profile_id" id="newObjectPaymentProfileSelect"></select></label>
               <label class="wide">Комментарий<textarea name="notes" rows="2"></textarea></label>
               <button class="primary wide" type="submit">Создать объект</button>
             </form>
@@ -398,10 +428,17 @@
               <label>Название<input name="name" required placeholder="Квартира 12" /></label>
               <label>Порядок<input type="number" name="sort_order" value="0" /></label>
               <label>Доля ОДН, %<input type="number" min="0" step="0.01" name="odn_share_percent" value="25" /></label>
+              <label>Реквизиты<select name="payment_profile_id" id="newApartmentPaymentProfileSelect"></select></label>
               <button class="primary wide" type="submit">Создать квартиру</button>
             </form>
           </details>
         </div>
+
+        <div class="section-title">
+          <div><p class="eyebrow">Объекты</p><h2>Карточки объектов</h2></div>
+          <span>Настройки объекта и реквизиты по умолчанию</span>
+        </div>
+        <div id="objectRegistry" class="stack"></div>
 
         <div class="section-title">
           <div><p class="eyebrow">Договоры</p><h2>Жильцы</h2></div>
@@ -414,6 +451,32 @@
           <span>Активность, заполняемость и коммунальные авансы</span>
         </div>
         <div id="apartmentRegistry" class="table-wrap"></div>
+
+        <div class="section-title">
+          <div><p class="eyebrow">Платежи</p><h2>Наборы реквизитов</h2></div>
+          <span>Один набор можно назначить нескольким объектам и квартирам</span>
+        </div>
+        <details class="operational-tool" id="paymentProfileTool">
+          <summary><span><strong>Добавить набор реквизитов</strong><small>ИП и личный перевод в одном профиле</small></span></summary>
+          <form id="paymentProfileForm" class="form-grid">
+            <label class="wide">Название набора<input name="name" required placeholder="Например, Основной счёт — центр" /></label>
+            <label class="wide">Получатель ИП<input name="ip_recipient_name" /></label>
+            <label>ИНН ИП<input name="ip_recipient_inn" /></label>
+            <label>ОГРНИП<input name="ip_recipient_ogrnip" /></label>
+            <label>Расчётный счёт<input name="ip_recipient_account" /></label>
+            <label>Банк ИП<input name="ip_recipient_bank" /></label>
+            <label>БИК<input name="ip_recipient_bik" /></label>
+            <label>Корр. счёт<input name="ip_recipient_correspondent_account" /></label>
+            <label>ИНН банка<input name="ip_recipient_bank_inn" /></label>
+            <label>КПП банка<input name="ip_recipient_bank_kpp" /></label>
+            <label class="wide">Получатель перевода<input name="personal_recipient_name" /></label>
+            <label>Телефон получателя<input name="personal_recipient_phone" /></label>
+            <label>Банк получателя<input name="personal_recipient_bank" /></label>
+            <label class="wide">Комментарий<textarea name="notes" rows="2"></textarea></label>
+            <button class="primary wide" type="submit">Создать набор</button>
+          </form>
+        </details>
+        <div id="paymentProfileRegistry" class="stack"></div>
       </section>
 
       <section class="panel" id="rent">
@@ -689,7 +752,7 @@
 
       <section class="panel" id="hermes">
         <div class="page-heading">
-          <div><p class="eyebrow">Hermes Core</p><h2>Центр управления AI</h2><p class="muted">Кейсы, обязательства, правила, подтверждения и стоимость в одном месте.</p></div>
+          <div><p class="eyebrow">Hermes Core</p><h2>Центр управления ИИ</h2><p class="muted">Кейсы, обязательства, правила, подтверждения и стоимость в одном месте.</p></div>
           <div class="page-heading-actions">
             <button id="hermesBriefingPreviewBtn" type="button">Предпросмотр сводки</button>
             <button id="hermesRefreshBtn" class="primary" type="button">Обновить</button>
@@ -729,7 +792,7 @@
         <section class="hermes-pane stack" data-hermes-panel="skills" hidden><div class="section-title"><h3>Декларативные навыки</h3></div><div id="hermesSkills"></div></section>
         <section class="hermes-pane stack" data-hermes-panel="strategies" hidden><div class="section-title"><h3>Стратегии по жильцам</h3></div><div id="hermesStrategies"></div></section>
         <section class="hermes-pane stack" data-hermes-panel="proposals" hidden><div class="section-title"><h3>Предложения действий</h3><span>Изменения уровня 2–3 выполняются только после явного подтверждения.</span></div><div id="hermesProposals"></div></section>
-        <section class="hermes-pane stack" data-hermes-panel="usage" hidden><div class="section-title"><h3>Использование AI</h3></div><div id="hermesUsage"></div></section>
+        <section class="hermes-pane stack" data-hermes-panel="usage" hidden><div class="section-title"><h3>Использование ИИ</h3></div><div id="hermesUsage"></div></section>
         <section class="hermes-pane stack" data-hermes-panel="debug" hidden><div class="section-title"><h3>Запуски и Context Manifest</h3></div><div id="hermesRuns"></div><div id="hermesRunDetails" class="card muted-box" hidden></div></section>
       </section>
 
@@ -740,7 +803,7 @@
         <div class="settings-nav" role="tablist" aria-label="Разделы настроек">
           <button type="button" class="settings-nav-btn active" data-settings-target="general">Общие</button>
           <button type="button" class="settings-nav-btn" data-settings-target="integrations">Интеграции</button>
-          <button type="button" class="settings-nav-btn" data-settings-target="ai">AI</button>
+          <button type="button" class="settings-nav-btn" data-settings-target="ai">ИИ</button>
           <button type="button" class="settings-nav-btn" data-settings-target="security">Безопасность</button>
           <button type="button" class="settings-nav-btn" data-settings-target="payments">Платёжные реквизиты</button>
         </div>
@@ -752,7 +815,7 @@
             </label>
             <label>Цветовая палитра
               <select name="color_palette" id="paletteSelect">
-                <option value="premium">Premium Dark</option>
+                <option value="neon">Неоновая</option>
               </select>
             </label>
             <label class="check wide"><input type="checkbox" name="notifications_enabled" id="notificationsEnabledInput" /> Автоматические напоминания арендаторам</label>
@@ -765,9 +828,9 @@
             <label>Секрет Telegram webhook<input type="password" name="telegram_webhook_secret" id="telegramWebhookSecretInput" placeholder="Оставьте пустым, чтобы не менять" /></label>
           </fieldset>
           <fieldset class="settings-pane form-grid compact" data-settings-panel="ai" hidden>
-            <legend>AI и автоматизация</legend>
+            <legend>ИИ и автоматизация</legend>
             <p class="eyebrow wide">Доступ и модели</p>
-            <label class="check wide"><input type="checkbox" name="ai_enabled" id="aiEnabledInput" /> Включить AI-функции</label>
+            <label class="check wide"><input type="checkbox" name="ai_enabled" id="aiEnabledInput" /> Включить функции ИИ</label>
             <label class="check wide"><input type="checkbox" name="ai_tenant_free_text_enabled" id="aiTenantFreeTextEnabledInput" /> Ответы на свободный текст арендаторов</label>
             <label class="check wide"><input type="checkbox" name="hermes_briefing_enabled" id="hermesBriefingEnabledInput" /> Ежедневная детерминированная сводка Hermes</label>
             <label class="check wide"><input type="checkbox" name="hermes_auto_level_one_enabled" id="hermesAutoLevelOneInput" /> Разрешить автономные внутренние действия уровня 1</label>
@@ -861,8 +924,14 @@
           <fieldset class="settings-pane form-grid compact" data-settings-panel="payments" hidden>
             <legend>Платёжные реквизиты</legend>
             <label class="wide">Получатель ИП<input name="ip_recipient_name" id="ipRecipientNameInput" placeholder="Введите наименование получателя" /></label>
+            <label>ИНН ИП<input name="ip_recipient_inn" id="ipRecipientInnInput" /></label>
+            <label>ОГРНИП<input name="ip_recipient_ogrnip" id="ipRecipientOgrnipInput" /></label>
             <label>Счёт ИП<input name="ip_recipient_account" id="ipRecipientAccountInput" placeholder="Введите расчётный счёт" /></label>
+            <label>Банк ИП<input name="ip_recipient_bank" id="ipRecipientBankInput" /></label>
             <label>БИК ИП<input name="ip_recipient_bik" id="ipRecipientBikInput" placeholder="Введите БИК" /></label>
+            <label>Корр. счёт<input name="ip_recipient_correspondent_account" id="ipRecipientCorrespondentAccountInput" /></label>
+            <label>ИНН банка<input name="ip_recipient_bank_inn" id="ipRecipientBankInnInput" /></label>
+            <label>КПП банка<input name="ip_recipient_bank_kpp" id="ipRecipientBankKppInput" /></label>
             <label class="wide">Получатель перевода<input name="personal_recipient_name" id="personalRecipientNameInput" placeholder="Введите имя получателя" /></label>
             <label>Телефон получателя<input name="personal_recipient_phone" id="personalRecipientPhoneInput" placeholder="Введите номер телефона" /></label>
             <label>Банк получателя<input name="personal_recipient_bank" id="personalRecipientBankInput" placeholder="Введите название банка" /></label>
@@ -918,11 +987,11 @@
     </div>
 
     <nav class="mobile-nav" aria-label="Мобильная навигация">
-      <button class="nav-group active" data-group="overview"><span>⌂</span><small>Пульт</small></button>
-      <button class="nav-group" data-group="rentals"><span>▦</span><small>Портфель</small></button>
-      <button class="nav-group" data-group="utilities"><span>◫</span><small>Счета</small></button>
-      <button class="nav-group" data-group="communications"><span>◌</span><small>Связь</small></button>
-      <button class="nav-group" data-group="administration"><span>⚙</span><small>Ещё</small></button>
+      <button class="nav-group active" data-group="overview" data-tab="home"><span>⌂</span><small>Главная</small></button>
+      <button class="nav-group" data-group="overview" data-tab="dashboard"><span>◎</span><small>Сегодня</small></button>
+      <button class="nav-group" data-group="rentals" data-tab="tenants"><span>▦</span><small>Портфель</small></button>
+      <button class="nav-group" data-group="rentals" data-tab="rent"><span>₽</span><small>Деньги</small></button>
+      <button class="nav-group" data-group="administration" data-tab="settings"><span>•••</span><small>Ещё</small></button>
     </nav>
 
     <div id="authOverlay" class="auth-overlay">
@@ -930,15 +999,15 @@
         <div class="auth-card__hero">
           <p class="eyebrow">Rental Manager</p>
           <h2>Вход в пульт аренды</h2>
-          <p class="muted">PIN owner открывает полный контроль. PIN guest показывает только обзор и отчёты. Лишние кнопки гостю не достаются, и это даже к лучшему.</p>
+          <p class="muted">PIN владельца открывает полный контроль. Гостевой PIN показывает только обзор и отчёты.</p>
         </div>
         <div class="auth-role-grid" aria-hidden="true">
           <article class="auth-role auth-role--owner">
-            <strong>Owner</strong>
+            <strong>Владелец</strong>
             <span>Настройки, расчёты, сообщения, действия</span>
           </article>
           <article class="auth-role auth-role--guest">
-            <strong>Guest</strong>
+            <strong>Гость</strong>
             <span>Общая информация и скачивание отчётов</span>
           </article>
         </div>
@@ -955,8 +1024,9 @@
     <div id="manualDebtModal" class="modal-shell" hidden></div>
     <div id="receiptDocumentModal" class="modal-shell" hidden></div>
     <div id="quickActionsModal" class="modal-shell" hidden></div>
+    <div id="portfolioEditorModal" class="modal-shell" hidden></div>
     <div id="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/static/js/bootstrap.js?v=2026-07-23-edit-utility-v8"></script>
+    <script type="module" src="/static/js/bootstrap.js?v=2026-08-29-neon-ui-v1"></script>
   </body>
 </html>
 

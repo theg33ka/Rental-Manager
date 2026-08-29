@@ -31,10 +31,11 @@ const state = {
   loadFailures: [],
 };
 
-const ownerTabs = ["dashboard", "tenants", "rent", "meters", "utilities", "tariffs", "expenses", "reports", "dialogs", "messages", "automation", "hermes", "settings"];
-const guestTabs = ["dashboard", "reports"];
+const ownerTabs = ["home", "dashboard", "tenants", "rent", "meters", "utilities", "tariffs", "expenses", "reports", "dialogs", "messages", "automation", "hermes", "settings"];
+const guestTabs = ["home", "dashboard", "reports"];
 const panelMeta = {
-  dashboard: ["Операционный центр", "Состояние портфеля"],
+  home: ["Главная", "Обзор портфеля"],
+  dashboard: ["Сегодня", "Очередь решений"],
   tenants: ["Портфель", "Жильцы и договоры"],
   rent: ["Финансы", "Начисления и оплаты"],
   meters: ["Коммунальные услуги", "Показания счётчиков"],
@@ -45,7 +46,7 @@ const panelMeta = {
   dialogs: ["Коммуникации", "Входящие диалоги"],
   messages: ["Коммуникации", "Рассылки и шаблоны"],
   automation: ["Управление", "Автоматизация"],
-  hermes: ["Hermes Core", "Центр управления AI"],
+  hermes: ["Hermes Core", "Центр управления ИИ"],
   settings: ["Система", "Настройки"],
 };
 let activeNavGroup = "overview";
@@ -54,7 +55,7 @@ const appStateLoadGroups = [
     sections: ["bootstrap"],
     percent: 64,
     title: "Открываю пульт",
-    detail: "Загружаю минимум для первого экрана. Остальное не держит дверь.",
+    detail: "Загружаю данные для первого экрана. Остальные разделы откроются после фоновой загрузки.",
   },
   {
     sections: ["registry"],
@@ -126,6 +127,13 @@ const statusText = {
 };
 
 const money = (value) => new Intl.NumberFormat("ru-RU", { style: "currency", currency: "RUB", maximumFractionDigits: 2 }).format(value || 0);
+const countLabel = (value, one, few, many) => {
+  const count = Math.abs(Number(value) || 0);
+  const lastTwo = count % 100;
+  const last = count % 10;
+  const word = last === 1 && lastTwo !== 11 ? one : last >= 2 && last <= 4 && (lastTwo < 12 || lastTwo > 14) ? few : many;
+  return `${count} ${word}`;
+};
 const today = () => new Date().toISOString().slice(0, 10);
 const daysAgo = (days) => {
   const value = new Date();
@@ -267,9 +275,13 @@ function applyAccessUi() {
     tab.disabled = !allowed;
   });
   qsa(".nav-group").forEach((group) => {
-    const hasAllowedTab = qsa(`.tab[data-group="${group.dataset.group}"]`).some((tab) => allowedTabs.includes(tab.dataset.tab));
+    const directTab = group.dataset.tab;
+    const hasAllowedTab = directTab
+      ? allowedTabs.includes(directTab)
+      : qsa(`.tab[data-group="${group.dataset.group}"]`).some((tab) => allowedTabs.includes(tab.dataset.tab));
     group.hidden = !hasAllowedTab;
-    group.classList.toggle("active", group.dataset.group === activeNavGroup);
+    const activeTabName = qs(".tab.active")?.dataset.tab;
+    group.classList.toggle("active", directTab ? directTab === activeTabName : group.dataset.group === activeNavGroup);
   });
   const activeTab = qs(".tab.active");
   if (!activeTab || activeTab.hidden) {
@@ -282,7 +294,7 @@ function applyAccessUi() {
   if (logoutButton) logoutButton.hidden = !role;
   const badge = qs("#authRoleBadge");
   if (badge) {
-    badge.textContent = role === "owner" ? "owner" : role === "guest" ? "guest" : "PIN не введён";
+    badge.textContent = role === "owner" ? "владелец" : role === "guest" ? "гость" : "PIN не введён";
     badge.className = `pill ${role === "owner" ? "ok" : role === "guest" ? "warn" : ""}`.trim();
   }
   const visibleActiveTab = qs(".tab.active:not([hidden])");
@@ -301,8 +313,8 @@ function updateWorkspaceContext(tabName) {
   const [context, title] = panelMeta[tabName] || ["Rental Manager", "Рабочая область"];
   const contextNode = qs("#pageContext");
   const titleNode = qs("#pageTitle");
-  if (contextNode) contextNode.textContent = isGuest() && tabName === "dashboard" ? "Owner view" : context;
-  if (titleNode) titleNode.textContent = isGuest() && tabName === "dashboard" ? "Сводка для владельца" : title;
+  if (contextNode) contextNode.textContent = isGuest() && ["home", "dashboard"].includes(tabName) ? "Гостевой обзор" : context;
+  if (titleNode) titleNode.textContent = isGuest() && tabName === "home" ? "Сводка для владельца" : title;
   document.title = `${title} · Rental Manager`;
 }
 
@@ -442,6 +454,18 @@ function allApartments() {
     .sort(compareApartmentRefs);
 }
 
+function activePaymentProfiles() {
+  return (state.bootstrap?.payment_profiles || []).filter((profile) => profile.active);
+}
+
+function hydratePaymentProfileSelect(select, placeholder) {
+  if (!select) return;
+  const current = select.value;
+  setOptions(select, activePaymentProfiles(), (profile) => profile.name, true);
+  select.options[0].textContent = placeholder;
+  if ([...select.options].some((option) => option.value === current)) select.value = current;
+}
+
 function activeApartments() {
   return allApartments().filter((apartment) => apartment.active);
 }
@@ -500,6 +524,7 @@ function bootstrapDefaults() {
     today: today(),
     auth: { role: authRole() },
     objects: [],
+    payment_profiles: [],
     leases: [],
     meters: [],
     services: [],
@@ -531,7 +556,7 @@ function bootstrapDefaults() {
 function mergeBootstrap(payload = {}) {
   const previous = state.bootstrap || bootstrapDefaults();
   const next = { ...bootstrapDefaults(), ...previous, ...payload };
-  ["objects", "leases", "meters", "services"].forEach((key) => {
+  ["objects", "payment_profiles", "leases", "meters", "services"].forEach((key) => {
     if (!Array.isArray(payload[key]) || (!payload[key].length && Array.isArray(previous[key]) && previous[key].length)) {
       next[key] = Array.isArray(previous[key]) ? previous[key] : [];
     }
@@ -547,6 +572,7 @@ function applyRegistryPayload(registry = {}) {
     leases: Array.isArray(registry.leases) ? registry.leases : [],
     meters: Array.isArray(registry.meters) ? registry.meters : [],
     services: Array.isArray(registry.services) ? registry.services : [],
+    payment_profiles: Array.isArray(registry.payment_profiles) ? registry.payment_profiles : [],
   });
 }
 
@@ -652,7 +678,7 @@ function syncAiSupervisorControls() {
 
 function applySettings(settings = {}) {
   state.settings = {
-    color_palette: "premium",
+    color_palette: "neon",
     app_base_url: "",
     telegram_owner_chat_id: "",
     notifications_enabled: false,
@@ -694,8 +720,14 @@ function applySettings(settings = {}) {
     deepseek_model: "deepseek-v4-flash",
     ai_monthly_budget_rub: "1000",
     ip_recipient_name: "",
+    ip_recipient_inn: "",
+    ip_recipient_ogrnip: "",
     ip_recipient_account: "",
+    ip_recipient_bank: "",
     ip_recipient_bik: "",
+    ip_recipient_correspondent_account: "",
+    ip_recipient_bank_inn: "",
+    ip_recipient_bank_kpp: "",
     personal_recipient_name: "",
     personal_recipient_phone: "",
     personal_recipient_bank: "",
@@ -706,9 +738,11 @@ function applySettings(settings = {}) {
     deepseek_api_key_configured: false,
     ...settings,
   };
-  document.body.dataset.palette = "premium";
+  const palette = "neon";
+  state.settings.color_palette = palette;
+  document.body.dataset.palette = palette;
   const select = qs("#paletteSelect");
-  if (select) select.value = "premium";
+  if (select) select.value = palette;
   const appBase = qs("#appBaseUrlInput");
   const ownerChat = qs("#telegramOwnerChatIdInput");
   const token = qs("#telegramBotTokenInput");
@@ -744,8 +778,14 @@ function applySettings(settings = {}) {
   const automationRentOverdue = qs("#automationRentOverdueCadenceInput");
   const automationUtility = qs("#automationUtilityCadenceInput");
   const ipRecipientName = qs("#ipRecipientNameInput");
+  const ipRecipientInn = qs("#ipRecipientInnInput");
+  const ipRecipientOgrnip = qs("#ipRecipientOgrnipInput");
   const ipRecipientAccount = qs("#ipRecipientAccountInput");
+  const ipRecipientBank = qs("#ipRecipientBankInput");
   const ipRecipientBik = qs("#ipRecipientBikInput");
+  const ipRecipientCorrespondentAccount = qs("#ipRecipientCorrespondentAccountInput");
+  const ipRecipientBankInn = qs("#ipRecipientBankInnInput");
+  const ipRecipientBankKpp = qs("#ipRecipientBankKppInput");
   const personalRecipientName = qs("#personalRecipientNameInput");
   const personalRecipientPhone = qs("#personalRecipientPhoneInput");
   const personalRecipientBank = qs("#personalRecipientBankInput");
@@ -781,14 +821,20 @@ function applySettings(settings = {}) {
   if (automationRentDue) automationRentDue.value = state.settings.automation_rent_due_cadence || "daily_evening";
   if (automationRentOverdue) automationRentOverdue.value = state.settings.automation_rent_overdue_cadence || "daily_evening";
   if (automationUtility) automationUtility.value = state.settings.automation_utility_cadence || "daily_evening";
-  if (token) token.placeholder = state.settings.telegram_bot_token_configured ? "Токен сохранён, пусто = не менять" : "Вставь bot token";
-  if (secret) secret.placeholder = state.settings.telegram_webhook_secret_configured ? "Secret сохранён, пусто = не менять" : "Вставь webhook secret";
+  if (token) token.placeholder = state.settings.telegram_bot_token_configured ? "Токен сохранён, пустое поле = без изменений" : "Введите токен бота";
+  if (secret) secret.placeholder = state.settings.telegram_webhook_secret_configured ? "Секрет сохранён, пустое поле = без изменений" : "Введите секрет webhook";
   if (deepseekApiKey) deepseekApiKey.placeholder = state.settings.deepseek_api_key_configured ? "Ключ сохранён, пусто = не менять" : "Вставьте API-ключ DeepSeek";
   if (ownerPin) ownerPin.placeholder = state.settings.panel_owner_pin_code_configured ? "PIN владельца настроен" : "Задайте PIN владельца";
   if (guestPin) guestPin.placeholder = state.settings.panel_guest_pin_code_configured ? "Гостевой PIN настроен" : "Задайте гостевой PIN";
   if (ipRecipientName) ipRecipientName.value = state.settings.ip_recipient_name || "";
+  if (ipRecipientInn) ipRecipientInn.value = state.settings.ip_recipient_inn || "";
+  if (ipRecipientOgrnip) ipRecipientOgrnip.value = state.settings.ip_recipient_ogrnip || "";
   if (ipRecipientAccount) ipRecipientAccount.value = state.settings.ip_recipient_account || "";
+  if (ipRecipientBank) ipRecipientBank.value = state.settings.ip_recipient_bank || "";
   if (ipRecipientBik) ipRecipientBik.value = state.settings.ip_recipient_bik || "";
+  if (ipRecipientCorrespondentAccount) ipRecipientCorrespondentAccount.value = state.settings.ip_recipient_correspondent_account || "";
+  if (ipRecipientBankInn) ipRecipientBankInn.value = state.settings.ip_recipient_bank_inn || "";
+  if (ipRecipientBankKpp) ipRecipientBankKpp.value = state.settings.ip_recipient_bank_kpp || "";
   if (personalRecipientName) personalRecipientName.value = state.settings.personal_recipient_name || "";
   if (personalRecipientPhone) personalRecipientPhone.value = state.settings.personal_recipient_phone || "";
   if (personalRecipientBank) personalRecipientBank.value = state.settings.personal_recipient_bank || "";
@@ -813,36 +859,40 @@ function applySettings(settings = {}) {
   renderTelegramStatus();
 }
 
+function supervisorCadenceLabel(value) {
+  return {
+    daily: "ежедневно",
+    weekdays: "по будням",
+    weekly: "раз в неделю",
+  }[value] || "ежедневно";
+}
+
 function renderTelegramStatus() {
   const box = qs("#telegramStatusBox");
   if (!box) return;
   const ipReady = Boolean(state.settings.ip_recipient_name && state.settings.ip_recipient_account);
   const personalReady = Boolean(state.settings.personal_recipient_name && state.settings.personal_recipient_phone);
-  const auditCadence = {
-    daily: "ежедневно",
-    weekdays: "по будням",
-    weekly: "раз в неделю",
-  }[state.settings.ai_supervisor_cadence] || "ежедневно";
+  const auditCadence = supervisorCadenceLabel(state.settings.ai_supervisor_cadence);
   box.innerHTML = `
     <h3>Telegram</h3>
     <div class="pill-row">
-      <span class="pill ${state.settings.telegram_bot_token_configured ? "ok" : "warn"}">token ${state.settings.telegram_bot_token_configured ? "сохранён" : "не задан"}</span>
-      <span class="pill ${state.settings.telegram_webhook_secret_configured ? "ok" : "warn"}">secret ${state.settings.telegram_webhook_secret_configured ? "сохранён" : "не задан"}</span>
+      <span class="pill ${state.settings.telegram_bot_token_configured ? "ok" : "warn"}">токен ${state.settings.telegram_bot_token_configured ? "сохранён" : "не задан"}</span>
+      <span class="pill ${state.settings.telegram_webhook_secret_configured ? "ok" : "warn"}">секрет ${state.settings.telegram_webhook_secret_configured ? "сохранён" : "не задан"}</span>
       <span class="pill ${state.settings.ai_enabled ? "ok" : "warn"}">DeepSeek ${state.settings.ai_enabled ? "включён" : "выключен"}</span>
-      <span class="pill ${state.settings.deepseek_api_key_configured ? "ok" : "warn"}">DeepSeek key ${state.settings.deepseek_api_key_configured ? "сохранён" : "не задан"}</span>
+      <span class="pill ${state.settings.deepseek_api_key_configured ? "ok" : "warn"}">ключ DeepSeek ${state.settings.deepseek_api_key_configured ? "сохранён" : "не задан"}</span>
       <span class="pill">модель ${state.settings.deepseek_model || "deepseek-v4-flash"}</span>
       <span class="pill ${state.settings.ai_supervisor_enabled ? "ok" : "warn"}">автоаудит ${state.settings.ai_supervisor_enabled ? `${auditCadence} · ${state.settings.ai_supervisor_time || "10:00"}` : "выключен"}</span>
       <span class="pill">аудит ${state.settings.ai_supervisor_model || "deepseek-v4-flash"}</span>
-      <span class="pill">AI budget ${state.settings.ai_monthly_budget_rub || "0"} ₽/мес</span>
+      <span class="pill">Бюджет ИИ: ${state.settings.ai_monthly_budget_rub || "0"} ₽/мес</span>
       <span class="pill">до ${state.settings.ai_daily_call_limit || "0"} выз./день</span>
       <span class="pill">до ${state.settings.ai_max_output_tokens || "1500"} токенов</span>
-      <span class="pill ${state.settings.telegram_owner_chat_id ? "ok" : "warn"}">owner chat ${state.settings.telegram_owner_chat_id || "не задан"}</span>
+      <span class="pill ${state.settings.telegram_owner_chat_id ? "ok" : "warn"}">чат владельца ${state.settings.telegram_owner_chat_id || "не задан"}</span>
       <span class="pill ${state.settings.notifications_enabled ? "ok" : "warn"}">автонапоминания ${state.settings.notifications_enabled ? "включены" : "выключены"}</span>
       <span class="pill">граница ${formatDate(state.settings.notification_cutoff_date || appToday())}</span>
       <span class="pill ${ipReady ? "ok" : "warn"}">ИП-реквизиты ${ipReady ? "есть" : "неполные"}</span>
       <span class="pill ${personalReady ? "ok" : "warn"}">перевод-реквизиты ${personalReady ? "есть" : "неполные"}</span>
     </div>
-    <p class="muted">${state.settings.app_base_url || "Публичный URL не задан. Без него webhook не оживёт, как ни уговаривай."}</p>
+    <p class="muted">${state.settings.app_base_url || "Публичный URL не задан. Telegram webhook недоступен."}</p>
   `;
 }
 
@@ -910,11 +960,11 @@ function renderPerformanceMonitor() {
         <p class="muted">Аптайм ${Math.round((perf.uptime_seconds || 0) / 60)} мин · медленным считается ${formatPerfMs(perf.slow_threshold_ms)}</p>
       </div>
       <div class="pill-row">
-        <span class="pill ${ai.enabled ? "ok" : "warn"}">AI ${ai.enabled ? "включён" : "выключен"}</span>
-        <span class="pill">AI сегодня: ${ai.today_calls || 0}/${ai.daily_call_limit || "∞"} выз.</span>
+        <span class="pill ${ai.enabled ? "ok" : "warn"}">ИИ ${ai.enabled ? "включён" : "выключен"}</span>
+        <span class="pill">ИИ сегодня: ${ai.today_calls || 0}/${ai.daily_call_limit || "∞"} выз.</span>
         <span class="pill">сегодня ${money(ai.today_cost_rub || 0)}</span>
         <span class="pill">месяц ${money(ai.monthly_spent_rub || 0)} / ${money(ai.monthly_budget_rub || 0)}</span>
-        <span class="pill ${ai.supervisor_enabled ? "ok" : "warn"}">автоаудит ${ai.supervisor_enabled ? `${escapeHtml(ai.supervisor_cadence || "daily")} · ${escapeHtml(ai.supervisor_time || "10:00")}` : "выключен"}</span>
+        <span class="pill ${ai.supervisor_enabled ? "ok" : "warn"}">автоаудит ${ai.supervisor_enabled ? `${supervisorCadenceLabel(ai.supervisor_cadence)} · ${escapeHtml(ai.supervisor_time || "10:00")}` : "выключен"}</span>
         <span class="pill">задач агента ${ai.open_agent_tasks || 0}</span>
       </div>
     </div>
@@ -938,7 +988,7 @@ function renderPerformanceMonitor() {
         <ul class="compact-list">${slow || "<li>Медленных запросов нет</li>"}</ul>
       </div>
       <div class="muted-box">
-        <h4>Фон и AI</h4>
+        <h4>Фон и ИИ</h4>
         <ul class="compact-list">${background || "<li>Фон пока молчит</li>"}</ul>
       </div>
       <div class="muted-box">
@@ -946,7 +996,7 @@ function renderPerformanceMonitor() {
         <ul class="compact-list">${agents || "<li>Запросов ещё нет</li>"}</ul>
       </div>
       <div class="muted-box">
-        <h4>AI за 14 дней</h4>
+        <h4>ИИ за 14 дней</h4>
         <div class="table-wrap">${table(["Дата", "Провайдер", "Модель", "Выз.", "Токены", "₽"], aiRows || `<tr><td colspan="6">Нет расхода</td></tr>`)}</div>
       </div>
     </div>
@@ -1065,7 +1115,7 @@ async function loadAll(options = {}) {
     return;
   }
   state.loadFailures = [];
-  setLoadingStep(6, "Подключаюсь к серверу", "Проверяю, отвечает ли пульт, а не просто делает вид.");
+  setLoadingStep(6, "Подключаюсь к серверу", "Проверяю подключение и доступность данных.");
   try {
     await loadAppStateSections(appStateLoadGroups[0]);
     markFrontendPerf("bootstrap_loaded");
@@ -1143,6 +1193,8 @@ function hydrateForms() {
     setOptions(select, apartments, (a) => `${a.object_name}: ${a.name}`, Boolean(select.closest("#expenseForm")));
   });
   qsa('select[name="object_id"]').forEach((select) => setOptions(select, state.bootstrap.objects, (o) => o.name, true));
+  hydratePaymentProfileSelect(qs("#newObjectPaymentProfileSelect"), "Глобальные реквизиты");
+  hydratePaymentProfileSelect(qs("#newApartmentPaymentProfileSelect"), "Наследовать от объекта");
   qsa('select[name="meter_id"]').forEach((select) => setOptions(select, state.bootstrap.meters, (m) => `${m.object}: ${m.name}`));
   qsa('select[name="service_id"]').forEach((select) => setOptions(select, services, (s) => `${s.object}: ${s.name}`));
   hydrateUtilityTargetSelect();
@@ -1419,6 +1471,8 @@ function renderAll() {
   }
   renderDashboard();
   renderObjects();
+  renderObjectRegistry();
+  renderPaymentProfiles();
   renderLeases();
   renderApartmentRegistry();
   renderRent();
@@ -2299,7 +2353,7 @@ function tenantAttentionCard(group) {
     `${escapeHtml(residence)}<br><span class="muted">${escapeHtml(group.tenant)}</span>`,
     `<div class="attention-card__debt"><span>${debtLabel}</span><strong>${money(shownDebt)}</strong></div>${futureDebt}<p class="attention-lead">${attentionLeadText(group)}</p><div class="attention-issue-list">${issueList}</div>${reminderBlock}`,
     `<div class="attention-card__footer-actions"><button class="mini primary" onclick="openManualAllocation(${group.leaseId})">Зачесть вручную</button><button class="mini" onclick="openPaymentHistory(${group.leaseId}, ${group.tenantId || "null"})">История</button>${group.primaryRent ? `<button class="mini" onclick="deferRent(${group.primaryRent.id})">Отсрочка</button>` : `<button class="mini" type="button" disabled>Отсрочка</button>`}</div>`,
-    `<span class="pill">${group.issues.length} проблем</span>${group.topIssue ? monthMeta(group.topIssue.date) : ""}`,
+    `<span class="pill">${countLabel(group.issues.length, "проблема", "проблемы", "проблем")}</span>${group.topIssue ? monthMeta(group.topIssue.date) : ""}`,
   );
 }
 
@@ -2469,11 +2523,49 @@ function renderMonthSummary(dashboard) {
       <div class="month-summary__rows">
         <div class="month-summary__row"><span>Ожидается</span><strong>${money(expected)}</strong></div>
         <div class="month-summary__row"><span>Аренда</span><strong>${money(month.salary_paid || 0)}</strong></div>
-        <div class="month-summary__row"><span>Коммунальные</span><strong>${money(month.bill_payment_paid || 0)}</strong></div>
+        <div class="month-summary__row"><span>Коммуналка</span><strong>${money(month.bill_payment_paid || 0)}</strong></div>
         <div class="month-summary__row"><span>Заполняемость</span><strong>${occupied}/${total}</strong></div>
       </div>
     </div>
   `;
+}
+
+function renderHomeAttentionPreview(dashboard, groups = []) {
+  const root = qs("#homeAttentionPreview");
+  const countNode = qs("#todayDecisionCount");
+  const countLabelNode = qs("#todayDecisionLabel");
+  if (!root) return;
+  const supplementalCount = Number(dashboard.provider_debts?.length || 0)
+    + Number(dashboard.stale_readings?.length || 0)
+    + Number(dashboard.suspicious_receipts?.length || 0)
+    + Number(dashboard.expense_fund?.has_mismatch || 0);
+  const total = groups.length + supplementalCount;
+  if (countNode) countNode.textContent = String(total);
+  if (countLabelNode) countLabelNode.textContent = countLabel(total, "открытое решение", "открытых решения", "открытых решений").replace(/^\d+\s/, "");
+  const rows = groups.slice(0, 3).map((group) => {
+    const debt = tenantAttentionDebtBreakdown(group);
+    const amount = debt.current || debt.future;
+    const location = group.hasMultipleApartments
+      ? group.apartments.map((item) => `${item.object}, ${item.apartment}`).join(" → ")
+      : `${group.object}, ${group.apartment}`;
+    return `
+      <button class="home-decision-row" type="button" onclick="openTodayTab()">
+        <span class="home-decision-row__signal ${group.maxSeverity >= 2 ? "danger" : "warn"}"></span>
+        <span class="home-decision-row__copy"><strong>${escapeHtml(location)}</strong><small>${escapeHtml(group.tenant)} · ${countLabel(group.issues.length, "проблема", "проблемы", "проблем")}</small></span>
+        <b>${money(amount)}</b><span aria-hidden="true">›</span>
+      </button>
+    `;
+  });
+  if (dashboard.suspicious_receipts?.length) {
+    rows.push(`
+      <button class="home-decision-row" type="button" onclick="openMessagesTab()">
+        <span class="home-decision-row__signal warn"></span>
+        <span class="home-decision-row__copy"><strong>Проверить чек</strong><small>Нужно проверить: ${countLabel(dashboard.suspicious_receipts.length, "документ", "документа", "документов")}</small></span>
+        <span aria-hidden="true">›</span>
+      </button>
+    `);
+  }
+  root.innerHTML = rows.slice(0, 4).join("") || `<div class="empty-state"><strong>Критичных решений нет</strong><span>Портфель работает штатно.</span></div>`;
 }
 
 function renderDashboard() {
@@ -2514,6 +2606,8 @@ function renderDashboard() {
     const attentionRoot = qs("#attentionList");
     attentionRoot.classList.remove("attention-grid--grouped");
     attentionRoot.innerHTML = cards.join("") || `<div class="empty-state"><strong>Портфель работает штатно</strong><span>Критичных отклонений не зафиксировано.</span></div>`;
+    renderHomeAttentionPreview(dashboard, []);
+    if (qs("#todayDecisionCount")) qs("#todayDecisionCount").textContent = String(cards.length);
     return;
   }
   renderMonthlyReportTray(dashboard.monthly_reports);
@@ -2530,6 +2624,7 @@ function renderDashboard() {
   attentionRoot.classList.add("attention-grid--grouped");
   const objectOrder = (dashboard.object_summary?.by_object || []).map((item) => item.object);
   attentionRoot.innerHTML = renderDashboardAttentionSections(cardEntries, objectOrder) || `<div class="card ok"><h3>Критичных задач нет</h3><p class="muted">Все обязательные действия на текущий момент закрыты.</p></div>`;
+  renderHomeAttentionPreview(dashboard, state.dashboardAttentionGroups);
 }
 function renderMonthlyReportTray(reports = []) {
   const tray = qs("#monthlyReportTray");
@@ -2543,7 +2638,7 @@ function renderMonthlyReportTray(reports = []) {
         <button class="report-open" type="button" onclick="openMonthlyReport(${report.year}, ${report.month}, '${report.kind || "full"}')"><strong>${report.title}</strong></button>
         ${isOwner() ? `<button class="mini report-accept" title="Отчёт принят" onclick="acceptMonthlyReport(event, ${report.year}, ${report.month}, '${report.kind || "full"}')">✓</button>` : ""}
       </div>
-      <button class="report-summary" type="button" onclick="openMonthlyReport(${report.year}, ${report.month}, '${report.kind || "full"}')">${report.quick ? "ждёт проверки · открыть отчёт" : `${monthlySeverityText(report)} · ${report.issue_count} проблем`}</button>
+      <button class="report-summary" type="button" onclick="openMonthlyReport(${report.year}, ${report.month}, '${report.kind || "full"}')">${report.quick ? "ждёт проверки · открыть отчёт" : `${monthlySeverityText(report)} · ${countLabel(report.issue_count, "проблема", "проблемы", "проблем")}`}</button>
     </article>
   `).join("");
 }
@@ -2629,6 +2724,226 @@ function renderObjects() {
     </article>
   `;
 }
+
+function paymentProfileOptions(selectedId, placeholder) {
+  const selected = String(selectedId ?? "");
+  const profiles = state.bootstrap?.payment_profiles || [];
+  return [
+    `<option value="" ${selected ? "" : "selected"}>${escapeHtml(placeholder)}</option>`,
+    ...profiles
+      .filter((profile) => profile.active || String(profile.id) === selected)
+      .map((profile) => `<option value="${profile.id}" ${String(profile.id) === selected ? "selected" : ""}>${escapeHtml(profile.name)}${profile.active ? "" : " · архив"}</option>`),
+  ].join("");
+}
+
+function paymentProfileUsage(profileId) {
+  const target = profileId == null ? null : Number(profileId);
+  const objects = (state.bootstrap?.objects || []).filter((object) => (
+    target == null ? object.payment_profile_id == null : Number(object.payment_profile_id) === target
+  ));
+  const apartments = allApartments().filter((apartment) => {
+    const effectiveId = apartment.effective_payment_profile?.id;
+    return target == null ? effectiveId == null : Number(effectiveId) === target;
+  });
+  return { objects, apartments };
+}
+
+function usageLocationText(usage) {
+  const apartmentNames = usage.apartments.slice(0, 6).map((item) => `${item.object_name} · ${item.name}`);
+  const remainder = usage.apartments.length - apartmentNames.length;
+  return [
+    `${usage.objects.length} объект(а) назначено напрямую`,
+    `${usage.apartments.length} квартир(ы) используют фактически`,
+    apartmentNames.length ? `${apartmentNames.join(", ")}${remainder > 0 ? ` и ещё ${remainder}` : ""}` : "нет квартир",
+  ].join(" · ");
+}
+
+function renderObjectRegistry() {
+  const root = qs("#objectRegistry");
+  if (!root) return;
+  const objects = state.bootstrap?.objects || [];
+  root.innerHTML = objects.map((object) => {
+    const activeApartmentsCount = (object.apartments || []).filter((item) => item.active).length;
+    const profileName = object.payment_profile?.name || "Глобальные реквизиты";
+    return `
+      <article class="card">
+        <div class="section-title">
+          <div><h3>${escapeHtml(object.name)}</h3><span>${escapeHtml(object.short_code || "без кода")}</span></div>
+          <span class="pill ${object.active ? "ok" : "warn"}">${object.active ? "активен" : "архив"}</span>
+        </div>
+        <p>${escapeHtml(object.notes || "Комментарий не указан")}</p>
+        <p class="muted">Квартиры: ${activeApartmentsCount} активных из ${(object.apartments || []).length} · реквизиты по умолчанию: ${escapeHtml(profileName)}</p>
+        <div class="settings-actions">
+          <button class="mini" type="button" onclick="openObjectEditor(${object.id})">Открыть и изменить</button>
+          <button class="mini" type="button" onclick="toggleObjectActive(${object.id})">${object.active ? "Архивировать" : "Вернуть в работу"}</button>
+          ${!(object.apartments || []).length && !(object.services || []).length ? `<button class="mini danger-soft" type="button" onclick="deleteObject(${object.id})">Удалить пустой объект</button>` : ""}
+        </div>
+      </article>
+    `;
+  }).join("") || '<div class="empty-state"><strong>Объектов пока нет</strong><span>Создайте объект, затем добавьте в него квартиры.</span></div>';
+}
+
+function renderPaymentProfiles() {
+  const root = qs("#paymentProfileRegistry");
+  if (!root) return;
+  const globalUsage = paymentProfileUsage(null);
+  const globalReady = Boolean(
+    (state.settings.ip_recipient_name && state.settings.ip_recipient_account)
+    || (state.settings.personal_recipient_name && state.settings.personal_recipient_phone)
+  );
+  const globalCard = `
+    <article class="card">
+      <div class="section-title"><div><h3>Глобальные реквизиты</h3><span>Резервный уровень без отдельного профиля</span></div><span class="pill ${globalReady ? "ok" : "warn"}">${globalReady ? "настроены" : "не заполнены"}</span></div>
+      <p class="muted">${escapeHtml(usageLocationText(globalUsage))}</p>
+      <div class="settings-actions"><button class="mini" type="button" onclick="openGlobalPaymentSettings()">Изменить в настройках</button></div>
+    </article>
+  `;
+  const cards = (state.bootstrap?.payment_profiles || []).map((profile) => {
+    const usage = paymentProfileUsage(profile.id);
+    const recipient = profile.ip_recipient_name || profile.personal_recipient_name || "получатель не указан";
+    return `
+      <article class="card">
+        <div class="section-title"><div><h3>${escapeHtml(profile.name)}</h3><span>${escapeHtml(recipient)}</span></div><span class="pill ${profile.active ? "ok" : "warn"}">${profile.active ? "активен" : "архив"}</span></div>
+        <p class="muted">${escapeHtml(usageLocationText(usage))}</p>
+        <div class="settings-actions">
+          <button class="mini" type="button" onclick="openPaymentProfileEditor(${profile.id})">Открыть и изменить</button>
+          <button class="mini" type="button" onclick="togglePaymentProfileActive(${profile.id})">${profile.active ? "Архивировать" : "Вернуть в работу"}</button>
+          ${!profile.object_ids.length && !profile.apartment_ids.length ? `<button class="mini danger-soft" type="button" onclick="deletePaymentProfile(${profile.id})">Удалить</button>` : ""}
+        </div>
+      </article>
+    `;
+  }).join("");
+  root.innerHTML = globalCard + (cards || '<div class="empty-state"><strong>Отдельных наборов пока нет</strong><span>Квартиры используют глобальные реквизиты.</span></div>');
+}
+
+function closePortfolioEditor() {
+  const root = qs("#portfolioEditorModal");
+  if (!root) return;
+  root.hidden = true;
+  root.innerHTML = "";
+  restoreModalFocus(root);
+}
+
+function openPortfolioEditor(title, body, submitHandler) {
+  const root = qs("#portfolioEditorModal");
+  if (!root) return;
+  root.innerHTML = `
+    <div class="modal-card">
+      <div class="section-title"><div><p class="eyebrow">Портфель</p><h3>${escapeHtml(title)}</h3></div><button class="mini" type="button" onclick="closePortfolioEditor()">Закрыть</button></div>
+      <form id="portfolioEditorForm" class="form-grid">${body}<button class="primary wide" type="submit">Сохранить</button></form>
+    </div>
+  `;
+  root.hidden = false;
+  openAccessibleModal(root, closePortfolioEditor);
+  on("#portfolioEditorForm", "submit", async (event) => {
+    event.preventDefault();
+    await submitHandler(formData(event.currentTarget));
+    closePortfolioEditor();
+    await loadAll({ refreshSections: registryRefreshSections });
+  });
+}
+
+function openObjectEditor(objectId) {
+  const object = state.bootstrap.objects.find((item) => Number(item.id) === Number(objectId));
+  if (!object) return;
+  openPortfolioEditor(`Объект · ${object.name}`, `
+    <label class="wide">Название<input name="name" required value="${escapeAttr(object.name)}" /></label>
+    <label>Код<input name="short_code" maxlength="20" value="${escapeAttr(object.short_code || "")}" /></label>
+    <label>Реквизиты по умолчанию<select name="payment_profile_id">${paymentProfileOptions(object.payment_profile_id, "Глобальные реквизиты")}</select></label>
+    <label class="wide">Комментарий<textarea name="notes" rows="3">${escapeHtml(object.notes || "")}</textarea></label>
+  `, async (payload) => {
+    await api(`/api/objects/${objectId}`, { method: "PATCH", body: JSON.stringify(payload) });
+    toast("Объект обновлён");
+  });
+}
+
+function openApartmentEditor(apartmentId) {
+  const apartment = allApartments().find((item) => Number(item.id) === Number(apartmentId));
+  if (!apartment) return;
+  openPortfolioEditor(`Квартира · ${apartment.object_name} · ${apartment.name}`, `
+    <label class="wide">Название<input name="name" required value="${escapeAttr(apartment.name)}" /></label>
+    <label>Порядок<input type="number" name="sort_order" value="${Number(apartment.sort_order || 0)}" /></label>
+    <label>Доля ОДН, %<input type="number" min="0" step="0.01" name="odn_share_percent" value="${Number(apartment.odn_share_percent || 0)}" /></label>
+    <label class="wide">Реквизиты<select name="payment_profile_id">${paymentProfileOptions(apartment.payment_profile_id, "Наследовать от объекта")}</select></label>
+  `, async (payload) => {
+    await api(`/api/apartments/${apartmentId}`, { method: "PATCH", body: JSON.stringify(payload) });
+    toast("Квартира обновлена");
+  });
+}
+
+function paymentProfileEditorFields(profile) {
+  const field = (name) => escapeAttr(profile?.[name] || "");
+  return `
+    <label class="wide">Название набора<input name="name" required value="${field("name")}" /></label>
+    <label class="wide">Получатель ИП<input name="ip_recipient_name" value="${field("ip_recipient_name")}" /></label>
+    <label>ИНН ИП<input name="ip_recipient_inn" value="${field("ip_recipient_inn")}" /></label>
+    <label>ОГРНИП<input name="ip_recipient_ogrnip" value="${field("ip_recipient_ogrnip")}" /></label>
+    <label>Расчётный счёт<input name="ip_recipient_account" value="${field("ip_recipient_account")}" /></label>
+    <label>Банк ИП<input name="ip_recipient_bank" value="${field("ip_recipient_bank")}" /></label>
+    <label>БИК<input name="ip_recipient_bik" value="${field("ip_recipient_bik")}" /></label>
+    <label>Корр. счёт<input name="ip_recipient_correspondent_account" value="${field("ip_recipient_correspondent_account")}" /></label>
+    <label>ИНН банка<input name="ip_recipient_bank_inn" value="${field("ip_recipient_bank_inn")}" /></label>
+    <label>КПП банка<input name="ip_recipient_bank_kpp" value="${field("ip_recipient_bank_kpp")}" /></label>
+    <label class="wide">Получатель перевода<input name="personal_recipient_name" value="${field("personal_recipient_name")}" /></label>
+    <label>Телефон получателя<input name="personal_recipient_phone" value="${field("personal_recipient_phone")}" /></label>
+    <label>Банк получателя<input name="personal_recipient_bank" value="${field("personal_recipient_bank")}" /></label>
+    <label class="wide">Комментарий<textarea name="notes" rows="3">${escapeHtml(profile?.notes || "")}</textarea></label>
+  `;
+}
+
+function openPaymentProfileEditor(profileId) {
+  const profile = state.bootstrap.payment_profiles.find((item) => Number(item.id) === Number(profileId));
+  if (!profile) return;
+  openPortfolioEditor(`Реквизиты · ${profile.name}`, paymentProfileEditorFields(profile), async (payload) => {
+    await api(`/api/payment-profiles/${profileId}`, { method: "PATCH", body: JSON.stringify(payload) });
+    toast("Набор реквизитов обновлён");
+  });
+}
+
+async function toggleObjectActive(objectId) {
+  const object = state.bootstrap.objects.find((item) => Number(item.id) === Number(objectId));
+  if (!object) return;
+  if (object.active && !confirm("Архивировать объект? Все его квартиры будут отключены.")) return;
+  await api(`/api/objects/${objectId}`, { method: "PATCH", body: JSON.stringify({ active: !object.active }) });
+  toast(object.active ? "Объект архивирован" : "Объект возвращён в работу. Включите нужные квартиры отдельно");
+  await loadAll({ refreshSections: registryRefreshSections });
+}
+
+async function deleteObject(objectId) {
+  if (!confirm("Удалить пустой объект безвозвратно?")) return;
+  await api(`/api/objects/${objectId}`, { method: "DELETE" });
+  toast("Пустой объект удалён");
+  await loadAll({ refreshSections: registryRefreshSections });
+}
+
+async function togglePaymentProfileActive(profileId) {
+  const profile = state.bootstrap.payment_profiles.find((item) => Number(item.id) === Number(profileId));
+  if (!profile) return;
+  if (profile.active && !confirm("Отправить набор в архив? Существующие назначения сохранятся, новые будут запрещены.")) return;
+  await api(`/api/payment-profiles/${profileId}`, { method: "PATCH", body: JSON.stringify({ active: !profile.active }) });
+  toast(profile.active ? "Набор отправлен в архив" : "Набор снова активен");
+  await loadAll({ refreshSections: registryRefreshSections });
+}
+
+async function deletePaymentProfile(profileId) {
+  if (!confirm("Удалить неиспользуемый набор реквизитов безвозвратно?")) return;
+  await api(`/api/payment-profiles/${profileId}`, { method: "DELETE" });
+  toast("Набор удалён");
+  await loadAll({ refreshSections: registryRefreshSections });
+}
+
+async function deleteApartment(apartmentId) {
+  if (!confirm("Удалить пустую квартиру безвозвратно?")) return;
+  await api(`/api/apartments/${apartmentId}`, { method: "DELETE" });
+  toast("Квартира удалена");
+  await loadAll({ refreshSections: registryRefreshSections });
+}
+
+function openGlobalPaymentSettings() {
+  openWorkspaceTab("settings");
+  qs('.settings-nav-btn[data-settings-target="payments"]')?.click();
+}
+
 function renderLeases() {
   const rows = [...state.bootstrap.leases]
     .sort((left, right) => Number(right.active) - Number(left.active) || compareApartmentRefs(left, right) || String(left.tenant).localeCompare(String(right.tenant), "ru"))
@@ -2671,11 +2986,12 @@ function renderApartmentRegistry() {
         <td>${apartment.active_tenant || '<span class="muted">нет жильца</span>'}</td>
         <td>${apartment.odn_share_percent}</td>
         <td>${apartment.utility_advance_override == null ? '<span class="muted">авто</span>' : money(apartment.utility_advance_override)}</td>
+        <td>${escapeHtml(apartment.effective_payment_profile?.name || "не определены")}${apartment.effective_payment_profile?.source === "apartment" ? '<br><span class="pill">override</span>' : '<br><span class="muted">наследование</span>'}${apartment.effective_payment_profile?.active === false ? '<br><span class="pill warn">архивный набор</span>' : ""}</td>
         <td><label class="checkbox-inline"><input type="checkbox" ${apartment.active ? "checked" : ""} onchange="toggleApartmentActive(${apartment.id}, this.checked)" /> учитывать</label></td>
-        <td><button class="mini" onclick="editUtilityAdvanceOverride(${apartment.id})">...</button></td>
+        <td class="actions"><button class="mini" onclick="openApartmentEditor(${apartment.id})">Изменить</button><button class="mini" onclick="editUtilityAdvanceOverride(${apartment.id})">Аванс</button>${!apartment.active_lease_id ? `<button class="mini danger-soft" onclick="deleteApartment(${apartment.id})">Удалить</button>` : ""}</td>
       </tr>
     `).join("");
-  qs("#apartmentRegistry").innerHTML = table(["Объект", "Квартира", "Текущий жилец", "ОДН %", "Аванс", "Контроль", ""], rows);
+  qs("#apartmentRegistry").innerHTML = table(["Объект", "Квартира", "Текущий жилец", "ОДН %", "Аванс", "Реквизиты", "Контроль", "Действия"], rows);
 }
 
 async function editUtilityAdvanceOverride(apartmentId) {
@@ -3733,7 +4049,7 @@ function botDialogById(dialogId = state.selectedBotDialogId) {
 function botDialogStatus(dialog) {
   if (!dialog) return "";
   if (!dialog.linked) return '<span class="pill warn">ждём /start</span>';
-  if (dialog.kind === "owner") return '<span class="pill">owner</span>';
+  if (dialog.kind === "owner") return '<span class="pill">владелец</span>';
   return '<span class="pill ok">бот привязан</span>';
 }
 
@@ -4332,7 +4648,7 @@ async function confirmIssueBill() {
   const failed = Number(result.failed || 0);
   state.utilityIssuePreview = null;
   toast(`Счёт выставлен. Отправлено: ${sent}. Ждут /start: ${skipped}.`);
-  if (failed) toast(`Telegram errors: ${failed}.`);
+  if (failed) toast(`Ошибок Telegram: ${failed}.`);
   await loadAll();
 }
 
@@ -4410,7 +4726,7 @@ async function transferLease(id) {
   const selectedIndex = Number(selectedIndexRaw);
   const target = targets[selectedIndex - 1];
   if (!target) {
-    alert("Не понял номер квартиры. Нумерация скучная, зато честная.");
+    alert("Указан неверный номер квартиры.");
     return;
   }
 
@@ -4445,6 +4761,14 @@ function openWorkspaceTab(tabName) {
     activateNavGroup(tab.dataset.group, false);
   }
   tab.click();
+}
+
+function openHomeTab() {
+  openWorkspaceTab("home");
+}
+
+function openTodayTab() {
+  openWorkspaceTab("dashboard");
 }
 
 function openReportsTab() {
@@ -4693,6 +5017,7 @@ function bindEvents() {
       tab.classList.add("active");
       qs(`#${tab.dataset.tab}`)?.classList.add("active");
       updateWorkspaceContext(tab.dataset.tab);
+      applyAccessUi();
       const search = qs("#globalSearch");
       if (search) search.value = "";
       filterActivePanel("");
@@ -4704,7 +5029,10 @@ function bindEvents() {
     });
   });
   qsa(".nav-group").forEach((group) => {
-    group.addEventListener("click", () => activateNavGroup(group.dataset.group));
+    group.addEventListener("click", () => {
+      if (group.dataset.tab) openWorkspaceTab(group.dataset.tab);
+      else activateNavGroup(group.dataset.group);
+    });
   });
   qsa(".settings-nav-btn").forEach((button) => {
     button.addEventListener("click", () => {
@@ -4785,6 +5113,16 @@ function bindEvents() {
     await api("/api/apartments", { method: "POST", body: JSON.stringify(formData(event.currentTarget)) });
     event.currentTarget.reset();
     toast("Квартира создана");
+    await loadAll({ refreshSections: registryRefreshSections });
+  });
+  on("#paymentProfileForm", "submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    await api("/api/payment-profiles", { method: "POST", body: JSON.stringify(formData(form)) });
+    form.reset();
+    const tool = qs("#paymentProfileTool");
+    if (tool) tool.open = false;
+    toast("Набор реквизитов создан");
     await loadAll({ refreshSections: registryRefreshSections });
   });
 
@@ -4939,6 +5277,7 @@ Object.assign(window, {
   openManualPaymentTool,
   openMessagesTab,
   openMetersTab,
+  openHomeTab,
   openMonthlyReport,
   openOnboardTool,
   openPaymentHistory,
@@ -4947,6 +5286,7 @@ Object.assign(window, {
   openRentTab,
   openReportsTab,
   openTenantsTab,
+  openTodayTab,
   openUtilitiesTab,
   payUtility,
   prefillTariff,

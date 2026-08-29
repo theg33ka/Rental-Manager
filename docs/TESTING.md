@@ -12,6 +12,22 @@ powershell -ExecutionPolicy Bypass -File .\scripts\validate.ps1
 2. `python -m unittest discover -s tests -v` — unit-тесты.
 3. Smoke-test на временной SQLite-базе.
 
+Для полного pre-handoff набора установите `requirements-dev.txt` и Node-зависимости, затем дополнительно выполните:
+
+```powershell
+.\.venv\Scripts\python.exe -m ruff check rental_manager scripts tests
+.\.venv\Scripts\python.exe -m mypy rental_manager
+.\.venv\Scripts\python.exe .\scripts\check_secrets.py
+npm.cmd run check:js
+npm.cmd run test:web
+```
+
+Playwright устанавливается командой `npm.cmd ci`, браузер при необходимости — `npx.cmd playwright install chromium`. Реальный внешний Telegram/DeepSeek smoke не входит в автоматический набор и выполняется только с явно выданным доступом и синтетическими данными.
+
+## Миграции
+
+При изменении схемы, auth settings или persisted repair обязательна проверка из `CHANGE_AND_MIGRATION_GUIDE.md`: один Alembic head, upgrade чистой БД и upgrade существующей схемы с контрольными данными. SQLite smoke не заменяет PostgreSQL-проверку ограничений и индексов.
+
 Если нужны только unit-тесты:
 
 ```powershell
@@ -31,6 +47,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\validate.ps1
 - ошибка, когда квартирные счётчики больше общего;
 - интерполяция и прогноз показаний;
 - парсинг тарифных ступеней из UI-строки.
+- inheritance платёжных реквизитов object → apartment override → global fallback;
+- применение effective details в шаблонах и проверке новых чеков;
+- запрет удаления используемого профиля и архивирования объекта/квартиры с активным договором;
+- создание нового объекта/квартиры и последующее заселение.
 
 ## Демо-набор
 

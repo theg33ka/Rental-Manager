@@ -47,6 +47,7 @@ from rental_manager.models import (
     MessageLog,
     Meter,
     MeterReading,
+    PaymentProfile,
     PaymentReceipt,
     PaymentSituation,
     HermesAgentRun,
@@ -216,6 +217,12 @@ from rental_manager.services.payment_allocation import (
     describe_rent_allocation_decision,
     recalculate_lease_balances,
     utility_line_candidates,
+)
+from rental_manager.services.payment_profiles import (
+    apply_payment_profile_payload,
+    effective_payment_profile_summary,
+    effective_payment_settings,
+    serialize_payment_profile,
 )
 from rental_manager.services.receipt_matching import (
     detect_receipt_channel,
@@ -403,7 +410,7 @@ def performance_snapshot() -> dict[str, Any]:
 
 
 DEFAULT_SETTINGS = {
-    "color_palette": "premium",
+    "color_palette": "neon",
     "app_base_url": "",
     "telegram_owner_chat_id": "",
     "notifications_enabled": False,
@@ -1367,6 +1374,7 @@ EXPORT_SECRET_SETTING_KEYS = set(SECRET_SETTINGS) | set(PIN_SETTING_KEYS.values(
 
 def table_model_map() -> dict[str, Any]:
     return {
+        "payment_profiles": PaymentProfile,
         "rental_objects": RentalObject,
         "apartments": Apartment,
         "tenants": Tenant,
@@ -2140,6 +2148,16 @@ def serialize_object(obj: RentalObject) -> dict[str, Any]:
         "short_code": obj.short_code,
         "notes": obj.notes,
         "active": obj.active,
+        "payment_profile_id": obj.payment_profile_id,
+        "payment_profile": (
+            {
+                "id": obj.payment_profile.id,
+                "name": obj.payment_profile.name,
+                "active": obj.payment_profile.active,
+            }
+            if obj.payment_profile
+            else None
+        ),
         "apartments": [serialize_apartment(apartment) for apartment in sorted(obj.apartments, key=lambda item: item.sort_order)],
         "services": [serialize_service(service) for service in obj.services if service.active],
     }
@@ -2170,6 +2188,8 @@ def serialize_apartment(apartment: Apartment) -> dict[str, Any]:
         "sort_order": apartment.sort_order,
         "odn_share_percent": apartment.odn_share_percent,
         "active": apartment.active,
+        "payment_profile_id": apartment.payment_profile_id,
+        "effective_payment_profile": effective_payment_profile_summary(apartment),
         "active_lease_id": active_lease.id if active_lease else None,
         "active_tenant": active_lease.tenant.full_name if active_lease else "",
         "utility_advance_override": (
@@ -3056,13 +3076,15 @@ def logout_panel(request: Request, response: Response, session: Session = Depend
 
 def build_registry_payload(session: Session, role: str | None) -> dict[str, Any]:
     if role != "owner":
-        return {"objects": [], "leases": [], "meters": [], "services": []}
+        return {"objects": [], "leases": [], "meters": [], "services": [], "payment_profiles": []}
     return {
         "objects": [
             serialize_object(obj)
             for obj in session.scalars(
                 select(RentalObject)
                 .options(
+                    selectinload(RentalObject.payment_profile),
+                    selectinload(RentalObject.apartments).selectinload(Apartment.payment_profile),
                     selectinload(RentalObject.apartments).selectinload(Apartment.leases).joinedload(Lease.tenant),
                     selectinload(RentalObject.services),
                 )
@@ -3100,11 +3122,19 @@ def build_registry_payload(session: Session, role: str | None) -> dict[str, Any]
                 .order_by(UtilityService.object_id, UtilityService.kind)
             ).all()
         ],
+        "payment_profiles": [
+            serialize_payment_profile(profile)
+            for profile in session.scalars(
+                select(PaymentProfile)
+                .options(selectinload(PaymentProfile.objects), selectinload(PaymentProfile.apartments))
+                .order_by(PaymentProfile.active.desc(), PaymentProfile.name)
+            ).all()
+        ],
     }
 
 
 def empty_registry_payload() -> dict[str, list[Any]]:
-    return {"objects": [], "leases": [], "meters": [], "services": []}
+    return {"objects": [], "leases": [], "meters": [], "services": [], "payment_profiles": []}
 
 
 def build_bootstrap_payload(
@@ -5566,6 +5596,7 @@ def build_message_context(
 
     rent_debt = total_rent_debt if total_rent_debt > 0 else current_rent_debt
     utility_total = total_utility_debt if total_utility_debt > 0 else current_utility_total
+    payment_settings = effective_payment_settings(lease.apartment, get_settings(session))
 
     return {
         "tenant_name": lease.tenant.full_name,
@@ -5594,10 +5625,10 @@ def build_message_context(
         "all_debt_total": money_text(total_rent_debt + total_utility_debt + total_manual_debt),
         "all_debts_breakdown": build_all_debts_breakdown(session, lease, today),
         "custom_text": custom_text,
-        "ip_recipient_name_text": get_settings(session).get("ip_recipient_name") or "ИП не указан",
-        "ip_recipient_account_text": get_settings(session).get("ip_recipient_account") or "счёт не указан",
-        "personal_recipient_phone_text": get_settings(session).get("personal_recipient_phone") or "номер не указан",
-        "personal_recipient_bank_text": get_settings(session).get("personal_recipient_bank") or "банк не указан",
+        "ip_recipient_name_text": payment_settings.get("ip_recipient_name") or "ИП не указан",
+        "ip_recipient_account_text": payment_settings.get("ip_recipient_account") or "счёт не указан",
+        "personal_recipient_phone_text": payment_settings.get("personal_recipient_phone") or "номер не указан",
+        "personal_recipient_bank_text": payment_settings.get("personal_recipient_bank") or "банк не указан",
     }
 
 
@@ -7398,7 +7429,7 @@ def run_tenant_rent_dialogue(
 
     context = "\n\n".join(
         [
-            tenant_context_text(session, lease, get_settings(session), today),
+            tenant_context_text(session, lease, effective_payment_settings(lease.apartment, get_settings(session)), today),
             tenant_state_context(state),
             tenant_recent_dialogue_text(session, lease),
             agent_memory_context(
@@ -8236,7 +8267,7 @@ def create_personal_priority_receipts(
 def apply_receipt_match(session: Session, lease: Lease, parsed: dict[str, Any]) -> tuple[str, str, int | None, list[str], str]:
     amount = float(parsed.get("amount") or 0)
     channel = detect_receipt_channel(parsed)
-    issues = receipt_validation_issues(parsed, get_settings(session), channel)
+    issues = receipt_validation_issues(parsed, effective_payment_settings(lease.apartment, get_settings(session)), channel)
     allocation_comment = ""
     paid_at = datetime.fromisoformat(parsed["paid_at"]) if parsed.get("paid_at") else None
     cutoff = allocation_cutoff_date(session)
@@ -11353,8 +11384,8 @@ def handle_agent_callback_query(session: Session, callback: dict[str, Any]) -> N
             pass
 
 
-def tenant_requisites_text(session: Session) -> str:
-    settings = get_settings(session)
+def tenant_requisites_text(session: Session, lease: Lease | None = None) -> str:
+    settings = effective_payment_settings(lease.apartment, get_settings(session)) if lease else get_settings(session)
     lines = [
         "Реквизиты для перевода на ИП:",
         f"Наименование: {settings.get('ip_recipient_name') or 'не задано'}",
@@ -11516,7 +11547,7 @@ def handle_telegram_message(session: Session, message: dict[str, Any]) -> None:
             send_telegram_text(
                 session,
                 chat_id,
-                tenant_requisites_text(session),
+                tenant_requisites_text(session, linked_lease),
                 tenant_keyboard() if not is_owner else app_keyboard(base_url),
             )
         else:
@@ -12077,7 +12108,104 @@ def run_reminders_now(session: Session = Depends(get_session)) -> dict[str, Any]
 
 @app.get("/api/objects")
 def list_objects(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
-    return [serialize_object(obj) for obj in session.scalars(select(RentalObject).order_by(RentalObject.name)).all()]
+    return [
+        serialize_object(obj)
+        for obj in session.scalars(
+            select(RentalObject)
+            .options(
+                selectinload(RentalObject.payment_profile),
+                selectinload(RentalObject.apartments).selectinload(Apartment.payment_profile),
+                selectinload(RentalObject.apartments).selectinload(Apartment.leases).joinedload(Lease.tenant),
+                selectinload(RentalObject.services),
+            )
+            .order_by(RentalObject.name)
+        ).all()
+    ]
+
+
+def payment_profile_assignment(
+    session: Session,
+    value: Any,
+    *,
+    existing_profile_id: int | None = None,
+) -> PaymentProfile | None:
+    if value in {None, ""}:
+        return None
+    try:
+        profile_id = int(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, "Набор реквизитов задан некорректно") from exc
+    profile = session.get(PaymentProfile, profile_id)
+    if not profile:
+        raise HTTPException(404, "Набор реквизитов не найден")
+    if not profile.active and profile.id != existing_profile_id:
+        raise HTTPException(409, "Архивный набор реквизитов нельзя назначить")
+    return profile
+
+
+def object_has_active_leases(session: Session, object_id: int) -> bool:
+    return bool(
+        session.scalar(
+            select(func.count(Lease.id))
+            .join(Apartment, Lease.apartment_id == Apartment.id)
+            .where(Apartment.object_id == object_id, Lease.active.is_(True))
+        )
+    )
+
+
+@app.get("/api/payment-profiles")
+def list_payment_profiles(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    profiles = session.scalars(
+        select(PaymentProfile)
+        .options(selectinload(PaymentProfile.objects), selectinload(PaymentProfile.apartments))
+        .order_by(PaymentProfile.active.desc(), PaymentProfile.name)
+    ).all()
+    return [serialize_payment_profile(profile) for profile in profiles]
+
+
+@app.post("/api/payment-profiles")
+def create_payment_profile(payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
+    profile = PaymentProfile(name="")
+    apply_payment_profile_payload(profile, payload)
+    if not profile.name:
+        raise HTTPException(400, "Название набора реквизитов обязательно")
+    session.add(profile)
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(409, "Набор реквизитов с таким названием уже существует") from exc
+    session.refresh(profile)
+    return serialize_payment_profile(profile)
+
+
+@app.patch("/api/payment-profiles/{profile_id}")
+def update_payment_profile(profile_id: int, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
+    profile = session.get(PaymentProfile, profile_id)
+    if not profile:
+        raise HTTPException(404, "Набор реквизитов не найден")
+    apply_payment_profile_payload(profile, payload)
+    if not profile.name:
+        raise HTTPException(400, "Название набора реквизитов обязательно")
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(409, "Набор реквизитов с таким названием уже существует") from exc
+    session.refresh(profile)
+    return serialize_payment_profile(profile)
+
+
+@app.delete("/api/payment-profiles/{profile_id}")
+def delete_payment_profile(profile_id: int, session: Session = Depends(get_session)) -> dict[str, bool]:
+    profile = session.get(PaymentProfile, profile_id)
+    if not profile:
+        raise HTTPException(404, "Набор реквизитов не найден")
+    if profile.objects or profile.apartments:
+        raise HTTPException(409, "Набор используется. Сначала переназначьте связи или отправьте набор в архив")
+    session.delete(profile)
+    session.commit()
+    return {"ok": True}
 
 
 @app.post("/api/objects")
@@ -12086,23 +12214,87 @@ def create_object(payload: dict[str, Any], session: Session = Depends(get_sessio
         name=(payload.get("name") or "").strip(),
         short_code=(payload.get("short_code") or "").strip(),
         notes=payload.get("notes") or "",
+        payment_profile=payment_profile_assignment(session, payload.get("payment_profile_id")),
     )
     if not obj.name:
         raise HTTPException(400, "Название объекта обязательно")
     session.add(obj)
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(409, "Объект с таким названием уже существует") from exc
     session.refresh(obj)
     return serialize_object(obj)
 
 
+@app.patch("/api/objects/{object_id}")
+def update_object(object_id: int, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
+    obj = session.get(RentalObject, object_id)
+    if not obj:
+        raise HTTPException(404, "Объект не найден")
+    if "name" in payload:
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            raise HTTPException(400, "Название объекта обязательно")
+        obj.name = name
+    if "short_code" in payload:
+        obj.short_code = str(payload.get("short_code") or "").strip()
+    if "notes" in payload:
+        obj.notes = str(payload.get("notes") or "").strip()
+    if "payment_profile_id" in payload:
+        obj.payment_profile = payment_profile_assignment(
+            session,
+            payload.get("payment_profile_id"),
+            existing_profile_id=obj.payment_profile_id,
+        )
+    if "active" in payload:
+        active = payload.get("active") not in {False, "false", "0", 0, None}
+        if not active and object_has_active_leases(session, obj.id):
+            raise HTTPException(409, "Нельзя архивировать объект с активными договорами")
+        obj.active = active
+        if not active:
+            for apartment in obj.apartments:
+                apartment.active = False
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(409, "Объект с таким названием уже существует") from exc
+    session.refresh(obj)
+    return serialize_object(obj)
+
+
+@app.delete("/api/objects/{object_id}")
+def delete_object(object_id: int, session: Session = Depends(get_session)) -> dict[str, bool]:
+    obj = session.get(RentalObject, object_id)
+    if not obj:
+        raise HTTPException(404, "Объект не найден")
+    if obj.apartments or obj.services:
+        raise HTTPException(409, "Объект связан с квартирами или услугами. Используйте архивирование")
+    session.delete(obj)
+    session.commit()
+    return {"ok": True}
+
+
 @app.post("/api/apartments")
 def create_apartment(payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
+    try:
+        object_id = int(payload["object_id"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(400, "Выберите объект") from exc
+    obj = session.get(RentalObject, object_id)
+    if not obj:
+        raise HTTPException(404, "Объект не найден")
+    if not obj.active:
+        raise HTTPException(409, "Нельзя добавить квартиру в архивный объект")
     apartment = Apartment(
-        object_id=int(payload["object_id"]),
+        object=obj,
         name=(payload.get("name") or "").strip(),
         sort_order=int(payload.get("sort_order") or 0),
         odn_share_percent=float(payload.get("odn_share_percent") or 0),
         active=payload.get("active", True) not in {False, "false", "0", 0},
+        payment_profile=payment_profile_assignment(session, payload.get("payment_profile_id")),
     )
     if not apartment.name:
         raise HTTPException(400, "Название квартиры обязательно")
@@ -12123,13 +12315,41 @@ def update_apartment(apartment_id: int, payload: dict[str, Any], session: Sessio
         apartment.sort_order = int(payload.get("sort_order") or 0)
     if "odn_share_percent" in payload:
         apartment.odn_share_percent = float(payload.get("odn_share_percent") or 0)
+    if "payment_profile_id" in payload:
+        apartment.payment_profile = payment_profile_assignment(
+            session,
+            payload.get("payment_profile_id"),
+            existing_profile_id=apartment.payment_profile_id,
+        )
     if "active" in payload:
-        apartment.active = payload.get("active") not in {False, "false", "0", 0}
+        active = payload.get("active") not in {False, "false", "0", 0, None}
+        if not active and current_active_lease(apartment):
+            raise HTTPException(409, "Нельзя отключить квартиру с активным договором")
+        apartment.active = active
     session.flush()
     generate_rent_charges(session)
     session.commit()
     session.refresh(apartment)
     return serialize_apartment(apartment)
+
+
+@app.delete("/api/apartments/{apartment_id}")
+def delete_apartment(apartment_id: int, session: Session = Depends(get_session)) -> dict[str, bool]:
+    apartment = session.get(Apartment, apartment_id)
+    if not apartment:
+        raise HTTPException(404, "Квартира не найдена")
+    linked_rows = [
+        bool(apartment.leases),
+        bool(apartment.meters),
+        bool(session.scalar(select(func.count(UtilityBillLine.id)).where(UtilityBillLine.apartment_id == apartment.id))),
+        bool(session.scalar(select(func.count(PaymentReceipt.id)).where(PaymentReceipt.apartment_id == apartment.id))),
+        bool(session.scalar(select(func.count(Expense.id)).where(Expense.apartment_id == apartment.id))),
+    ]
+    if any(linked_rows):
+        raise HTTPException(409, "Квартира уже участвует в истории. Используйте отключение")
+    session.delete(apartment)
+    session.commit()
+    return {"ok": True}
 
 
 @app.patch("/api/apartments/{apartment_id}/utility-advance")

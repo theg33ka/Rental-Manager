@@ -8,12 +8,12 @@ test.beforeEach(async ({ page }) => {
   await page.getByRole("button", { name: "Войти" }).click();
   await expect(page.locator("#authOverlay")).toBeHidden({ timeout: 15_000 });
   await expect(page.locator("#loadingOverlay")).toBeHidden();
-  await expect(page.locator("#dashboard")).toBeVisible();
+  await expect(page.locator("#home")).toBeVisible();
 });
 
 
 test("основной экран и навигация доступны", async ({ page }) => {
-  await expect(page.getByRole("heading", { name: "Состояние портфеля" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Состояние бизнеса" })).toBeVisible();
   await expect(page.locator("#summaryGrid .metric")).toHaveCount(4);
   await expect(page.locator("#summaryGrid .metric-expected__values small")).toHaveCount(2);
   const handlers = await page.evaluate(() => ({
@@ -22,8 +22,9 @@ test("основной экран и навигация доступны", async
     report: typeof window.openMonthlyReport,
   }));
   expect(handlers).toEqual({ history: "function", dialogs: "function", report: "function" });
-  await page.getByRole("button", { name: "▦ Портфель и финансы", exact: true }).click();
-  await page.getByRole("button", { name: "Портфель", exact: true }).click();
+  await page.locator('.sidebar .nav-group[data-tab="dashboard"]').click();
+  await expect(page.locator("#dashboard")).toBeVisible();
+  await page.locator('.sidebar .nav-group[data-tab="tenants"]').click();
   await expect(page.locator("#tenants")).toBeVisible();
   await page.getByRole("button", { name: "+ Новый договор", exact: true }).click();
   await expect(page.locator("#onboardForm")).toBeVisible();
@@ -49,12 +50,13 @@ test("ошибка загрузки после верного PIN не возв�
 });
 
 
-test("мобильный web сохраняет полную навигацию и тёмную палитру", async ({ page }) => {
+test("мобильный web сохраняет навигацию, поиск и неоновую палитру", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.locator(".mobile-nav")).toBeVisible();
   await expect(page.locator(".sidebar")).toBeHidden();
-  await expect(page.locator("body")).toHaveCSS("background-color", "rgb(8, 11, 15)");
-  await page.locator('.mobile-nav .nav-group[data-group="rentals"]').click();
+  await expect(page.locator("body")).toHaveCSS("background-color", "rgb(6, 10, 18)");
+  await expect(page.locator(".global-search")).toBeVisible();
+  await page.locator('.mobile-nav .nav-group[data-tab="tenants"]').click();
   await page.locator('.section-tabs .tab[data-tab="rent"]').click();
   await expect(page.locator("#rent")).toBeVisible();
   await expect(page.locator("#manualPaymentTool")).toBeVisible();
@@ -67,7 +69,7 @@ test("основной экран не содержит критичных ош�
 });
 
 test("активные счета расположены выше лога коммуналки", async ({ page }) => {
-  await page.locator('.sidebar .nav-group[data-group="utilities"]').click();
+  await page.locator('.sidebar .nav-group[data-tab="meters"]').click();
   await page.locator('.section-tabs .tab[data-tab="utilities"]').click();
   await expect(page.locator("#utilities")).toBeVisible();
   await expect(page.locator("#utilities > #utilityBills + #utilityTimeline")).toHaveCount(1);
@@ -213,7 +215,7 @@ test("редактор платежа позволяет выбрать кана
 
 
 test("AI settings save models, limits, auto audit and prompt adaptations", async ({ page }) => {
-  await page.locator('.sidebar .nav-group[data-group="administration"]').click();
+  await page.locator('.sidebar .nav-group[data-tab="settings"]').click();
   await page.locator('.section-tabs .tab[data-tab="settings"]').click();
   await page.locator('.settings-nav-btn[data-settings-target="ai"]').click();
 
@@ -242,13 +244,13 @@ test("AI settings save models, limits, auto audit and prompt adaptations", async
   await page.locator("#deepseekApiKeyInput").fill("sk-e2e-deepseek-key");
   await page.locator('#settingsForm button[type="submit"]').click();
   await expect(page.locator("#telegramStatusBox")).toContainText(targetModel);
-  await expect(page.locator("#telegramStatusBox")).toContainText("DeepSeek key сохранён");
+  await expect(page.locator("#telegramStatusBox")).toContainText("ключ DeepSeek сохранён");
   await expect(page.locator("#telegramStatusBox")).toContainText("автоаудит раз в неделю · 09:30");
   await expect(page.locator("#deepseekApiKeyInput")).toHaveValue("");
 
   await page.reload();
   await expect(page.locator("#loadingOverlay")).toBeHidden();
-  await page.locator('.sidebar .nav-group[data-group="administration"]').click();
+  await page.locator('.sidebar .nav-group[data-tab="settings"]').click();
   await page.locator('.section-tabs .tab[data-tab="settings"]').click();
   await page.locator('.settings-nav-btn[data-settings-target="ai"]').click();
   await expect(page.locator("#deepseekModelSelect")).toHaveValue(targetModel);

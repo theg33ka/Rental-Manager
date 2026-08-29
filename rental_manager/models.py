@@ -12,6 +12,32 @@ def utc_now() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
 
 
+class PaymentProfile(Base):
+    __tablename__ = "payment_profiles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), unique=True)
+    ip_recipient_name: Mapped[str] = mapped_column(String(180), default="")
+    ip_recipient_inn: Mapped[str] = mapped_column(String(20), default="")
+    ip_recipient_ogrnip: Mapped[str] = mapped_column(String(20), default="")
+    ip_recipient_account: Mapped[str] = mapped_column(String(34), default="")
+    ip_recipient_bank: Mapped[str] = mapped_column(String(180), default="")
+    ip_recipient_bik: Mapped[str] = mapped_column(String(20), default="")
+    ip_recipient_correspondent_account: Mapped[str] = mapped_column(String(34), default="")
+    ip_recipient_bank_inn: Mapped[str] = mapped_column(String(20), default="")
+    ip_recipient_bank_kpp: Mapped[str] = mapped_column(String(20), default="")
+    personal_recipient_name: Mapped[str] = mapped_column(String(180), default="")
+    personal_recipient_phone: Mapped[str] = mapped_column(String(60), default="")
+    personal_recipient_bank: Mapped[str] = mapped_column(String(180), default="")
+    notes: Mapped[str] = mapped_column(Text, default="")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, onupdate=utc_now)
+
+    objects: Mapped[list["RentalObject"]] = relationship(back_populates="payment_profile")
+    apartments: Mapped[list["Apartment"]] = relationship(back_populates="payment_profile")
+
+
 class RentalObject(Base):
     __tablename__ = "rental_objects"
 
@@ -20,10 +46,15 @@ class RentalObject(Base):
     short_code: Mapped[str] = mapped_column(String(20), default="")
     notes: Mapped[str] = mapped_column(Text, default="")
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    payment_profile_id: Mapped[int | None] = mapped_column(
+        ForeignKey("payment_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
     apartments: Mapped[list["Apartment"]] = relationship(back_populates="object", cascade="all, delete-orphan")
     services: Mapped[list["UtilityService"]] = relationship(back_populates="object", cascade="all, delete-orphan")
+    payment_profile: Mapped[PaymentProfile | None] = relationship(back_populates="objects")
 
 
 class Apartment(Base):
@@ -35,8 +66,13 @@ class Apartment(Base):
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
     odn_share_percent: Mapped[float] = mapped_column(Float, default=25.0)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    payment_profile_id: Mapped[int | None] = mapped_column(
+        ForeignKey("payment_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     object: Mapped[RentalObject] = relationship(back_populates="apartments")
+    payment_profile: Mapped[PaymentProfile | None] = relationship(back_populates="apartments")
     leases: Mapped[list["Lease"]] = relationship(back_populates="apartment")
     meters: Mapped[list["Meter"]] = relationship(back_populates="apartment")
     utility_advance_setting: Mapped["UtilityAdvanceSetting | None"] = relationship(back_populates="apartment")
