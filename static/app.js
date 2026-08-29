@@ -46,7 +46,7 @@ const panelMeta = {
   dialogs: ["Коммуникации", "Входящие диалоги"],
   messages: ["Коммуникации", "Рассылки и шаблоны"],
   automation: ["Управление", "Автоматизация"],
-  hermes: ["Hermes Core", "Центр управления ИИ"],
+  hermes: ["Hermes", "Центр управления ИИ"],
   settings: ["Система", "Настройки"],
 };
 let activeNavGroup = "overview";
@@ -73,7 +73,7 @@ const appStateLoadGroups = [
     sections: ["utility_timeline", "message_targets", "suspicious_receipts"],
     percent: 94,
     title: "Загружаю дополнительные данные",
-    detail: "Таймлайн, рассылки и чеки загружаются последними.",
+    detail: "История коммуналки, рассылки и чеки загружаются последними.",
   },
 ];
 const appStateSectionOrder = [...new Set(appStateLoadGroups.flatMap((group) => group.sections))];
@@ -366,9 +366,21 @@ function openOnboardTool() {
 function openManualPaymentTool() {
   const tool = qs("#manualPaymentTool");
   if (!tool) return;
+  tool.dataset.userOpened = "true";
   tool.open = true;
   tool.scrollIntoView({ behavior: "smooth", block: "start" });
   qs("#manualPaymentLeaseSelect")?.focus();
+}
+
+function syncResponsiveOperationalTools() {
+  const paymentTool = qs("#manualPaymentTool");
+  if (!paymentTool) return;
+  if (window.innerWidth > 680) {
+    paymentTool.open = true;
+    delete paymentTool.dataset.userOpened;
+  } else if (!paymentTool.dataset.userOpened) {
+    paymentTool.open = false;
+  }
 }
 
 function runQuickAction(action) {
@@ -855,7 +867,7 @@ function applySettings(settings = {}) {
   if (automationRentOverdue) automationRentOverdue.value = state.settings.automation_rent_overdue_cadence || "daily_evening";
   if (automationUtility) automationUtility.value = state.settings.automation_utility_cadence || "daily_evening";
   if (token) token.placeholder = state.settings.telegram_bot_token_configured ? "Токен сохранён, пустое поле = без изменений" : "Введите токен бота";
-  if (secret) secret.placeholder = state.settings.telegram_webhook_secret_configured ? "Секрет сохранён, пустое поле = без изменений" : "Введите секрет webhook";
+  if (secret) secret.placeholder = state.settings.telegram_webhook_secret_configured ? "Секрет сохранён, пустое поле = без изменений" : "Введите секрет вебхука";
   if (deepseekApiKey) deepseekApiKey.placeholder = state.settings.deepseek_api_key_configured ? "Ключ сохранён, пусто = не менять" : "Вставьте API-ключ DeepSeek";
   if (ownerPin) ownerPin.placeholder = state.settings.panel_owner_pin_code_configured ? "PIN владельца настроен" : "Задайте PIN владельца";
   if (guestPin) guestPin.placeholder = state.settings.panel_guest_pin_code_configured ? "Гостевой PIN настроен" : "Задайте гостевой PIN";
@@ -925,7 +937,7 @@ function renderTelegramStatus() {
       <span class="pill ${ipReady ? "ok" : "warn"}">ИП-реквизиты ${ipReady ? "есть" : "неполные"}</span>
       <span class="pill ${personalReady ? "ok" : "warn"}">перевод-реквизиты ${personalReady ? "есть" : "неполные"}</span>
     </div>
-    <p class="muted">${state.settings.app_base_url || "Публичный URL не задан. Telegram webhook недоступен."}</p>
+    <p class="muted">${state.settings.app_base_url || "Публичный адрес не задан. Telegram-вебхук недоступен."}</p>
   `;
 }
 
@@ -1294,6 +1306,31 @@ function hermesStatus(value) {
   }[value] || value || "—";
 }
 
+function hermesTechnicalLabel(value) {
+  const labels = {
+    active: "активно",
+    inactive: "выключено",
+    disabled: "выключено",
+    draft: "черновик",
+    global: "вся система",
+    owner: "владелец",
+    tenant: "жилец",
+    property: "объект",
+    contract: "договор",
+    manual: "вручную",
+    event: "по событию",
+    scheduled: "по расписанию",
+    schedule: "расписание",
+    deterministic: "по правилам",
+    telegram: "Telegram",
+    phone: "телефон",
+    morning: "утро",
+    daytime: "день",
+    evening: "вечер",
+  };
+  return labels[String(value || "").toLowerCase()] || value || "—";
+}
+
 function hermesEmpty(text) {
   return `<p class="muted">${escapeHtml(text)}</p>`;
 }
@@ -1354,13 +1391,13 @@ function renderHermes() {
   if (commitmentsRoot) commitmentsRoot.innerHTML = table(["ID", "Обязательство", "Статус", "Срок", "Действия"], commitmentRows);
 
   const preferenceRows = (data.preferences || []).map((item) => `
-    <tr><td>${escapeHtml(item.scope)}</td><td>${escapeHtml(item.key)}</td><td><code>${escapeHtml(JSON.stringify(item.value))}</code></td><td>${escapeHtml(item.mode)}</td><td>${item.enabled ? '<span class="pill ok">включено</span>' : '<span class="pill">выключено</span>'}</td><td><div class="attention-actions"><button class="mini" onclick="toggleHermesPreference(${item.id}, ${!item.enabled})">${item.enabled ? "Выключить" : "Включить"}</button><button class="mini danger" onclick="disableHermesPreference(${item.id})">Удалить</button></div></td></tr>
+    <tr><td>${escapeHtml(hermesTechnicalLabel(item.scope))}</td><td>${escapeHtml(item.key)}</td><td><code>${escapeHtml(JSON.stringify(item.value))}</code></td><td>${escapeHtml(hermesTechnicalLabel(item.mode))}</td><td>${item.enabled ? '<span class="pill ok">включено</span>' : '<span class="pill">выключено</span>'}</td><td><div class="attention-actions"><button class="mini" onclick="toggleHermesPreference(${item.id}, ${!item.enabled})">${item.enabled ? "Выключить" : "Включить"}</button><button class="mini danger" onclick="disableHermesPreference(${item.id})">Удалить</button></div></td></tr>
   `).join("");
   const preferencesRoot = qs("#hermesPreferences");
   if (preferencesRoot) preferencesRoot.innerHTML = table(["Область", "Ключ", "Значение", "Режим", "Статус", "Действия"], preferenceRows);
 
   const skillRows = (data.skills || []).map((item) => `
-    <tr><td><strong>${escapeHtml(item.name)}</strong><br><span class="muted">v${item.version} · ${escapeHtml(item.scope)}</span></td><td>${escapeHtml(item.goal)}</td><td>${escapeHtml(item.trigger_type)}</td><td>${escapeHtml(item.status)}</td><td><div class="attention-actions"><button class="mini" onclick="hermesSkillAction(${item.id}, 'dry-run')">Dry-run</button>${item.status === "active" ? `<button class="mini" onclick="hermesSkillAction(${item.id}, 'disable')">Выключить</button>` : `<button class="mini primary" onclick="hermesSkillAction(${item.id}, 'activate')">Включить</button>`}${item.previous_version_id ? `<button class="mini" onclick="hermesSkillAction(${item.id}, 'rollback')">Откатить</button>` : ""}</div></td></tr>
+    <tr><td><strong>${escapeHtml(item.name)}</strong><br><span class="muted">версия ${item.version} · ${escapeHtml(hermesTechnicalLabel(item.scope))}</span></td><td>${escapeHtml(item.goal)}</td><td>${escapeHtml(hermesTechnicalLabel(item.trigger_type))}</td><td>${escapeHtml(hermesTechnicalLabel(item.status))}</td><td><div class="attention-actions"><button class="mini" onclick="hermesSkillAction(${item.id}, 'dry-run')">Пробный запуск</button>${item.status === "active" ? `<button class="mini" onclick="hermesSkillAction(${item.id}, 'disable')">Выключить</button>` : `<button class="mini primary" onclick="hermesSkillAction(${item.id}, 'activate')">Включить</button>`}${item.previous_version_id ? `<button class="mini" onclick="hermesSkillAction(${item.id}, 'rollback')">Откатить</button>` : ""}</div></td></tr>
   `).join("");
   const skillsRoot = qs("#hermesSkills");
   if (skillsRoot) skillsRoot.innerHTML = table(["Навык", "Цель", "Триггер", "Статус", "Действия"], skillRows);
@@ -1372,7 +1409,7 @@ function renderHermes() {
   if (strategiesRoot) strategiesRoot.innerHTML = table(["Договор", "Канал", "Окно", "Этап", "Нарушено обещаний", "Действия"], strategyRows);
 
   const proposalRows = (data.proposals || []).map((item) => `
-    <tr><td>#${item.id}</td><td><strong>${escapeHtml(item.action_type)}</strong><br><span class="muted">${escapeHtml(item.preview)}</span><details><summary>Параметры и аудит</summary><pre class="message-preview">${escapeHtml(JSON.stringify({ actor: item.actor || item.requested_by, parameters: item.parameters, validation_error: item.error }, null, 2))}</pre></details></td><td><span class="pill ${item.safety_level >= 3 ? "danger" : item.safety_level === 2 ? "warn" : ""}">уровень ${item.safety_level}</span></td><td>${escapeHtml(hermesStatus(item.status))}</td><td>${item.status === "pending" ? `<div class="attention-actions"><button class="mini primary" onclick="decideHermesProposal(${item.id}, 'confirm', ${item.safety_level || 0})">Подтвердить</button><button class="mini danger" onclick="decideHermesProposal(${item.id}, 'reject', ${item.safety_level || 0})">Отклонить</button></div>` : escapeHtml(item.result || item.error || "—")}</td></tr>
+    <tr><td>#${item.id}</td><td><strong>${escapeHtml(hermesTechnicalLabel(item.action_type))}</strong><br><span class="muted">${escapeHtml(item.preview)}</span><details><summary>Параметры и аудит</summary><pre class="message-preview">${escapeHtml(JSON.stringify({ actor: item.actor || item.requested_by, parameters: item.parameters, validation_error: item.error }, null, 2))}</pre></details></td><td><span class="pill ${item.safety_level >= 3 ? "danger" : item.safety_level === 2 ? "warn" : ""}">уровень ${item.safety_level}</span></td><td>${escapeHtml(hermesStatus(item.status))}</td><td>${item.status === "pending" ? `<div class="attention-actions"><button class="mini primary" onclick="decideHermesProposal(${item.id}, 'confirm', ${item.safety_level || 0})">Подтвердить</button><button class="mini danger" onclick="decideHermesProposal(${item.id}, 'reject', ${item.safety_level || 0})">Отклонить</button></div>` : escapeHtml(item.result || item.error || "—")}</td></tr>
   `).join("");
   const proposalsRoot = qs("#hermesProposals");
   if (proposalsRoot) proposalsRoot.innerHTML = table(["ID", "Предложение", "Безопасность", "Статус", "Решение"], proposalRows);
@@ -1494,7 +1531,7 @@ async function showHermesRun(runId) {
   const root = qs("#hermesRunDetails");
   if (!root) return;
   root.hidden = false;
-  root.innerHTML = `<div class="section-title"><h3>Run ${escapeHtml(item.run_id)}</h3><button class="mini" onclick="this.closest('#hermesRunDetails').hidden=true">Закрыть</button></div><pre class="message-preview">${escapeHtml(JSON.stringify(item, null, 2))}</pre>`;
+  root.innerHTML = `<div class="section-title"><h3>Запуск ${escapeHtml(item.run_id)}</h3><button class="mini" onclick="this.closest('#hermesRunDetails').hidden=true">Закрыть</button></div><pre class="message-preview">${escapeHtml(JSON.stringify(item, null, 2))}</pre>`;
 }
 
 function renderAll() {
@@ -2565,6 +2602,7 @@ function renderMonthSummary(dashboard) {
 
 function renderHomeAttentionPreview(dashboard, groups = []) {
   const root = qs("#homeAttentionPreview");
+  const queueRoot = qs("#homeDecisionQueue");
   const countNode = qs("#todayDecisionCount");
   const countLabelNode = qs("#todayDecisionLabel");
   if (!root) return;
@@ -2575,7 +2613,7 @@ function renderHomeAttentionPreview(dashboard, groups = []) {
   const total = groups.length + supplementalCount;
   if (countNode) countNode.textContent = String(total);
   if (countLabelNode) countLabelNode.textContent = countLabel(total, "открытое решение", "открытых решения", "открытых решений").replace(/^\d+\s/, "");
-  const rows = groups.slice(0, 3).map((group) => {
+  const rows = groups.map((group) => {
     const debt = tenantAttentionDebtBreakdown(group);
     const amount = debt.current || debt.future;
     const location = group.hasMultipleApartments
@@ -2589,8 +2627,9 @@ function renderHomeAttentionPreview(dashboard, groups = []) {
       </button>
     `;
   });
+  const supplementalRows = [];
   if (dashboard.suspicious_receipts?.length) {
-    rows.push(`
+    supplementalRows.push(`
       <button class="home-decision-row" type="button" onclick="openMessagesTab()">
         <span class="home-decision-row__signal warn"></span>
         <span class="home-decision-row__copy"><strong>Проверить чек</strong><small>Нужно проверить: ${countLabel(dashboard.suspicious_receipts.length, "документ", "документа", "документов")}</small></span>
@@ -2598,7 +2637,28 @@ function renderHomeAttentionPreview(dashboard, groups = []) {
       </button>
     `);
   }
-  root.innerHTML = rows.slice(0, 4).join("") || `<div class="empty-state"><strong>Критичных решений нет</strong><span>Портфель работает штатно.</span></div>`;
+  if (dashboard.provider_debts?.length) {
+    supplementalRows.push(`
+      <button class="home-decision-row" type="button" onclick="openUtilitiesTab()">
+        <span class="home-decision-row__signal danger"></span>
+        <span class="home-decision-row__copy"><strong>Оплата поставщикам</strong><small>${countLabel(dashboard.provider_debts.length, "открытый счёт", "открытых счёта", "открытых счетов")}</small></span>
+        <span aria-hidden="true">›</span>
+      </button>
+    `);
+  }
+  if (dashboard.stale_readings?.length) {
+    supplementalRows.push(`
+      <button class="home-decision-row" type="button" onclick="openMetersTab()">
+        <span class="home-decision-row__signal warn"></span>
+        <span class="home-decision-row__copy"><strong>Обновить показания</strong><small>${countLabel(dashboard.stale_readings.length, "счётчик", "счётчика", "счётчиков")}</small></span>
+        <span aria-hidden="true">›</span>
+      </button>
+    `);
+  }
+  const allRows = [...rows, ...supplementalRows];
+  const empty = `<div class="empty-state"><strong>Критичных решений нет</strong><span>Портфель работает штатно.</span></div>`;
+  root.innerHTML = allRows.slice(0, 3).join("") || empty;
+  if (queueRoot) queueRoot.innerHTML = allRows.slice(0, 6).join("") || empty;
 }
 
 function renderDashboard() {
@@ -2661,6 +2721,7 @@ function renderDashboard() {
 }
 function renderMonthlyReportTray(reports = []) {
   const tray = qs("#monthlyReportTray");
+  renderReportsOverview(reports);
   if (!reports.length) {
     tray.innerHTML = `<div class="report-status report-ok"><strong>Месячные отчёты закрыты</strong><span>Открытых проблем по отчётам нет.</span></div>`;
     return;
@@ -2674,6 +2735,33 @@ function renderMonthlyReportTray(reports = []) {
       <button class="report-summary" type="button" onclick="openMonthlyReport(${report.year}, ${report.month}, '${report.kind || "full"}')">${report.quick ? "ждёт проверки · открыть отчёт" : `${monthlySeverityText(report)} · ${countLabel(report.issue_count, "проблема", "проблемы", "проблем")}`}</button>
     </article>
   `).join("");
+}
+
+function renderReportsOverview(reports = []) {
+  const root = qs("#monthlyReportDetails");
+  if (!root) return;
+  if (!reports.length) {
+    root.innerHTML = `<article class="dashboard-card"><div class="empty-state"><strong>Нерешённых вопросов нет</strong><span>Все доступные месяцы закрыты.</span></div></article>`;
+    return;
+  }
+  root.innerHTML = `
+    <article class="dashboard-card report-overview-card">
+      <div class="section-title">
+        <div><p class="eyebrow">Закрытие периода</p><h2>Нерешённые вопросы</h2></div>
+        <span>${countLabel(reports.length, "отчёт", "отчёта", "отчётов")}</span>
+      </div>
+      <div class="report-overview-list">
+        ${reports.map((report) => `
+          <button class="report-overview-row report-${report.severity}" type="button" onclick="openMonthlyReport(${report.year}, ${report.month}, '${report.kind || "full"}')">
+            <span class="report-overview-row__signal"></span>
+            <span><strong>${escapeHtml(report.title)}</strong><small>${report.quick ? "Требуется проверка" : `${monthlySeverityText(report)} · ${countLabel(report.issue_count, "вопрос", "вопроса", "вопросов")}`}</small></span>
+            <span class="pill ${report.severity === "danger" || report.severity === "critical" ? "danger" : "warn"}">${report.quick ? "проверить" : monthlySeverityText(report)}</span>
+            <span aria-hidden="true">›</span>
+          </button>
+        `).join("")}
+      </div>
+    </article>
+  `;
 }
 function monthlySeverityText(report) {
   if (report.severity === "critical") return "много проблем";
@@ -3019,7 +3107,7 @@ function renderApartmentRegistry() {
         <td>${apartment.active_tenant || '<span class="muted">нет жильца</span>'}</td>
         <td>${apartment.odn_share_percent}</td>
         <td>${apartment.utility_advance_override == null ? '<span class="muted">авто</span>' : money(apartment.utility_advance_override)}</td>
-        <td>${escapeHtml(apartment.effective_payment_profile?.name || "не определены")}${apartment.effective_payment_profile?.source === "apartment" ? '<br><span class="pill">override</span>' : '<br><span class="muted">наследование</span>'}${apartment.effective_payment_profile?.active === false ? '<br><span class="pill warn">архивный набор</span>' : ""}</td>
+        <td>${escapeHtml(apartment.effective_payment_profile?.name || "не определены")}${apartment.effective_payment_profile?.source === "apartment" ? '<br><span class="pill">свой профиль</span>' : '<br><span class="muted">унаследовано</span>'}${apartment.effective_payment_profile?.active === false ? '<br><span class="pill warn">архивный набор</span>' : ""}</td>
         <td><label class="checkbox-inline"><input type="checkbox" ${apartment.active ? "checked" : ""} onchange="toggleApartmentActive(${apartment.id}, this.checked)" /> учитывать</label></td>
         <td class="actions"><button class="mini" onclick="openApartmentEditor(${apartment.id})">Изменить</button><button class="mini" onclick="editUtilityAdvanceOverride(${apartment.id})">Аванс</button>${!apartment.active_lease_id ? `<button class="mini danger-soft" onclick="deleteApartment(${apartment.id})">Удалить</button>` : ""}</td>
       </tr>
@@ -3242,7 +3330,7 @@ function renderRentHistory() {
       <td>${formatDateTime(receipt.paid_at)}</td>
       <td>${money(receipt.amount)}</td>
       <td>${escapeHtml(receipt.channel_label || receipt.channel)}</td>
-      <td>${escapeHtml(receipt.source_label || receipt.source || "manual")}</td>
+      <td>${escapeHtml(receipt.source_label || receipt.source || "ручной ввод")}</td>
       <td>${receipt.target_label || '<span class="muted">не привязан</span>'}</td>
       <td>${statusPill(receipt.status)}</td>
       <td>${escapeHtml(receipt.notes || "")}</td>
@@ -3446,7 +3534,7 @@ function renderSuspiciousReceipts() {
         <span class="pill">${receipt.channel || "канал не определён"}</span>
         ${receipt.recipient_name ? `<span class="pill">${receipt.recipient_name}</span>` : ""}
       </div>
-      <p>${receipt.notes || "Бот засомневался и позвал владельца. Правильно сделал."}</p>
+      <p>${receipt.notes || "Документ передан владельцу для ручной проверки."}</p>
       <div class="attention-actions">
         <button class="mini" onclick="openReceiptMessage(${receipt.id}, ${receipt.lease_id || "null"}, ${receipt.tenant_id || "null"})">Открыть сообщение</button>
         ${receipt.document_url ? `<button class="mini" onclick="openReceiptDocument(${receipt.id})">Документ</button>` : ""}
@@ -3876,14 +3964,14 @@ function renderUtilityTimeline() {
   const root = qs("#utilityTimeline");
   if (!root) return;
   if (!state.utilityTimeline.length) {
-    root.innerHTML = `<article class="card"><h3>Таймлайн коммунальных услуг</h3><p class="muted">Добавьте показания и создайте расчётный период, чтобы увидеть события.</p></article>`;
+    root.innerHTML = `<article class="card"><h3>История коммунальных услуг</h3><p class="muted">Добавьте показания и создайте расчётный период, чтобы увидеть события.</p></article>`;
     return;
   }
   root.innerHTML = `
     <article class="card">
       <div class="section-title">
         <div>
-          <h3>Таймлайн коммуналки</h3>
+          <h3>История коммуналки</h3>
           <span>Один платёжный период — промежуток между двумя общедомовыми показаниями.</span>
         </div>
       </div>
@@ -4420,7 +4508,7 @@ function renderMessages() {
     <tr>
       <td>${target.object}</td>
       <td>${target.apartment}</td>
-      <td>${target.tenant}<br><span class="muted">${target.telegram || "без @username"}</span></td>
+      <td>${target.tenant}<br><span class="muted">${target.telegram || "без имени пользователя"}</span></td>
       <td>${target.linked ? '<span class="pill ok">бот знает жильца</span>' : '<span class="pill warn">ждём /start от жильца</span>'}</td>
       <td>${target.rent_charge_id ? `${statusPill(target.rent_status)}<br><span class="muted">${money(target.rent_debt)}</span><br>${compactReminderText(target.rent_reminder)}` : '<span class="muted">нет</span>'}</td>
       <td>${target.utility_line_id ? `${statusPill(target.utility_status)}<br><span class="muted">${money(target.utility_debt)}</span><br>${compactReminderText(target.utility_reminder)}` : '<span class="muted">нет</span>'}</td>
@@ -4923,17 +5011,17 @@ async function connectTelegramWebhook() {
     body: JSON.stringify({ app_base_url: window.location.origin }),
   });
   const warnings = [result.delete_warning, result.commands_warning].filter(Boolean);
-  toast(warnings.length ? `${result.description || "Webhook подключён"}; предупреждение: ${warnings[0]}` : result.description || "Webhook подключён");
+  toast(warnings.length ? `${result.description || "Вебхук подключён"}; предупреждение: ${warnings[0]}` : result.description || "Вебхук подключён");
   await loadAll({ fullScreen: true });
 }
 
 async function telegramWebhookInfo() {
   const result = await api("/api/integrations/telegram/webhook-info");
   const summary = [
-    result.url ? `URL: ${result.url}` : "Webhook пока не установлен",
+    result.url ? `Адрес: ${result.url}` : "Вебхук пока не установлен",
     result.expected_url ? `Ожидаемый URL: ${result.expected_url}` : "",
     result.url ? `Совпадает с текущим приложением: ${result.matches_expected ? "да" : "нет"}` : "",
-    result.pending_update_count ? `Pending: ${result.pending_update_count}` : "Pending: 0",
+    result.pending_update_count ? `Ожидают обработки: ${result.pending_update_count}` : "Ожидающих обновлений нет",
     result.allowed_updates?.length ? `Allowed updates: ${result.allowed_updates.join(", ")}` : "",
     result.last_error_message ? `Ошибка: ${result.last_error_message}` : "Ошибок от Telegram нет",
   ].filter(Boolean).join("\n");
@@ -5357,6 +5445,8 @@ Object.assign(window, {
 });
 
 bindEvents();
+syncResponsiveOperationalTools();
+window.addEventListener("resize", syncResponsiveOperationalTools);
 initApp().catch((error) => {
   showAuthOverlay();
   toast(error.message);

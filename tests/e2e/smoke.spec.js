@@ -13,7 +13,7 @@ test.beforeEach(async ({ page }) => {
 
 
 test("основной экран и навигация доступны", async ({ page }) => {
-  await expect(page.getByRole("heading", { name: "Состояние бизнеса" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Главная", exact: true })).toBeVisible();
   await expect(page.locator("#summaryGrid .metric")).toHaveCount(4);
   await expect(page.locator("#summaryGrid .metric-expected__values small")).toHaveCount(2);
   const handlers = await page.evaluate(() => ({
@@ -56,8 +56,7 @@ test("мобильный web сохраняет навигацию, поиск �
   await expect(page.locator(".sidebar")).toBeHidden();
   await expect(page.locator("body")).toHaveCSS("background-color", "rgb(6, 10, 18)");
   await expect(page.locator(".global-search")).toBeVisible();
-  await page.locator('.mobile-nav .nav-group[data-tab="tenants"]').click();
-  await page.locator('.section-tabs .tab[data-tab="rent"]').click();
+  await page.locator('.mobile-nav .nav-group[data-tab="rent"]').click();
   await expect(page.locator("#rent")).toBeVisible();
   await expect(page.locator("#manualPaymentTool")).toBeVisible();
 });
@@ -67,7 +66,7 @@ test("белая и неоновая темы переключаются и за
   await expect(page.locator("body")).toHaveAttribute("data-palette", "neon");
   await page.locator(".topbar [data-theme-toggle]").click();
   await expect(page.locator("body")).toHaveAttribute("data-palette", "white");
-  await expect(page.locator("body")).toHaveCSS("color", "rgb(23, 32, 51)");
+  await expect(page.locator("body")).toHaveCSS("color", "rgb(22, 26, 34)");
   await expect(page.locator(".topbar [data-theme-toggle]")).toHaveAttribute("aria-label", "Включить неоновую тему");
   const whiteThemeA11y = await new AxeBuilder({ page }).analyze();
   expect(whiteThemeA11y.violations.filter((item) => ["critical", "serious"].includes(item.impact))).toEqual([]);
@@ -86,10 +85,9 @@ test("основной экран не содержит критичных ош�
 });
 
 test("активные счета расположены выше лога коммуналки", async ({ page }) => {
-  await page.locator('.sidebar .nav-group[data-tab="meters"]').click();
-  await page.locator('.section-tabs .tab[data-tab="utilities"]').click();
+  await page.locator('.sidebar .nav-group[data-tab="utilities"]').click();
   await expect(page.locator("#utilities")).toBeVisible();
-  await expect(page.locator("#utilities > #utilityBills + #utilityTimeline")).toHaveCount(1);
+  await expect(page.locator("#utilities .pen-utility-main > #utilityBills + #utilityTimeline")).toHaveCount(1);
 });
 
 
@@ -233,7 +231,6 @@ test("редактор платежа позволяет выбрать кана
 
 test("AI settings save models, limits, auto audit and prompt adaptations", async ({ page }) => {
   await page.locator('.sidebar .nav-group[data-tab="settings"]').click();
-  await page.locator('.section-tabs .tab[data-tab="settings"]').click();
   await page.locator('.settings-nav-btn[data-settings-target="ai"]').click();
 
   const modelSelect = page.locator("#deepseekModelSelect");
@@ -268,7 +265,6 @@ test("AI settings save models, limits, auto audit and prompt adaptations", async
   await page.reload();
   await expect(page.locator("#loadingOverlay")).toBeHidden();
   await page.locator('.sidebar .nav-group[data-tab="settings"]').click();
-  await page.locator('.section-tabs .tab[data-tab="settings"]').click();
   await page.locator('.settings-nav-btn[data-settings-target="ai"]').click();
   await expect(page.locator("#deepseekModelSelect")).toHaveValue(targetModel);
   await expect(page.locator("#aiSupervisorEnabledInput")).toBeChecked();
