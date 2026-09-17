@@ -178,6 +178,7 @@ Business changes → Domain Event → Operational Case → Briefing / Proposal /
 | Preview и выставить коммуналку | owner; draft action; UI: да | Bill/group | Due date set, advances applied, messages sent per linked tenant; partial delivery reported | issue-preview/issue; high impact + confirmation |
 | Отметить оплату поставщику | owner; bill action; UI: да | Bill | provider_paid timestamp | provider-paid endpoint |
 | Принять оплату строки | owner; bill line / Android; UI: да | Amount/date/source | Receipt and line balance/status updated; advance ledger when applicable | utility-line payment endpoint |
+| Просмотреть календарь оплат | owner; Web «Коммуналка» → «Календарь оплат» | Month, rent/utility mode, selected day | Dynamic objects/apartments; occupancy, current invoice/payment state per covered day; separate drafts/advances; full-period sums in detail; horizontal scroll, archived rows retained | `GET /api/utilities/calendar`; read-only; no historic as-of reconstruction |
 | Удалить черновик счёта | owner; bill action; UI: да | Deletable bill | Permanent removal under backend constraints | `DELETE /api/utility-bills/{id}`; destructive |
 | Добавить расход | owner; Expenses / Android; UI: да | Date, scope, category, amount, funds, method, description | Personal source enters pending compensation | expenses POST |
 | Компенсировать расход | owner; expense action / Android; UI: да | Pending personal expense | compensation_status=compensated + timestamp | compensate endpoint |

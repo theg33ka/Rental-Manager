@@ -1,0 +1,38 @@
+npm notice run test:web
+npm notice run playwright test
+[WebServer] INFO:     Started server process [48104]
+[WebServer] INFO:     Waiting for application startup.
+[WebServer] {"at":"2026-09-17T15:22:04.424630+00:00","level":"info","logger":"rental_manager","message":"app_marker=progressive-boot-2026-07-05 ai_providers=deepseek deepseek_env_key_configured=false","area":"BOOT"}
+[WebServer] {"at":"2026-09-17T15:22:04.424878+00:00","level":"info","logger":"rental_manager","message":"startup_step=database_init","area":"BOOT"}
+[WebServer] {"at":"2026-09-17T15:22:04.425248+00:00","level":"info","logger":"rental_manager","message":"startup_step=schema_check","area":"BOOT"}
+[WebServer] {"at":"2026-09-17T15:22:04.457095+00:00","level":"info","logger":"rental_manager","message":"startup_step=release_seed_check","area":"BOOT"}
+[WebServer] {"at":"2026-09-17T15:22:04.540621+00:00","level":"info","logger":"rental_manager","message":"startup_step=runtime_defaults","area":"BOOT"}
+[WebServer] {"at":"2026-09-17T15:22:04.553001+00:00","level":"info","logger":"rental_manager","message":"startup_step=rent_sync","area":"BOOT"}
+[WebServer] {"at":"2026-09-17T15:22:04.575062+00:00","level":"info","logger":"rental_manager","message":"startup_step=hermes_reconcile","area":"BOOT"}
+[WebServer] {"at":"2026-09-17T15:22:04.875123+00:00","level":"info","logger":"rental_manager","message":"startup_step=ready","area":"BOOT"}
+[WebServer] INFO:     Application startup complete.
+[WebServer] INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+
+Running 14 tests using 2 workers
+
+(node:46452) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:46400) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ok  2 tests\e2e\smoke.spec.js:4:1 › черновик разделяет жильцов одной квартиры и показывает их периоды (2.1s)
+  ok  3 tests\e2e\smoke.spec.js:32:1 › основной экран и навигация доступны (2.2s)
+  ok  4 tests\e2e\smoke.spec.js:51:1 › ошибка загрузки после верного PIN не возвращает экран входа (2.2s)
+  ok  1 tests\e2e\payment-calendar.spec.js:44:1 › календарь показывает динамические объекты, проживание и суммы счёта (6.6s)
+  ok  5 tests\e2e\smoke.spec.js:70:1 › мобильный web сохраняет навигацию, поиск и неоновую палитру (2.2s)
+  ok  6 tests\e2e\payment-calendar.spec.js:77:1 › мобильный календарь прокручивается внутри окна и поддерживает светлую тему (3.5s)
+  ok  7 tests\e2e\smoke.spec.js:82:1 › белая и неоновая темы переключаются и запоминаются (4.4s)
+  ok  8 tests\e2e\payment-calendar.spec.js:94:1 › ошибка загрузки не оставляет устаревшие суммы и позволяет повторить запрос (3.0s)
+  ok  9 tests\e2e\smoke.spec.js:99:1 › основной экран не содержит критичных ошибок доступности (2.8s)
+[WebServer] {"at":"2026-09-17T15:22:24.728003+00:00","level":"warning","logger":"rental_manager.database","message":"slow query sql=SELECT app_settings.\"key\" AS app_settings_key, app_settings.value AS app_settings_value FROM app_settings WHERE app_settings.\"key\" = ?","event":"slow_query","duration_ms":1566}
+  ok 10 tests\e2e\smoke.spec.js:104:1 › активные счета расположены выше лога коммуналки (2.7s)
+  ok 11 tests\e2e\smoke.spec.js:111:1 › дашборд группирует объекты и сворачивает однотипные долги (1.3s)
+  ok 12 tests\e2e\smoke.spec.js:179:1 › ручной зачёт аренды позволяет направить платёж в коммуналку (1.3s)
+  ok 13 tests\e2e\smoke.spec.js:204:1 › редактор платежа позволяет выбрать канал коммуналки (1.6s)
+  ok 14 tests\e2e\smoke.spec.js:249:1 › AI settings save models, limits, auto audit and prompt adaptations (5.4s)
+
+  14 passed (32.6s)

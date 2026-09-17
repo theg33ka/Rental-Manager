@@ -1,0 +1,24 @@
+npm notice run test:web
+npm notice run playwright test tests/e2e/payment-calendar.spec.js
+[WebServer] INFO:     Started server process [47372]
+[WebServer] INFO:     Waiting for application startup.
+[WebServer] {"at":"2026-09-17T15:23:51.365605+00:00","level":"info","logger":"rental_manager","message":"app_marker=progressive-boot-2026-07-05 ai_providers=deepseek deepseek_env_key_configured=false","area":"BOOT"}
+[WebServer] {"at":"2026-09-17T15:23:51.365750+00:00","level":"info","logger":"rental_manager","message":"startup_step=database_init","area":"BOOT"}
+[WebServer] {"at":"2026-09-17T15:23:51.366018+00:00","level":"info","logger":"rental_manager","message":"startup_step=schema_check","area":"BOOT"}
+[WebServer] {"at":"2026-09-17T15:23:51.431519+00:00","level":"info","logger":"rental_manager","message":"startup_step=release_seed_check","area":"BOOT"}
+[WebServer] {"at":"2026-09-17T15:23:51.501800+00:00","level":"info","logger":"rental_manager","message":"startup_step=runtime_defaults","area":"BOOT"}
+[WebServer] {"at":"2026-09-17T15:23:51.512022+00:00","level":"info","logger":"rental_manager","message":"startup_step=rent_sync","area":"BOOT"}
+[WebServer] {"at":"2026-09-17T15:23:51.531762+00:00","level":"info","logger":"rental_manager","message":"startup_step=hermes_reconcile","area":"BOOT"}
+[WebServer] {"at":"2026-09-17T15:23:51.752769+00:00","level":"info","logger":"rental_manager","message":"startup_step=ready","area":"BOOT"}
+[WebServer] INFO:     Application startup complete.
+[WebServer] INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+
+Running 3 tests using 1 worker
+
+(node:46476) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ok 1 tests\e2e\payment-calendar.spec.js:44:1 › календарь показывает динамические объекты, проживание и суммы счёта (4.2s)
+  ok 2 tests\e2e\payment-calendar.spec.js:77:1 › мобильный календарь прокручивается внутри окна и поддерживает светлую тему (2.5s)
+  ok 3 tests\e2e\payment-calendar.spec.js:95:1 › ошибка загрузки не оставляет устаревшие суммы и позволяет повторить запрос (2.3s)
+
+  3 passed (13.3s)

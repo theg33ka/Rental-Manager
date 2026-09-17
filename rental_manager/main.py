@@ -130,8 +130,10 @@ from rental_manager.services.billing import (
     status_for_amount,
     update_rent_charge_status,
     update_utility_line_status,
+    utility_line_period,
 )
 from rental_manager.services.deepseek_client import DeepSeekClient, DeepSeekClientError, DeepSeekResult
+from rental_manager.services.payment_calendar import payment_calendar
 from rental_manager.services.owner_ai_tools import build_owner_read_tools_context
 from rental_manager.services.owner_operations import (
     OWNER_OPERATION_SPECS,
@@ -2710,9 +2712,10 @@ def lease_utility_advance_period(lease: Lease, advance_start: date, advance_end:
     if lease_should_skip_utility_advance(lease, advance_start, advance_end):
         return None
     line_end = min(advance_end, lease.end_date) if lease.end_date else advance_end
-    if line_end <= advance_start:
+    line_start = max(advance_start, lease.start_date)
+    if line_end <= line_start:
         return None
-    return advance_start, line_end
+    return line_start, line_end
 
 
 def sync_utility_advance_credit_for_receipt(session: Session, receipt: PaymentReceipt) -> None:
@@ -2776,6 +2779,7 @@ def serialize_bill_line(
             ).all()
         ]
     period_label = utility_line_period_label(line)
+    period_start, period_end = utility_line_period(line)
     metadata = utility_line_metadata(line)
     advance_applied = utility_advance_applied_to_line(session, line.id) if include_advance and session and line.id else 0.0
     advance_balance_available = utility_advance_balance(session, line.apartment_id) if include_advance and session and line.apartment_id else 0.0
@@ -2805,6 +2809,8 @@ def serialize_bill_line(
         "note": line.note,
         "metadata": metadata,
         "period_label": period_label,
+        "period_start": period_start.isoformat(),
+        "period_end": period_end.isoformat(),
         "payments": payments,
         "bill_period_start": line.bill.period_start.isoformat(),
         "bill_period_end": line.bill.period_end.isoformat(),
@@ -2871,7 +2877,8 @@ def utility_line_period_label(line: UtilityBillLine) -> str:
         return label
     if utility_line_is_advance(line):
         return f"аванс за {line.bill.period_start:%d.%m.%Y} -> {line.bill.period_end:%d.%m.%Y}"
-    return f"{line.bill.period_start:%d.%m.%Y} -> {line.bill.period_end:%d.%m.%Y} ({(line.bill.period_end - line.bill.period_start).days} дн.)"
+    start, end = utility_line_period(line)
+    return f"{start:%d.%m.%Y} -> {end:%d.%m.%Y} ({(end - start).days} дн.)"
 
 
 def serialize_expense(expense: Expense) -> dict[str, Any]:
@@ -5341,7 +5348,7 @@ def outstanding_tenant_utility_lines(
     for line in lines:
         update_utility_line_status(line, today)
         debt = max(0.0, line.total_amount - line.paid_amount)
-        if debt > EPS and line.due_date and line.due_date <= today and debt_visible_by_cutoff(line.due_date, cutoff):
+        if line.bill.status not in {"draft", "cancelled"} and line.status not in {"draft", "cancelled"} and debt > EPS and line.due_date and line.due_date <= today and debt_visible_by_cutoff(line.due_date, cutoff):
             result.append(line)
     return result
 
@@ -5575,12 +5582,12 @@ def build_message_context(
     if utility_lines:
         first_line = utility_lines[0]
         if len(utility_lines) == 1:
-            utility_period = f"{format_date(first_line.bill.period_start)} - {format_date(first_line.bill.period_end)}"
+            utility_period = utility_line_period_label(first_line)
             utility_service = first_line.bill.service.name
         else:
             utility_service = "коммунальные платежи"
             utility_period = "; ".join(
-                f"{format_date(item.bill.period_start)} - {format_date(item.bill.period_end)}"
+                utility_line_period_label(item)
                 for item in utility_lines
             )
 
@@ -6499,9 +6506,11 @@ def utility_message_projection_context(
             combined_lines,
         )
     visible_lines = [line for line in combined_lines if projected_debts.get(line.id, 0.0) > EPS]
+    selected_ids = {line.id for line in selected_lines}
     return {
         "utility_debt_details": "\n".join(
-            utility_message_line(line, projected_debts.get(line.id))
+            ("Начисление: " if line.id in selected_ids else "Ранее выставленный долг: ")
+            + utility_message_line(line, projected_debts.get(line.id))
             for line in visible_lines
         ),
         "utility_total": money_text(sum(projected_debts.get(line.id, 0.0) for line in visible_lines)),
@@ -6599,6 +6608,7 @@ def utility_issue_targets_for_bills(session: Session, bills: list[UtilityBill]) 
             item
             for item in outstanding_tenant_utility_lines(session, lease)
             if item.id not in {selected.id for selected in selected_lines}
+            and item.bill.service.object_id in {bill.service.object_id for bill in bills}
         ]
         combined_lines = sorted(
             [*existing_lines, *selected_lines],
@@ -6663,18 +6673,20 @@ def save_processed_move_out_keys(session: Session, values: set[str]) -> None:
 
 
 def last_lease_service_period_end(session: Session, lease: Lease, service_id: int) -> date:
-    ends = session.scalars(
-        select(UtilityBill.period_end)
-        .join(UtilityBillLine, UtilityBillLine.bill_id == UtilityBill.id)
+    lines = session.scalars(
+        select(UtilityBillLine)
+        .join(UtilityBill, UtilityBillLine.bill_id == UtilityBill.id)
         .where(
             UtilityBill.service_id == service_id,
             UtilityBillLine.lease_id == lease.id,
-            UtilityBill.status != "draft",
-            UtilityBillLine.status != "draft",
+            UtilityBill.status.notin_(["draft", "cancelled"]),
+            UtilityBill.bill_type != UTILITY_BILL_ADVANCE,
+            UtilityBillLine.status.notin_(["draft", "cancelled"]),
+            UtilityBillLine.line_type != UTILITY_LINE_ADVANCE,
         )
         .order_by(UtilityBill.period_end.desc())
     ).all()
-    return ends[0] if ends else lease.start_date
+    return max((utility_line_period(line)[1] for line in lines), default=lease.start_date)
 
 
 def existing_lease_service_line(
@@ -6779,6 +6791,7 @@ def create_move_out_utility_lines(session: Session, lease: Lease) -> tuple[list[
                     issued_at=issued_at,
                     due_date=due,
                     note=(preview_line.note or "").strip(),
+                    metadata_json=preview_line.metadata_json,
                 )
             )
         session.add(bill)
@@ -13832,6 +13845,14 @@ def utility_timeline_payload(session: Session) -> list[dict[str, Any]]:
 @app.get("/api/utilities/timeline")
 def utility_timeline(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
     return utility_timeline_payload(session)
+
+
+@app.get("/api/utilities/calendar")
+def utility_payment_calendar(start: date, end: date, mode: str = "utility", session: Session = Depends(get_session)) -> dict[str, Any]:
+    try:
+        return payment_calendar(session, start, end, mode=mode, ignored_lease_ids=ignored_lease_ids(session))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.post("/api/utility-bills/calculate")

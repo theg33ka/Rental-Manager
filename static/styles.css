@@ -1059,6 +1059,8 @@ label {
   font-size: 13px;
 }
 
+label.check[hidden] { display: none; }
+
 label.check {
   display: flex;
   align-items: center;

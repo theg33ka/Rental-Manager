@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import calendar
+import re
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -282,10 +283,33 @@ class UtilitySegment:
 
 
 def lease_for_day(leases: list[Lease], day: date) -> Lease | None:
-    for lease in leases:
-        if lease.start_date <= day and (lease.end_date is None or lease.end_date >= day):
-            return lease
-    return None
+    matches = [lease for lease in leases if lease.start_date <= day and (lease.end_date is None or lease.end_date >= day)]
+    if len(matches) > 1:
+        raise ValueError(f"Пересекаются договоры квартиры {matches[0].apartment.name} на {day:%d.%m.%Y}. Исправьте даты проживания.")
+    return matches[0] if matches else None
+
+
+def utility_line_period(line: UtilityBillLine) -> tuple[date, date]:
+    """Read structured periods, with compatibility for previously generated notes."""
+    start, end = line.bill.period_start, line.bill.period_end
+    try:
+        metadata = json.loads(line.metadata_json or "{}")
+        if isinstance(metadata, dict) and metadata.get("line_period_start") and metadata.get("line_period_end"):
+            start = date.fromisoformat(metadata["line_period_start"])
+            end = date.fromisoformat(metadata["line_period_end"])
+        else:
+            match = re.search(r"(\d{2})\.(\d{2})\.(\d{4})\s*->\s*(\d{2})\.(\d{2})\.(\d{4})", line.note or "")
+            if match:
+                d1, m1, y1, d2, m2, y2 = map(int, match.groups())
+                start, end = date(y1, m1, d1), date(y2, m2, d2)
+    except (ValueError, TypeError):
+        start, end = line.bill.period_start, line.bill.period_end
+    start, end = max(start, line.bill.period_start), min(end, line.bill.period_end)
+    if line.lease:
+        start = max(start, line.lease.start_date)
+        if line.lease.end_date and line.lease.end_date < date.max:
+            end = min(end, line.lease.end_date + timedelta(days=1))
+    return start, end
 
 
 def overlap_days(start: date, end: date, other_start: date, other_end: date) -> int:
@@ -524,6 +548,9 @@ def calculate_utility_bill(
             UtilityBill.service_id == service_id,
             UtilityBill.bill_type != "advance",
             UtilityBill.status != "draft",
+            UtilityBill.status != "cancelled",
+            UtilityBillLine.status.notin_(["draft", "cancelled"]),
+            UtilityBillLine.line_type != "advance",
             UtilityBill.period_start < period_end,
             UtilityBill.period_end > period_start,
         )
@@ -557,15 +584,16 @@ def calculate_utility_bill(
     for line in existing_lines:
         if not line.lease_id:
             continue
-        overlap_start = max(period_start, line.bill.period_start)
-        overlap_end = min(period_end, line.bill.period_end)
+        line_start, line_end = utility_line_period(line)
+        overlap_start = max(period_start, line_start)
+        overlap_end = min(period_end, line_end)
         if overlap_end <= overlap_start:
             continue
         boundaries.add(overlap_start)
         boundaries.add(overlap_end)
         covered_intervals.setdefault((line.apartment_id, line.lease_id), []).append((overlap_start, overlap_end))
-        full_days = max((line.bill.period_end - line.bill.period_start).days, 1)
-        overlap_ratio = overlap_days(period_start, period_end, line.bill.period_start, line.bill.period_end) / full_days
+        full_days = max((line_end - line_start).days, 1)
+        overlap_ratio = overlap_days(period_start, period_end, line_start, line_end) / full_days
         previously_billed_amount += line.total_amount * overlap_ratio
 
     sorted_boundaries = sorted(boundaries)
@@ -630,11 +658,11 @@ def calculate_utility_bill(
         total_share = sum(max(apartment.odn_share_percent, 0) for apartment in occupied_apartments)
 
         for apartment in occupied_apartments:
-            lease = active_leases[apartment.id]
-            assert lease is not None
+            segment_lease = active_leases[apartment.id]
+            assert segment_lease is not None
             already_covered = any(
                 interval_start <= start and interval_end >= end
-                for interval_start, interval_end in covered_intervals.get((apartment.id, lease.id), [])
+                for interval_start, interval_end in covered_intervals.get((apartment.id, segment_lease.id), [])
             )
             if already_covered:
                 billed_segment_count += 1
@@ -645,7 +673,7 @@ def calculate_utility_bill(
             segments.append(
                 UtilitySegment(
                     apartment=apartment,
-                    lease=lease,
+                    lease=segment_lease,
                     start=start,
                     end=end,
                     personal_consumption=personal,
@@ -694,6 +722,7 @@ def calculate_utility_bill(
                 total_amount=money((segment.personal_consumption + segment.odn_consumption) * average_price),
                 status="draft",
                 note=segment_label(segment.start, segment.end),
+                metadata_json=json.dumps({"line_period_start": segment.start.isoformat(), "line_period_end": segment.end.isoformat()}),
             )
         )
 

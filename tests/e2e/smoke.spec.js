@@ -1,6 +1,23 @@
 const { test, expect } = require("@playwright/test");
 const AxeBuilder = require("@axe-core/playwright").default;
 
+test("черновик разделяет жильцов одной квартиры и показывает их периоды", async ({ page }) => {
+  const result = await page.evaluate(() => {
+    const group = { object: "Белый дом", period_start: "2026-06-26", period_end: "2026-09-17", bills: [{
+      id: 999, service: "Вода", bill_type: "utility", lines: [
+        { apartment_id: 3, apartment: "БД3", lease_id: 1, tenant: "Прежний жилец", total_amount: 740, advance_balance_available: 100, period_label: "26.06.2026 -> 08.09.2026", status: "draft" },
+        { apartment_id: 3, apartment: "БД3", lease_id: 2, tenant: "Новая жилица", total_amount: 20, advance_balance_available: 100, period_label: "15.09.2026 -> 17.09.2026", status: "draft" },
+      ],
+    }] };
+    return { rows: groupedDraftRows(group).map(row => ({ tenant: row.tenant, fact: row.fact, advance: row.advanceImpact })), html: renderGroupedDraftCard(group) };
+  });
+  expect(result.rows).toHaveLength(2);
+  expect(result.rows.map(row => row.fact)).toEqual([740, 20]);
+  expect(result.rows.reduce((sum, row) => sum + row.advance, 0)).toBe(-100);
+  expect(result.html).toContain("26.06.2026 -&gt; 08.09.2026");
+  expect(result.html).toContain("15.09.2026 -&gt; 17.09.2026");
+});
+
 
 test.beforeEach(async ({ page }) => {
   await page.goto("/");

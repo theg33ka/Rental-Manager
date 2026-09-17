@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "test:web": "playwright test",
-    "check:js": "node --check static/app.js && node --input-type=module --check < static/js/api.js && node --input-type=module --check < static/js/bootstrap.js"
+    "check:js": "node --check static/app.js && node --input-type=module --check < static/js/api.js && node --input-type=module --check < static/js/bootstrap.js && node --input-type=module --check < static/js/payment-calendar.js"
   },
   "devDependencies": {
     "@axe-core/playwright": "4.10.2",

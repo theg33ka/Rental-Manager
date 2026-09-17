@@ -230,6 +230,7 @@ function restoreModalFocus(root) {
 }
 
 function showAuthOverlay() {
+  window.RentalPaymentCalendar?.close();
   hideLoadingOverlay();
   document.body.classList.add("auth-locked");
   const overlay = qs("#authOverlay");
@@ -1117,6 +1118,7 @@ async function refreshAfterMutation(sections = mutationRefreshSections) {
       silentRefreshSections.clear();
       await loadAppStateSilently(selected);
     }
+    window.RentalPaymentCalendar?.refreshIfOpen();
   })()
     .catch((error) => {
       toast(`Данные сохранены, но экран не дообновился: ${error.message}`);
@@ -3771,7 +3773,8 @@ function groupedDraftRows(group) {
   const rows = new Map();
   group.bills.forEach((bill) => {
     (bill.lines || []).forEach((line) => {
-      const row = rows.get(line.apartment_id) || {
+      const rowKey = `${line.apartment_id}:${line.lease_id || "none"}`;
+      const row = rows.get(rowKey) || {
         apartment_id: line.apartment_id,
         apartment: line.apartment,
         tenant: line.tenant || "без жильца",
@@ -3780,8 +3783,10 @@ function groupedDraftRows(group) {
         advanceBalance: 0,
         advanceCharge: 0,
         statuses: new Set(),
+        periods: new Set(),
       };
       row.statuses.add(line.status);
+      if (line.period_label) row.periods.add(`${bill.service}: ${line.period_label}`);
       if (line.line_type === "advance") {
         row.advanceBalance = Math.max(row.advanceBalance, Number(line.advance_balance_before || line.advance_balance_available || 0));
         row.advanceCharge += Number(line.total_amount || 0);
@@ -3791,12 +3796,16 @@ function groupedDraftRows(group) {
         row.paid += Number(line.paid_amount || 0);
         row.advanceBalance = Math.max(row.advanceBalance, Number(line.advance_balance_available || 0));
       }
-      rows.set(line.apartment_id, row);
+      rows.set(rowKey, row);
     });
   });
+  const remainingAdvance = new Map();
+  rows.forEach((row) => remainingAdvance.set(row.apartment_id, Math.max(remainingAdvance.get(row.apartment_id) || 0, row.advanceBalance)));
   return [...rows.values()]
     .map((row) => {
-      const advanceImpact = -Math.min(Math.max(row.advanceBalance, 0), Math.max(row.fact, 0));
+      const available = remainingAdvance.get(row.apartment_id) || 0;
+      const advanceImpact = -Math.min(Math.max(available, 0), Math.max(row.fact - row.paid, 0));
+      remainingAdvance.set(row.apartment_id, available + advanceImpact);
       const total = Math.max(0, row.fact + advanceImpact) + row.advanceCharge;
       return {
         ...row,
@@ -3813,7 +3822,7 @@ function renderGroupedDraftCard(group) {
   const rows = groupedRows.map((row) => `
     <tr>
       <td>${escapeHtml(row.apartment)}</td>
-      <td><strong>${escapeHtml(row.tenant)}</strong></td>
+      <td><strong>${escapeHtml(row.tenant)}</strong><br><span class="muted">${[...row.periods].map(escapeHtml).join("<br>")}</span></td>
       <td>${money(row.fact)}</td>
       <td>${row.advanceImpact ? money(row.advanceImpact) : '<span class="muted">0 ₽</span>'}</td>
       <td>${money(row.advanceCharge)}</td>
@@ -5130,6 +5139,8 @@ async function initApp() {
 }
 
 function bindEvents() {
+  window.RentalPaymentCalendar = window.createPaymentCalendar({ api, today: appToday, openModal: openAccessibleModal, restoreFocus: restoreModalFocus, escapeHtml, money });
+  on("#openPaymentCalendarBtn", "click", () => { if (isOwner()) window.RentalPaymentCalendar.open(); });
   qsa(".tab").forEach((tab) => {
     tab.addEventListener("click", () => {
       if (tab.dataset.group !== activeNavGroup) activateNavGroup(tab.dataset.group, false);
