@@ -18,7 +18,7 @@ from rental_manager.database import Base
 from rental_manager.main import apartment_month_state, bot_dialog_messages_payload, build_all_debts_breakdown, build_dashboard, create_manual_payment, create_move_out_utility_lines, create_utility_bill, delete_utility_bill, ensure_utility_advance_drafts_for_bills, expense_period_summary, issue_utility_bill, month_dashboard_summary, move_out, owner_charge_status_label, owner_expected_ip_for_charge, panel_role_for_pin, payment_receipt_document, preview_issue_utility_bill, process_move_out_notifications, provider_reading_statuses_for_month, render_message_text, rent_report, resolve_broadcast_recipients, tenant_payment_history, transfer_lease, update_payment_receipt, utility_bill_for_month, utility_bills_payload
 from rental_manager.main import apply_database_import_payload, current_database_snapshot, inspect_database_import_payload, parse_database_import_bytes
 from rental_manager.main import api_performance, app_state, record_perf_request
-from rental_manager.main import dashboard_income_trend
+from rental_manager.main import dashboard_income_trend, utility_message_line
 from rental_manager.models import AiConversation, AiMessage, AppSetting, Apartment, Expense, Lease, MessageLog, Meter, MeterReading, PaymentReceipt, RentalObject, RentCharge, Tenant, UtilityAdvanceLedger, UtilityBill, UtilityBillLine, UtilityService, Tariff
 from rental_manager.services.billing import (
     IGNORE_LEASE_MARK,
@@ -1847,6 +1847,52 @@ class DashboardCutoffTests(DatabaseTestCase):
 
 
 class UtilityAdvanceTests(DatabaseTestCase):
+    def test_group_message_without_advance(self) -> None:
+        self._check_group_message(0)
+
+    def test_group_message_with_partial_advance(self) -> None:
+        self._check_group_message(600)
+
+    def test_group_message_with_fully_covered_services(self) -> None:
+        self._check_group_message(1600)
+
+    def _check_group_message(self, balance: float) -> None:
+        with self.Session() as session:
+            lease, bill, electricity = self._seed_bill(session)
+            lines = [electricity]
+            for name, kind in [("Вода", "water"), ("Газ", "gas")]:
+                service = UtilityService(object=lease.apartment.object, name=name, kind=kind,
+                                         provider_due_day=24, resident_due_days=7, active=True)
+                other = UtilityBill(service=service, period_start=bill.period_start,
+                                    period_end=bill.period_end, status="draft", total_cost=500)
+                line = UtilityBillLine(apartment=lease.apartment, lease=lease,
+                                       total_amount=500, paid_amount=0, status="draft")
+                other.lines.append(line)
+                session.add(other)
+                lines.append(line)
+            session.flush()
+            if balance:
+                create_manual_payment({"lease_id": lease.id, "kind": "utility_advance",
+                                       "amount": balance, "paid_at": "2026-06-10T12:00:00"}, session=session)
+            session.add(AppSetting(key="telegram_tenant_links", value=json.dumps({str(lease.tenant_id): "100"})))
+            session.commit()
+            text = preview_issue_utility_bill(bill.id, session=session)["targets"][0]["text"]
+            if balance:
+                amount_text = "600,00 ₽" if balance == 600 else "1 600,00 ₽"
+                self.assertIn(f"Аванс на момент выставления: {amount_text}", text)
+                self.assertIn(f"Всего зачтено: {amount_text}", text)
+            else:
+                self.assertNotIn("Аванс на момент выставления:", text)
+            with patch("rental_manager.main.send_telegram_text", return_value={"ok": True}) as send:
+                issued = issue_utility_bill(bill.id, session=session)
+            self.assertEqual(send.call_args.args[2], text)
+            self.assertEqual(issued["applied_advances"], balance)
+            for line in lines:
+                session.refresh(line)
+                if line.paid_amount:
+                    self.assertIn("Зачтено из аванса: " + utility_message_line(line, line.paid_amount), text)
+            if balance:
+                self.assertIn("Остаток аванса после зачёта начислений: 0,00 ₽", text)
     def _seed_bill(self, session, total_amount: float = 1000) -> tuple[Lease, UtilityBill, UtilityBillLine]:
         rental_object = RentalObject(name="Дом авансов", short_code="ДА")
         apartment = Apartment(name="ДА1", sort_order=1, odn_share_percent=100, active=True, object=rental_object)
@@ -1992,6 +2038,7 @@ class UtilityAdvanceTests(DatabaseTestCase):
             expected_text = preview["targets"][0]["text"]
 
             self.assertIn("электричество за период", expected_text.lower())
+            self.assertIn("Аванс на момент выставления: 3 000,00 ₽", expected_text)
             self.assertIn("аванс коммуналки на следующий период", expected_text.lower())
             self.assertIn("списано 2 000,00 ₽", expected_text)
             self.assertIn("Осталось в авансе: 1 000,00 ₽", expected_text)

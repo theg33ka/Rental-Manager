@@ -6477,7 +6477,10 @@ def projected_utility_debts_for_issue_preview(
     selected_ids = {line.id for line in selected_lines}
     balance_by_apartment: dict[int, float] = {}
     projected: dict[int, float] = {}
-    for line in combined_lines:
+    for line in sorted(combined_lines, key=lambda item: (
+        item.bill.period_start, item.bill.id, item.lease_id or 0,
+        item.due_date or item.bill.due_date or item.bill.period_end, item.id,
+    )):
         debt = utility_line_debt_amount(line)
         if (
             line.id in selected_ids
@@ -6507,12 +6510,31 @@ def utility_message_projection_context(
         )
     visible_lines = [line for line in combined_lines if projected_debts.get(line.id, 0.0) > EPS]
     selected_ids = {line.id for line in selected_lines}
+    details = [
+        ("Начисление: " if line.id in selected_ids else "Ранее выставленный долг: ")
+        + utility_message_line(line, projected_debts.get(line.id))
+        for line in visible_lines
+    ]
+    for apartment_id in sorted({line.apartment_id for line in selected_lines}):
+        balance = utility_advance_balance(session, apartment_id)
+        if balance <= EPS:
+            continue
+        allocations = [
+            (line, money(utility_line_debt_amount(line) - projected_debts.get(line.id, 0.0)))
+            for line in combined_lines
+            if line.id in selected_ids and line.apartment_id == apartment_id
+            and not utility_line_is_advance(line)
+        ]
+        details.extend(["", f"Аванс на момент выставления: {money_text(balance)}."])
+        details.extend(
+            "Зачтено из аванса: " + utility_message_line(line, amount)
+            for line, amount in allocations if amount > EPS
+        )
+        applied = money(sum(amount for _, amount in allocations if amount > EPS))
+        details.append(f"Всего зачтено: {money_text(applied)}.")
+        details.append(f"Остаток аванса после зачёта начислений: {money_text(balance - applied)}.")
     return {
-        "utility_debt_details": "\n".join(
-            ("Начисление: " if line.id in selected_ids else "Ранее выставленный долг: ")
-            + utility_message_line(line, projected_debts.get(line.id))
-            for line in visible_lines
-        ),
+        "utility_debt_details": "\n".join(details),
         "utility_total": money_text(sum(projected_debts.get(line.id, 0.0) for line in visible_lines)),
         "utility_debt_count": str(len(visible_lines)),
     }
@@ -6579,6 +6601,7 @@ def fully_advance_covered_utility_message(
         "Сформированы счета по коммунальным платежам:\n"
         + "\n".join(details)
         + "\n\n"
+        + f"Аванс на момент выставления: {money_text(advance_balance)}.\n"
         + f"Из ранее внесённого аванса списано {money_text(covered_total)}. "
         + f"Осталось в авансе: {money_text(remaining)}.\n"
         + "Доплачивать сейчас ничего не нужно."
