@@ -28,9 +28,11 @@ Web-панель является текущей полной поверхнос
 
 ## Android
 
+Архив договоров сохраняет долги и историю, отключая сообщения и автоначисления. Новые коммунальные начисления округляются вверх до 10 ₽ по каждой услуге. В диалогах сохраняются Telegram-автоответы и доступна вся сохранённая история.
+
 - package: `ru.rentalmanager.mobile`;
-- `versionCode`: `7`;
-- `versionName`: `0.1.6`;
+- `versionCode`: `8`;
+- `versionName`: `0.1.7`;
 - SDK 35, min API 23 в custom build script;
 - versioned APK создаётся как `android/RentalManager/build/rental-manager-mobile-<versionName>.apk` и игнорируется Git.
 

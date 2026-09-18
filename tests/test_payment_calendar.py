@@ -92,7 +92,7 @@ class PaymentCalendarTests(DatabaseTestCase):
             self.line(session, apartment, lease, service, "2026-09-01", "2026-09-08", status="cancelled")
             self.assertEqual(self.calendar(session)["objects"][0]["apartments"][0]["days"][0]["status"], "recent")
             ignored = self.calendar(session, ignored_lease_ids={lease.id})["objects"][0]["apartments"][0]
-            self.assertEqual(ignored["days"][0]["status"], "vacant")
+            self.assertEqual(ignored["days"][0]["status"], "recent")
             self.assertFalse(ignored["active"])
             session.add(Lease(apartment=apartment, tenant=Tenant(full_name="Пересекающийся договор"), start_date=date(2026, 9, 2), payment_day=2))
             session.flush()

@@ -248,6 +248,12 @@ OWNER_OPERATION_SPECS: dict[str, dict[str, Any]] = {
         "optional": [],
         "steps": ["проверить расход", "пометить его компенсированным и сохранить дату"],
     },
+    "credit_expense_rent": {
+        "label": "зачесть расход в ИП-аренду",
+        "required": ["expense_id"],
+        "optional": [],
+        "steps": ["проверить расход и договор на его дату", "зачесть остаток в ИП-платежи без повторного зачёта"],
+    },
     "accept_monthly_report": {
         "label": "принять месячный отчёт",
         "required": ["year", "month"],

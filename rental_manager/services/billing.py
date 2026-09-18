@@ -5,6 +5,7 @@ import calendar
 import re
 from dataclasses import dataclass
 from datetime import date, timedelta
+from decimal import Decimal, ROUND_CEILING
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, joinedload
@@ -41,6 +42,10 @@ def parse_date(value: str | date | None, default: date | None = None) -> date:
 
 def money(value: float) -> float:
     return round(float(value or 0), 2)
+
+
+def utility_amount(value: float) -> float:
+    return float((Decimal(str(money(value))) / 10).to_integral_value(rounding=ROUND_CEILING) * 10)
 
 
 def status_for_amount(due: float, paid: float) -> str:
@@ -719,7 +724,7 @@ def calculate_utility_bill(
                 lease_id=segment.lease.id,
                 personal_consumption=money(segment.personal_consumption),
                 odn_consumption=money(segment.odn_consumption),
-                total_amount=money((segment.personal_consumption + segment.odn_consumption) * average_price),
+                total_amount=utility_amount((segment.personal_consumption + segment.odn_consumption) * average_price),
                 status="draft",
                 note=segment_label(segment.start, segment.end),
                 metadata_json=json.dumps({"line_period_start": segment.start.isoformat(), "line_period_end": segment.end.isoformat()}),

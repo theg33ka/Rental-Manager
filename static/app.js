@@ -3079,7 +3079,7 @@ function renderLeases() {
       <td>${lease.payment_day}</td>
       <td>${money(lease.ip_amount)} / ${money(lease.personal_amount)}</td>
       <td>${lease.deposit_amount ? `${money(lease.deposit_amount)}<br><span class="muted">${lease.deposit_location || ""}</span>` : "нет"}</td>
-      <td>${statusPill(lease.active ? "issued" : "paid")}${lease.ignored ? '<br><span class="pill warn">только информация</span>' : ""}${lease.apartment_active ? "" : '<br><span class="pill warn">квартира выключена</span>'}</td>
+      <td>${statusPill(lease.active ? "issued" : "paid")}${lease.ignored ? '<br><span class="pill warn">архив</span>' : ""}${lease.apartment_active ? "" : '<br><span class="pill warn">квартира выключена</span>'}</td>
       <td class="actions">
         ${contactButtons(lease)}
         <button class="mini" onclick="startLeaseEdit(${lease.id})">Изменить</button>
@@ -3087,7 +3087,7 @@ function renderLeases() {
         <details class="action-menu">
           <summary>Ещё</summary>
           <div>
-            <label class="checkbox-inline"><input type="checkbox" ${lease.ignored ? "checked" : ""} onchange="toggleLeaseIgnored(${lease.id}, this.checked)" /> Только информация</label>
+            <label class="checkbox-inline"><input type="checkbox" ${lease.ignored ? "checked" : ""} onchange="toggleLeaseIgnored(${lease.id}, this.checked)" /> Архив</label>
             <button class="mini" onclick="transferLease(${lease.id})">${lease.active ? "Оформить переезд" : "Повторить переезд"}</button>
             ${lease.active ? `<button class="mini danger-soft" onclick="moveOut(${lease.id})">Оформить выезд</button>` : ""}
             <button class="mini danger-soft" onclick="deleteLease(${lease.id})">Удалить договор</button>
@@ -3195,7 +3195,7 @@ async function toggleLeaseIgnored(leaseId, ignored) {
       body: JSON.stringify({ ignored }),
     });
     await refreshBootstrap();
-    toast(ignored ? "Договор выключен из контроля" : "Договор снова участвует в контроле");
+    toast(ignored ? "Договор в архиве: долги сохранены" : "Договор возвращён из архива");
   } catch (error) {
     await refreshBootstrap();
     toast(error.message);
@@ -4171,10 +4171,17 @@ function renderExpenses() {
       <td>${expenseSourceLabel(expense.source_funds)}</td>
       <td>${statusPill(expense.compensation_status === "compensated" ? "paid" : expense.compensation_status === "pending" ? "partial" : "issued")}</td>
       <td>${expense.description || ""}</td>
-      <td class="actions">${expense.compensation_status !== "compensated" && expense.source_funds === "personal" ? `<button class="mini primary" onclick="compensateExpense(${expense.id})">Компенсировано</button>` : ""}</td>
+      <td class="actions">${expense.compensation_status !== "compensated" && expense.source_funds === "personal" ? `<button class="mini primary" onclick="compensateExpense(${expense.id})">Компенсировано</button>` : ""}${expense.source_funds === "rental_budget" ? (Number(expense.rent_credit_amount || 0) >= Number(expense.amount) ? '<span class="pill ok">Зачтено в аренду</span>' : `<button class="mini primary" onclick="creditExpenseRent(${expense.id})">Зачесть в ИП</button>`) : ""}</td>
     </tr>
   `).join("");
   qs("#expenseList").innerHTML = `${summary}${table(["Дата", "Объект", "Квартира", "Категория", "Сумма", "Источник", "Компенсация", "Описание", "Действия"], rows)}`;
+}
+
+async function creditExpenseRent(id) {
+  if (!confirm("Зачесть расход в ИП-аренду за месяц расхода? Остаток перейдёт в следующие ИП-платежи.")) return;
+  await api(`/api/expenses/${id}/credit-rent`, { method: "POST" });
+  toast("Расход зачтён в ИП-аренду");
+  await loadAll();
 }
 
 function botDialogById(dialogId = state.selectedBotDialogId) {
@@ -5382,6 +5389,7 @@ window.addEventListener("error", (event) => {
 });
 
 Object.assign(window, {
+  creditExpenseRent,
   acceptMonthlyReport,
   cancelPaymentReceiptEdit,
   clearIssueBillPreview,

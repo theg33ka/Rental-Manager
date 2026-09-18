@@ -467,7 +467,45 @@ class UtilityBillingTests(DatabaseTestCase):
         self.assertEqual(len(bill.lines), 1)
         self.assertEqual(bill.lines[0].personal_consumption, 100.0)
         self.assertEqual(bill.lines[0].odn_consumption, 1100.0)
-        self.assertEqual(bill.lines[0].total_amount, 5016.0)
+        self.assertEqual(bill.lines[0].total_amount, 5020.0)
+
+    def test_each_utility_service_rounds_tenant_amount_but_not_provider_cost(self) -> None:
+        with self.seed() as session:
+            apartment = session.get(Apartment, 1)
+            self._lease(session, apartment)
+            for kind in ("water", "gas"):
+                service = UtilityService(object_id=apartment.object_id, name=kind, kind=kind)
+                session.add(service)
+                session.flush()
+                session.add_all([
+                    Tariff(service_id=service.id, starts_on=date(2026, 1, 1), tiers_json='[{"limit": null, "price": 1}]'),
+                    Meter(service_id=service.id, object_id=apartment.object_id, scope="object", name=kind),
+                    Meter(service_id=service.id, object_id=apartment.object_id, apartment_id=apartment.id, scope="apartment", name=kind),
+                ])
+            session.flush()
+            services = session.scalars(select(UtilityService).where(UtilityService.object_id == apartment.object_id)).all()
+            self.assertGreaterEqual(len(services), 2)
+            for service in services:
+                with self.subTest(service=service.kind):
+                    self._read_all_meters(session, service, object_start=1000, object_end=1123.2,
+                                          apartment_end_values={apartment.id: 110})
+                    bill, _ = calculate_utility_bill(session, service.id, date(2026, 4, 1), date(2026, 5, 1), allow_estimate=False)
+                    amount = bill.lines[0].total_amount
+                    self.assertEqual(amount % 10, 0)
+                    self.assertGreaterEqual(amount, bill.total_cost)
+                    self.assertLess(amount - bill.total_cost, 10)
+
+    def test_archived_contract_gets_no_new_utility_lines(self) -> None:
+        with self.seed() as session:
+            apartment = session.get(Apartment, 1)
+            lease = self._lease(session, apartment)
+            lease.notes = IGNORE_LEASE_MARK
+            session.flush()
+            service = session.scalar(select(UtilityService).where(UtilityService.object_id == apartment.object_id))
+            self._read_all_meters(session, service, object_start=1000, object_end=1123.2,
+                                  apartment_end_values={apartment.id: 110})
+            bill, _ = calculate_utility_bill(session, service.id, date(2026, 4, 1), date(2026, 5, 1), allow_estimate=False)
+            self.assertEqual(bill.lines, [])
 
     def test_issued_advance_does_not_block_electricity_bill(self) -> None:
         with self.seed() as session:
@@ -519,7 +557,7 @@ class UtilityBillingTests(DatabaseTestCase):
 
         self.assertEqual(warnings, [])
         self.assertEqual(len(bill.lines), 1)
-        self.assertEqual(bill.lines[0].total_amount, 5016.0)
+        self.assertEqual(bill.lines[0].total_amount, 5020.0)
 
     def test_single_service_recalculation_keeps_other_drafts_in_advance_forecast(self) -> None:
         with self.seed() as session:
@@ -576,7 +614,7 @@ class UtilityBillingTests(DatabaseTestCase):
             )
 
         self.assertEqual(len(result["advance_bills"]), 1)
-        self.assertEqual(result["advance_bills"][0]["lines"][0]["total_amount"], 5516.0)
+        self.assertEqual(result["advance_bills"][0]["lines"][0]["total_amount"], 5520.0)
 
     def test_utility_bill_fails_when_apartment_consumption_exceeds_object(self) -> None:
         with self.seed() as session:
@@ -1736,7 +1774,7 @@ class DashboardCutoffTests(DatabaseTestCase):
         self.assertIn("10 000,00 ₽", debt_message)
         self.assertIn("2 500,00 ₽", debt_message)
 
-    def test_apartment_month_state_skips_ignored_lease(self) -> None:
+    def test_apartment_month_state_preserves_archived_lease(self) -> None:
         with self.Session() as session:
             rental_object = RentalObject(name="Дом-игнор", short_code="ДИ")
             apartment = Apartment(name="ДИ1", sort_order=1, odn_share_percent=100, active=True, object=rental_object)
@@ -1756,10 +1794,10 @@ class DashboardCutoffTests(DatabaseTestCase):
 
             state = apartment_month_state(apartment, date(2026, 4, 1), date(2026, 4, 30))
 
-        self.assertEqual(state["tenant_names"], "нет жильца")
-        self.assertTrue(state["vacant_full"])
+        self.assertEqual(state["tenant_names"], "Старая арендаторша")
+        self.assertFalse(state["vacant_full"])
 
-    def test_rent_report_hides_ignored_lease_charge(self) -> None:
+    def test_rent_report_preserves_archived_lease_charge(self) -> None:
         with self.Session() as session:
             rental_object = RentalObject(name="Дом-отчёт", short_code="ДО")
             apartment = Apartment(name="ДО1", sort_order=1, odn_share_percent=100, active=True, object=rental_object)
@@ -1792,7 +1830,7 @@ class DashboardCutoffTests(DatabaseTestCase):
         workbook = load_workbook(BytesIO(workbook_bytes))
         sheet = workbook["Аренда"]
         values = [cell for row in sheet.iter_rows(values_only=True) for cell in row if isinstance(cell, str)]
-        self.assertNotIn("Лишний хвост", values)
+        self.assertIn("Лишний хвост", values)
 
     def test_dashboard_ignores_debts_before_cutoff_date(self) -> None:
         with self.Session() as session:
@@ -2194,7 +2232,7 @@ class UtilityAdvanceTests(DatabaseTestCase):
             session.add(AppSetting(key="telegram_tenant_links", value=json.dumps({str(lease.tenant_id): "100", str(second_tenant.id): "200"})))
             session.commit()
 
-            def fake_send(_session, chat_id, _text, _keyboard=None):
+            def fake_send(_session, chat_id, _text, _keyboard=None, **_kwargs):
                 if str(chat_id) == "200":
                     raise HTTPException(400, "Telegram API sendMessage failed: Not Found")
                 return {"ok": True}

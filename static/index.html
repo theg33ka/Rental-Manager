@@ -424,7 +424,7 @@
           <label>Личный перевод<input type="number" min="0" step="0.01" name="personal_amount" /></label>
           <label>Залог<input type="number" min="0" step="0.01" name="deposit_amount" /></label>
           <label>Где хранится залог<input name="deposit_location" /></label>
-          <label class="checkbox-inline"><input type="checkbox" name="ignored" /> Только для информации</label>
+          <label class="checkbox-inline" title="Долги и история сохраняются. Сообщения и автоначисления отключены."><input type="checkbox" name="ignored" /> Архив</label>
           <label class="wide">Условия залога<textarea name="deposit_terms" rows="2"></textarea></label>
           <label class="wide">Комментарий<textarea name="notes" rows="2"></textarea></label>
             <button id="onboardSubmitBtn" class="primary wide" type="submit">Заселить</button>
@@ -499,7 +499,7 @@
         <div id="paymentProfileRegistry" class="stack"></div>
         <div id="informationalLeases" hidden>
           <div class="section-title">
-            <div><p class="eyebrow">Жильцы</p><h2>Только для информации</h2></div>
+            <div><p class="eyebrow">Жильцы</p><h2>Архив</h2></div>
             <span>Контакты и условия договоров</span>
           </div>
           <div id="informationalLeaseList" class="table-wrap"></div>
@@ -645,6 +645,7 @@
           <label>Категория<input name="category" placeholder="ремонт, реклама..." /></label>
           <label>Сумма<input type="number" min="0" step="0.01" name="amount" required /></label>
           <label>Источник<select name="source_funds"><option value="personal">личные</option><option value="rental_budget">арендный бюджет</option><option value="other">другое</option></select></label>
+          <p class="muted wide">Арендный бюджет: выберите квартиру жильца. Расход зачтётся в ИП-аренду за месяц расхода, остаток — в следующие ИП-платежи.</p>
           <label>Способ оплаты<input name="payment_method" /></label>
           <label class="wide">Описание<textarea name="description" rows="2"></textarea></label>
             <button class="primary wide" type="submit">Добавить расход</button>
@@ -1072,7 +1073,7 @@
     <div id="quickActionsModal" class="modal-shell" hidden></div>
     <div id="portfolioEditorModal" class="modal-shell" hidden></div>
     <div id="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/static/js/bootstrap.js?v=2026-09-18-transfer-v1"></script>
+    <script type="module" src="/static/js/bootstrap.js?v=2026-09-18-archive-dialogs-v1"></script>
   </body>
 </html>
 

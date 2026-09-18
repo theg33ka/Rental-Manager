@@ -84,7 +84,7 @@ Android aliases return the same representation and permissions as corresponding 
 | `POST /api/leases/{id}/cadence` | Owner | Set per-template cadence | cadence map → effective settings | Supported cadence/template only |
 | `DELETE /api/leases/{id}/cadence` | Owner | Clear per-lease overrides | id → global effective cadence | Soft reset |
 | `PATCH /api/leases/{id}/automation` | Owner | Set lease automation controls | flags/cadence payload → lease automation view | 404/allowed values |
-| `PATCH /api/leases/{id}/ignore` | Owner | Include/exclude lease from calculations | ignored boolean → lease | Uses explicit marker/internal state; financial dashboards recalc |
+| `PATCH /api/leases/{id}/ignore` | Owner | Archive/unarchive a lease | ignored boolean → lease | Archive stops messages and new automatic charges; existing debt, payments, calendar and reports remain visible |
 
 ## 4. Telegram, messages and reminders
 
@@ -99,7 +99,7 @@ Android aliases return the same representation and permissions as corresponding 
 | `POST /api/messages/send` | Owner | Send one tenant message | same target + text/template → MessageLog | Unlinked chat/length/provider failures |
 | `POST /api/messages/broadcast` | Owner | Broadcast to selected/all tenants | all or lease_ids + text → sent/failed/skipped arrays | Dedupes chats, skips unlinked; bulk result |
 | `GET /api/bot-dialogs` | Owner | List owner/tenant dialogues | — → dialog summaries/unread/latest | AiConversation/MessageLog representation |
-| `GET /api/bot-dialogs/{id}/messages` | Owner | Open dialogue timeline | limit → messages | 404/limit bounds |
+| `GET /api/bot-dialogs/{id}/messages` | Owner | Open full saved dialogue including automatic replies | optional limit → messages | Without limit returns all saved messages across tenant contracts; explicit limit bounded to 20–220 |
 | `POST /api/bot-dialogs/{id}/send` | Owner | Reply in dialogue | text → saved/sent message | Max Telegram length, link required, provider failure recorded |
 | `POST /api/reminders/run` | Owner | Run due reminders now | — → sent/skipped duplicate/legacy/unlinked/failed | Cutoff, global/per-lease cadence, PaymentSituation pause, daily suppression |
 
@@ -186,7 +186,8 @@ Public create operations for UtilityService and Meter do not exist; current crea
 | Method / path | Auth | Purpose | Request → response | Validation / entities / capability |
 | --- | --- | --- | --- | --- |
 | `GET /api/expenses` | Owner | List expenses | limit, offset → expenses | Pagination bounds; newest first |
-| `POST /api/expenses` | Owner | Create expense | date, object/apartment, category, amount, funds, method, description/file/note → expense | Positive amount, valid optional scope; personal→pending, other→not_required |
+| `POST /api/expenses` | Owner | Create expense | date, object/apartment, category, amount, funds, method, description/file/note → expense | rental_budget requires an unambiguous apartment lease on expense date; atomically credits IP rent from that month forward; personal→pending |
+| `POST /api/expenses/{id}/credit-rent` | Owner | Credit existing rental-budget expense | id → ok, credited | Idempotent; IP only; overflow to following IP payments; no duplicate expense |
 | `POST /api/expenses/{id}/compensate` | Owner | Mark compensation | id → expense | 404; timestamp/status transition |
 
 ## 10. Reports

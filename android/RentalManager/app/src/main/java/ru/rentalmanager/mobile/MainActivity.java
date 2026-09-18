@@ -1687,7 +1687,7 @@ public class MainActivity extends Activity {
                 card.addView(label("ИП " + money(lease.optDouble("ip_amount")) + " · перевод " + money(lease.optDouble("personal_amount")), 14, muted, false));
                 LinearLayout actions = row();
                 actions.addView(smallButton("Изменить", v -> showOnboardDialog(lease)), new LinearLayout.LayoutParams(0, dp(42), 1));
-                actions.addView(smallButton(lease.optBoolean("ignored") ? "Учитывать" : "Скрыть", v -> toggleLeaseIgnore(lease)), new LinearLayout.LayoutParams(0, dp(42), 1));
+                actions.addView(smallButton(lease.optBoolean("ignored") ? "Из архива" : "В архив", v -> toggleLeaseIgnore(lease)), new LinearLayout.LayoutParams(0, dp(42), 1));
                 actions.addView(smallButton("Выезд", v -> moveOut(lease)), new LinearLayout.LayoutParams(0, dp(42), 1));
                 card.addView(actions);
                 content.addView(card);

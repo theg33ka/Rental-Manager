@@ -29,7 +29,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 
-test("портфель сортирует квартиры и отделяет информационные договоры", async ({ page }) => {
+test("портфель сортирует квартиры и отделяет архивные договоры", async ({ page }) => {
   await page.locator('.sidebar .nav-group[data-tab="tenants"]').click();
   await page.evaluate(() => {
     const lease = { payment_day: 1, start_date: "2026-01-01", ip_amount: 0, personal_amount: 0, apartment_active: true, active: true };
@@ -46,6 +46,7 @@ test("портфель сортирует квартиры и отделяет �
   await page.locator("#leaseList tbody tr").first().locator("summary").click();
   await expect(page.locator("#leaseList tbody tr").first().getByRole("button", { name: "Повторить переезд", exact: true })).toBeVisible();
   await expect(page.locator("#informationalLeases")).toBeVisible();
+  await expect(page.locator("#informationalLeases h2")).toHaveText("Архив");
   await expect(page.locator("#informationalLeaseList tbody tr")).toHaveCount(1);
   await expect(page.locator("#informationalLeaseList")).toContainText("Информационный жилец");
   await expect(page.locator('#informationalLeaseList button', { hasText: "Изменить" })).toBeVisible();
@@ -55,6 +56,25 @@ test("портфель сортирует квартиры и отделяет �
   });
   await expect(page.locator("#leaseList tbody tr td:nth-child(2)")).toHaveText(["БД1", "БД2", "БД3", "БД10", "ЧД1"]);
   await expect(page.locator("#informationalLeases")).toBeHidden();
+});
+
+test("расходы предлагают зачёт в ИП только для незачтённых сумм", async ({ page }) => {
+  await page.evaluate(() => {
+    openWorkspaceTab("expenses");
+    const expense = { expense_date: "2026-08-14", apartment: "Баня 3", category: "Ремонт", amount: 11000, source_funds: "rental_budget" };
+    state.expenses = [
+      { ...expense, id: 101, rent_credit_amount: 0 },
+      { ...expense, id: 102, rent_credit_amount: 11000 },
+    ];
+    renderExpenses();
+  });
+  await expect(page.locator("#expenseList").getByRole("button", { name: "Зачесть в ИП", exact: true })).toHaveCount(1);
+  await expect(page.locator("#expenseList")).toContainText("Зачтено в аренду");
+  const requestPromise = page.waitForRequest(request => request.url().endsWith("/api/expenses/101/credit-rent") && request.method() === "POST");
+  await page.route("**/api/expenses/101/credit-rent", route => route.fulfill({ json: { ok: true, credited: 11000 } }));
+  page.once("dialog", dialog => dialog.accept());
+  await page.locator("#expenseList").getByRole("button", { name: "Зачесть в ИП", exact: true }).click();
+  await requestPromise;
 });
 
 test("основной экран и навигация доступны", async ({ page }) => {
@@ -73,6 +93,23 @@ test("основной экран и навигация доступны", async
   await expect(page.locator("#tenants")).toBeVisible();
   await page.getByRole("button", { name: "+ Новый договор", exact: true }).click();
   await expect(page.locator("#onboardForm")).toBeVisible();
+});
+
+test("диалог показывает всю сохранённую историю и автоответы", async ({ page }) => {
+  const messages = Array.from({ length: 230 }, (_, index) => ({
+    id: `log:${index}`, direction: index % 2 ? "outgoing" : "incoming",
+    author: index % 2 ? "Бот" : "Жилец", status: "sent",
+    text: index === 229 ? "Принял платёж" : `Сообщение ${index}`,
+    created_at: "2026-09-18T10:00:00",
+  }));
+  await page.route("**/api/bot-dialogs", route => route.fulfill({ json: [
+    { id: "lease:10", title: "Жилец", chat_id: "456", linked: true },
+  ] }));
+  await page.route("**/api/bot-dialogs/*/messages", route => route.fulfill({ json: { messages } }));
+  await page.evaluate(() => openWorkspaceTab("dialogs"));
+  await expect(page.locator("#botDialogMessages .message-bubble")).toHaveCount(230);
+  await expect(page.locator("#botDialogMessages .message-bubble").first()).toContainText("Сообщение 0");
+  await expect(page.locator("#botDialogMessages .message-bubble").last()).toContainText("Принял платёж");
 });
 
 
@@ -230,8 +267,9 @@ test("ручной зачёт аренды позволяет направить
 });
 
 test("редактор платежа позволяет выбрать канал коммуналки", async ({ page }) => {
+  await page.evaluate(() => openRentTab());
+  await page.waitForLoadState("networkidle");
   await page.evaluate(() => {
-    openRentTab();
     state.paymentHistory = {
       lease_id: 10,
       tenant_id: 14,

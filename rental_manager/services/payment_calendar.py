@@ -8,7 +8,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, joinedload
 
 from rental_manager.models import Apartment, Lease, RentalObject, RentCharge, UtilityBill, UtilityBillLine, UtilityService
-from rental_manager.services.billing import IGNORE_LEASE_MARK, money, utility_line_period
+from rental_manager.services.billing import money, utility_line_period
 
 MAX_CALENDAR_DAYS = 124
 STATUS_LABELS = {
@@ -53,7 +53,6 @@ def _calendar_data(
         raise ValueError("Выберите аренду или коммуналку")
     today = today or date.today()
     stop = end + timedelta(days=1)
-    ignored = ignored_lease_ids or set()
     objects = session.scalars(select(RentalObject).order_by(RentalObject.id)).all()
     apartments = session.scalars(select(Apartment).order_by(Apartment.sort_order, Apartment.name, Apartment.id)).all()
     leases = session.scalars(
@@ -61,7 +60,6 @@ def _calendar_data(
         .where(Lease.start_date <= end, or_(Lease.end_date.is_(None), Lease.end_date >= start))
         .order_by(Lease.start_date, Lease.id)
     ).all()
-    leases = [lease for lease in leases if lease.id not in ignored and IGNORE_LEASE_MARK not in (lease.notes or "")]
     stays: dict[int, list[Lease]] = defaultdict(list)
     for lease in leases:
         stays[lease.apartment_id].append(lease)
@@ -79,8 +77,6 @@ def _calendar_data(
             .order_by(UtilityBill.period_start, UtilityBillLine.id)
         ).all()
         for line in lines:
-            if line.lease_id in ignored or (line.lease and IGNORE_LEASE_MARK in (line.lease.notes or "")):
-                continue
             line_start, line_end = utility_line_period(line)
             if line_end <= line_start:
                 continue
@@ -107,7 +103,7 @@ def _calendar_data(
         ).all()
         for charge in charges:
             lease = charge.lease
-            if lease.id in ignored or IGNORE_LEASE_MARK in (lease.notes or "") or charge.status == "cancelled":
+            if charge.status == "cancelled":
                 continue
             line_start = max(charge.period_start, lease.start_date)
             line_end = min(charge.period_end, lease.end_date or date.max)
@@ -140,9 +136,7 @@ def _calendar_data(
                    UtilityBillLine.paid_amount + 0.009 >= UtilityBillLine.total_amount)
         ).all()
         for paid_line in paid_lines:
-            if not paid_line.lease_id or paid_line.lease_id in ignored:
-                continue
-            if paid_line.lease and IGNORE_LEASE_MARK in (paid_line.lease.notes or ""):
+            if not paid_line.lease_id:
                 continue
             paid_start, paid_end = utility_line_period(paid_line)
             if paid_end > paid_start:
