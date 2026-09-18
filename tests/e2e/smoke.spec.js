@@ -29,6 +29,32 @@ test.beforeEach(async ({ page }) => {
 });
 
 
+test("портфель сортирует квартиры и отделяет информационные договоры", async ({ page }) => {
+  await page.locator('.sidebar .nav-group[data-tab="tenants"]').click();
+  await page.evaluate(() => {
+    const lease = { payment_day: 1, start_date: "2026-01-01", ip_amount: 0, personal_amount: 0, apartment_active: true, active: true };
+    state.bootstrap.leases = [
+      { ...lease, id: 1, object: "Чёрный дом", apartment: "ЧД1", tenant: "Жилец ЧД1" },
+      { ...lease, id: 2, object: "Белый дом", apartment: "БД10", tenant: "Жилец БД10" },
+      { ...lease, id: 3, object: "Белый дом", apartment: "БД2", tenant: "Жилец БД2" },
+      { ...lease, id: 4, object: "Белый дом", apartment: "БД1", tenant: "Жилец БД1", active: false },
+      { ...lease, id: 5, object: "Белый дом", apartment: "БД3", tenant: "Информационный жилец", ignored: true },
+    ];
+    renderLeases();
+  });
+  await expect(page.locator("#leaseList tbody tr td:nth-child(2)")).toHaveText(["БД1", "БД2", "БД10", "ЧД1"]);
+  await expect(page.locator("#informationalLeases")).toBeVisible();
+  await expect(page.locator("#informationalLeaseList tbody tr")).toHaveCount(1);
+  await expect(page.locator("#informationalLeaseList")).toContainText("Информационный жилец");
+  await expect(page.locator('#informationalLeaseList button', { hasText: "Изменить" })).toBeVisible();
+  await page.evaluate(() => {
+    state.bootstrap.leases.find((lease) => lease.id === 5).ignored = false;
+    renderLeases();
+  });
+  await expect(page.locator("#leaseList tbody tr td:nth-child(2)")).toHaveText(["БД1", "БД2", "БД3", "БД10", "ЧД1"]);
+  await expect(page.locator("#informationalLeases")).toBeHidden();
+});
+
 test("основной экран и навигация доступны", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Главная", exact: true })).toBeVisible();
   await expect(page.locator("#summaryGrid .metric")).toHaveCount(4);

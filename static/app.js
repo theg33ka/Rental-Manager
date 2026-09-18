@@ -3068,9 +3068,9 @@ function openGlobalPaymentSettings() {
 }
 
 function renderLeases() {
-  const rows = [...state.bootstrap.leases]
-    .sort((left, right) => Number(right.active) - Number(left.active) || compareApartmentRefs(left, right) || String(left.tenant).localeCompare(String(right.tenant), "ru"))
-    .map((lease) => `
+  const leases = [...state.bootstrap.leases]
+    .sort((left, right) => compareApartmentRefs(left, right) || Number(right.active) - Number(left.active) || String(left.tenant).localeCompare(String(right.tenant), "ru"));
+  const renderRow = (lease) => `
     <tr>
       <td>${lease.object}</td>
       <td>${lease.apartment}</td>
@@ -3095,8 +3095,13 @@ function renderLeases() {
         </details>
       </td>
     </tr>
-  `).join("");
-  qs("#leaseList").innerHTML = table(["Объект", "Квартира", "Жилец", "Период", "День", "ИП / личный", "Залог", "Статус", "Действия"], rows);
+  `;
+  const headers = ["Объект", "Квартира", "Жилец", "Период", "День", "ИП / личный", "Залог", "Статус", "Действия"];
+  const regularLeases = leases.filter((lease) => !lease.ignored);
+  const informationalLeases = leases.filter((lease) => lease.ignored);
+  qs("#leaseList").innerHTML = table(headers, regularLeases.map(renderRow).join(""));
+  qs("#informationalLeaseList").innerHTML = table(headers, informationalLeases.map(renderRow).join(""));
+  qs("#informationalLeases").hidden = informationalLeases.length === 0;
 }
 
 function renderApartmentRegistry() {
