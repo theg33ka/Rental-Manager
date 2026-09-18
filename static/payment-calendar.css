@@ -1,49 +1,55 @@
-body.payment-calendar-open { overflow: hidden; }
-#paymentCalendarModal { z-index: 160; padding: 20px; }
-#paymentCalendarModal .payment-calendar { display: block; width: min(1480px, 100%); max-width: none; max-height: calc(100dvh - 40px); overflow-y: auto; padding: 24px; background: var(--surface); color: var(--ink); }
-.pc-heading, .pc-toolbar, .pc-dates, .pc-detail-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+#utilities.pc-open > .page-heading, #utilities.pc-open > .pen-utility-layout { display: none; }
+#paymentCalendarModal[hidden] { display: none; }
+#paymentCalendarModal { --pc-label-width: 184px; --pc-day-width: 42px; color: var(--ink); }
+.payment-calendar { width: 100%; min-width: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 22px; }
+.pc-heading, .pc-toolbar, .pc-dates, .pc-detail-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 .pc-heading h3 { margin: 0; font-size: 26px; }
 .pc-heading .eyebrow { margin: 0 0 5px; }
-.pc-toolbar { flex-wrap: wrap; margin-top: 20px; gap: 12px; }
+.pc-toolbar { flex-wrap: wrap; justify-content: flex-start; margin: 20px 0 8px; gap: 10px 16px; }
 .pc-modes { display: flex; gap: 4px; padding: 4px; border: 1px solid var(--line); border-radius: 12px; }
 .pc-modes button { border-color: transparent; background: transparent; box-shadow: none; }
-.pc-modes button[aria-pressed="true"] { background: var(--primary); color: var(--bg); }
-.pc-dates { justify-content: flex-start; gap: 8px; }
-.pc-dates button { min-width: 40px; }
-.pc-month-label { display: flex; align-items: center; gap: 8px; color: var(--muted-strong); font-size: 12px; }
-.pc-month-label input { width: 165px; min-width: 0; }
+#paymentCalendarModal .pc-modes button[aria-pressed="true"] { background: var(--primary); color: var(--bg); }
+.pc-dates { justify-content: flex-start; gap: 6px; }
+.pc-dates button { min-width: 34px; }
+.pc-month-label { display: flex; align-items: center; gap: 6px; color: var(--muted-strong); font-size: 12px; }
+.pc-month-label input { width: 155px; min-width: 0; }
+.pc-zoom { display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; min-width: 130px; font-size: 12px; }
+.pc-zoom input { grid-column: 1 / -1; padding: 0; height: 24px; width: 140px; accent-color: var(--primary); }
+.pc-zoom output { font-variant-numeric: tabular-nums; }
 .pc-explanation, .pc-feedback { color: var(--muted-strong); font-size: 12px; line-height: 1.5; margin: 10px 0; }
 .pc-feedback { min-height: 18px; }
-.pc-scroll { max-height: 49dvh; min-height: 160px; overflow: auto; overscroll-behavior: contain; border: 1px solid var(--line); border-radius: 12px; position: relative; scrollbar-color: var(--muted) var(--surface-2); scrollbar-width: auto; }
-.pc-scroll[aria-busy="true"] { opacity: .55; pointer-events: none; }
-.pc-grid { border-collapse: separate; border-spacing: 0; table-layout: fixed; width: max-content; margin: 0; font-size: 13px; }
-.pc-grid th, .pc-grid td { box-sizing: border-box; padding: 4px 2px; min-width: 42px; width: 42px; max-width: 42px; border: 0; border-bottom: 1px solid var(--line); text-align: center; position: relative; }
-.pc-grid thead th { position: sticky; top: 0; z-index: 4; height: 74px; background: var(--surface-2); color: var(--ink); text-transform: none; }
-.pc-grid thead span, .pc-grid thead small { display: block; font-size: 10px; font-weight: 400; color: var(--muted-strong); }
-.pc-grid thead strong { display: block; font-size: 15px; padding: 3px 0; }
-.pc-grid .pc-frozen { position: sticky; left: 0; z-index: 3; min-width: 184px; width: 184px; max-width: 184px; padding: 10px 14px; background: var(--surface); text-align: left; border-right: 1px solid var(--line-strong); white-space: normal; overflow-wrap: anywhere; font-weight: 500; font-size: 13px; text-transform: none; }
-.pc-grid thead .pc-frozen { z-index: 6; background: var(--surface-2); }
-.pc-grid .pc-frozen small { display: block; color: var(--muted-strong); font-weight: 400; }
-.pc-grid .pc-object th, .pc-grid .pc-object td { background: var(--surface-2); height: 42px; }
-.pc-grid .pc-object td { text-align: left; padding-left: 16px; color: var(--muted-strong); }
-.pc-object button { border: 0; background: transparent; color: var(--ink); text-align: left; padding: 0; white-space: normal; box-shadow: none; font-size: 14px; }
-.pc-grid tr:hover td { background: var(--surface-hover); }
-.pc-grid .pc-today::after { content: ""; position: absolute; top: 0; bottom: 0; left: 50%; width: 2px; background: var(--primary); pointer-events: none; z-index: 1; }
-.pc-grid thead .pc-today::after { top: auto; height: 10px; }
-.pc-grid thead .pc-today span { color: var(--primary); }
-.pc-day { position: relative; z-index: 2; display: block; width: 36px; min-width: 36px; height: 38px; min-height: 38px; padding: 0; margin: 0; border: 1px solid transparent; border-radius: 5px; font-size: 16px; text-align: center; box-shadow: none; }
-.pc-day:hover { filter: brightness(1.16); transform: none; }
-.pc-day[aria-pressed="true"] { outline: 2px solid var(--primary); outline-offset: 1px; }
-#paymentCalendarModal .pc-paid { background: var(--ok-bg); color: var(--success); }
-#paymentCalendarModal .pc-issued { background: var(--warn-bg); color: var(--warn); }
+.pc-scroll { overflow-x: auto; overflow-y: hidden; border: 1px solid var(--line); border-radius: 10px; position: relative; scrollbar-color: var(--muted) var(--surface-2); scrollbar-width: auto; }
+.pc-canvas { position: relative; min-height: 140px; }
+.pc-row { position: relative; border-bottom: 1px solid var(--line); width: 100%; }
+.pc-frozen { position: sticky; left: 0; z-index: 4; width: var(--pc-label-width); height: 100%; min-height: inherit; padding: 10px 12px; display: flex; align-items: center; justify-content: space-between; gap: 6px; background: var(--surface); border-right: 1px solid var(--line-strong); white-space: normal; overflow-wrap: anywhere; font-size: 13px; }
+.pc-frozen small { display: block; color: var(--muted-strong); font-size: 11px; }
+.pc-object { height: 42px; }
+.pc-object, .pc-object .pc-frozen { background: var(--surface-2); }
+#paymentCalendarModal .pc-object button { border: 0; background: transparent; color: var(--ink); text-align: left; padding: 0; white-space: normal; box-shadow: none; font-size: 14px; }
+.pc-header { height: 76px; background: var(--surface-2); }
+.pc-header .pc-frozen { background: var(--surface-2); }
+.pc-date-label { position: absolute; top: 9px; text-align: center; overflow: hidden; }
+.pc-date-label span, .pc-date-label small { display: block; font-size: 11px; color: var(--muted-strong); white-space: nowrap; }
+.pc-date-label strong { display: block; font-size: 15px; padding: 3px 0; }
+.pc-today-line { position: absolute; top: 62px; bottom: 0; width: 2px; background: var(--primary); pointer-events: none; z-index: 1; }
+#paymentCalendarModal .pc-day { position: absolute; top: 6px; z-index: 2; display: block; width: calc(var(--pc-day-width) - 4px); min-width: 0; height: 38px; padding: 0; margin: 0 2px; border: 1px solid transparent; border-radius: 4px; font-size: 16px; text-align: center; box-shadow: none; overflow: hidden; }
+#paymentCalendarModal .pc-day:hover { filter: brightness(1.16); transform: none; }
+#paymentCalendarModal .pc-day[aria-pressed="true"] { outline: 2px solid var(--primary); outline-offset: 1px; z-index: 3; }
+#paymentCalendarModal .pc-paid { background: color-mix(in srgb, var(--success) 28%, var(--surface)); color: var(--success); }
+#paymentCalendarModal .pc-issued, #paymentCalendarModal .pc-to_bill { background: color-mix(in srgb, var(--warn) 30%, var(--surface)); color: var(--warn); }
 #paymentCalendarModal .pc-partial, #paymentCalendarModal .pc-deferred { background: var(--accent-soft); color: var(--accent); }
-#paymentCalendarModal .pc-overdue, #paymentCalendarModal .pc-conflict { background: var(--danger-bg); color: var(--danger); }
-#paymentCalendarModal .pc-draft { background: var(--surface-3); color: var(--blue); border-color: var(--line-strong); border-style: dashed; }
+#paymentCalendarModal .pc-overdue, #paymentCalendarModal .pc-conflict, #paymentCalendarModal .pc-gap { background: color-mix(in srgb, var(--danger) 30%, var(--surface)); color: var(--danger); }
+#paymentCalendarModal .pc-draft { background: var(--surface-3); color: var(--blue); border-color: var(--blue); border-style: dashed; }
 #paymentCalendarModal .pc-vacant { background: repeating-linear-gradient(135deg, transparent, transparent 3px, var(--line-strong) 3px, var(--line-strong) 5px), var(--surface-2); color: var(--muted); }
 #paymentCalendarModal .pc-unbilled { background: var(--surface-2); color: var(--muted); border-color: var(--line); }
+#paymentCalendarModal .pc-recent { background: color-mix(in srgb, var(--ink) 22%, var(--surface)); color: var(--ink); border-color: var(--ink); }
 #paymentCalendarModal .pc-incomplete { background: var(--warn-bg); color: var(--warn); border-color: var(--warn); border-style: dashed; }
-.pc-future { opacity: .72; }
+#paymentCalendarModal .pc-loading { background: var(--surface-3); opacity: .5; }
+.pc-future { opacity: .6; }
 .pc-event { width: 6px; height: 6px; background: currentColor; transform: rotate(45deg); position: absolute; top: 3px; right: 3px; }
+#paymentCalendarModal .pc-period { position: absolute; z-index: 2; height: 21px; min-height: 0; padding: 1px 6px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; text-align: left; border-radius: 3px; border-width: 1px; border-color: currentColor; font-size: 11px; box-shadow: none; }
+#paymentCalendarModal .pc-period.pc-partial, #paymentCalendarModal .pc-period.pc-issued { background: color-mix(in srgb, var(--warn) 30%, var(--surface)); color: var(--warn); }
+#paymentCalendarModal .pc-issue { flex: 0 0 28px; width: 28px; height: 28px; padding: 0; border: 1px solid var(--danger); border-radius: 50%; color: var(--danger); background: var(--danger-bg); font-size: 18px; font-weight: 700; }
 .pc-legend { display: flex; flex-wrap: wrap; gap: 10px 18px; padding: 16px 0; font-size: 12px; }
 .pc-legend > span { display: inline-flex; align-items: center; gap: 7px; }
 .pc-swatch { width: 24px; height: 24px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; font-style: normal; }
@@ -61,25 +67,22 @@ body.payment-calendar-open { overflow: hidden; }
 .pc-rent-parts { width: 100%; }
 .pc-estimated { margin-left: 8px; color: var(--warn); font-size: 12px; }
 .pc-warning { color: var(--warn); font-size: 13px; }
-.pc-empty { color: var(--muted-strong); font-size: 13px; }
-.pc-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.pc-empty { position: sticky; left: 15px; width: max-content; max-width: 80vw; color: var(--muted-strong); font-size: 13px; }
+.pc-tooltip { position: fixed; z-index: 180; max-width: min(360px, calc(100vw - 16px)); padding: 12px; background: var(--surface-3); color: var(--ink); border: 1px solid var(--line-strong); box-shadow: var(--shadow-lg); border-radius: 8px; white-space: pre-line; font-size: 13px; line-height: 1.6; pointer-events: none; }
+.pc-tooltip[hidden] { display: none; }
+#paymentCalendarModal.pc-overview .pc-day { margin: 0; width: var(--pc-day-width); border-radius: 0; border-width: 0; }
+.pc-overview .pc-day > span, .pc-overview .pc-day .pc-event { display: none; }
+#paymentCalendarModal.pc-overview .pc-period { font-size: 0; }
 @media (max-width: 700px) {
-  #paymentCalendarModal { padding: 8px; }
-  #paymentCalendarModal .payment-calendar { padding: 14px; max-height: calc(100dvh - 16px); }
+  .payment-calendar { padding: 12px; }
   .pc-heading h3 { font-size: 22px; }
   .pc-toolbar { align-items: flex-start; }
-  .pc-toolbar > [data-action="refresh"] { order: 1; }
-  .pc-dates { order: 2; width: 100%; flex-wrap: wrap; }
+  .pc-dates { width: 100%; flex-wrap: wrap; }
   .pc-month-label { flex: 1; }
   .pc-month-label input { width: 100%; font-size: 16px; }
-  .pc-grid .pc-frozen { min-width: 122px; max-width: 122px; width: 122px; padding: 8px; }
-  .pc-scroll { max-height: 48dvh; }
+  .pc-frozen { padding: 8px; }
   .pc-detail { padding: 14px; }
   .pc-detail-heading { align-items: flex-start; flex-wrap: wrap; }
   .pc-totals { gap: 14px; }
   .pc-totals strong { font-size: 20px; }
-}
-@media (pointer: coarse) {
-  .pc-grid td, .pc-grid thead th:not(.pc-frozen) { min-width: 48px; width: 48px; max-width: 48px; }
-  .pc-day { width: 44px; height: 44px; }
 }

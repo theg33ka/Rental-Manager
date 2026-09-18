@@ -10,7 +10,8 @@ function calendarFixture(url) {
   const mode = params.get("mode");
   const row = (id, name, type) => ({ id, name, active: true,
     leases: [{ id: 10, tenant: "Прежний жилец", start: "2026-06-26", end: "2026-09-07" }, { id: 11, tenant: "Дарья", start: "2026-09-15", end: null }],
-    entries: [{ id: "utility:1", lease_id: 11, title: mode === "rent" ? "Аренда" : "Вода", kind: "usage", start: "2026-09-15", end: "2026-09-18", amount: 420, paid: 100, debt: 320, due_date: "2026-09-20", status: "partial", forecast: false }],
+    entries: [{ id: "utility:1", lease_id: 11, title: mode === "rent" ? "Аренда" : "Вода", kind: "usage", start: "2026-09-15", end: "2026-09-18", period_start: "2026-09-15", period_end: "2026-09-17", amount: 420, paid: 100, debt: 320, due_date: "2026-09-20", status: "partial", forecast: false }],
+    periods: [{ id: `period:${id}`, lease_id: 11, title: mode === "rent" ? "Аренда" : "Вода", kind: "usage", start: "2026-09-15", end: "2026-09-18", days: 3, amount: 420, paid: 100, debt: 320, status: "partial" }],
     days: dates.map((date) => {
       const occupied = date < "2026-09-08" || date >= "2026-09-15";
       const status = type === "turnover" ? date < "2026-09-08" ? "paid" : date < "2026-09-15" ? "vacant" : date <= "2026-09-17" ? "partial" : "unbilled" : type;
@@ -34,6 +35,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 async function openCalendar(page) {
+  await page.route("**/api/utilities/calendar/summary?**", (route) => route.fulfill({ json: { apartments: [{ apartment_id: 4, issues: [{ start: "2024-05-05", end: "2024-06-07", status: "overdue" }] }] } }));
   await page.route("**/api/utilities/calendar?**", (route) => route.fulfill({ json: calendarFixture(route.request().url()) }));
   await page.getByRole("button", { name: "Календарь оплат", exact: true }).click();
   await expect(page.locator(".pc-scroll")).toHaveAttribute("aria-busy", "false");
@@ -44,7 +46,7 @@ async function openCalendar(page) {
 test("календарь показывает динамические объекты, проживание и суммы счёта", async ({ page }) => {
   await page.setViewportSize({ width: 1500, height: 1100 });
   await openCalendar(page);
-  const dialog = page.getByRole("dialog", { name: "Календарь оплат" });
+  const dialog = page.locator("#paymentCalendarModal");
   await expect(dialog).toBeVisible();
   await expect(dialog.locator('[data-object="42"]')).toHaveText("▾ Новый корпус <Юг>");
   const day = page.locator('.pc-day[data-apartment="3"][data-date="2026-09-16"]');
@@ -68,13 +70,13 @@ test("календарь показывает динамические объе�
   await expect(page.locator(".pc-detail .pc-entry")).toContainText("Аренда");
   await dialog.getByRole("button", { name: "Следующий месяц" }).click();
   await expect(page.locator("[data-month]")).toHaveValue("2026-10");
-  await expect(page.locator('.pc-day[data-date="2026-11-30"]').first()).toBeAttached();
+  await expect(page.locator('.pc-day[data-date="2026-10-01"]').first()).toBeAttached();
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
   await expect(page.locator("#openPaymentCalendarBtn")).toBeFocused();
 });
 
-test("мобильный календарь прокручивается внутри окна и поддерживает светлую тему", async ({ page }) => {
+test("мобильный календарь растёт по странице и поддерживает светлую тему", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.evaluate(() => setPalette("white"));
   await openCalendar(page);
@@ -96,10 +98,77 @@ test("ошибка загрузки не оставляет устаревшие
   await openCalendar(page);
   await page.route("**/api/utilities/calendar?**", (route) => route.fulfill({ status: 503, json: { detail: "Проверочная ошибка" } }));
   await page.getByRole("button", { name: "Обновить", exact: true }).click();
-  await expect(page.locator(".pc-feedback")).toContainText("Проверочная ошибка");
-  await expect(page.locator(".pc-grid")).toHaveCount(0);
+  await expect(page.locator(".pc-feedback")).toContainText("Не удалось загрузить часть истории");
+  await expect(page.locator(".pc-apartment")).toHaveCount(0);
   await page.unroute("**/api/utilities/calendar?**");
   await page.route("**/api/utilities/calendar?**", (route) => route.fulfill({ json: calendarFixture(route.request().url()) }));
   await page.getByRole("button", { name: "Обновить", exact: true }).click();
-  await expect(page.locator(".pc-grid")).toBeVisible();
+  await expect(page.locator(".pc-apartment").first()).toBeVisible();
+});
+
+test("все квартиры на странице, точные полосы и переход к старой скрытой просрочке", async ({ page }) => {
+  await page.setViewportSize({ width: 1500, height: 900 });
+  await openCalendar(page);
+  const scroll = page.locator(".pc-scroll");
+  const sizes = await scroll.evaluate((node) => ({ height: node.clientHeight, scroll: node.scrollHeight }));
+  expect(sizes.scroll).toBeLessThanOrEqual(sizes.height + 1);
+  await expect(page.locator('[data-row="77"]')).toBeAttached();
+  const band = page.locator('.pc-period[data-apartment="3"]');
+  await band.hover();
+  await expect(page.getByRole("tooltip")).toContainText("15.09.2026 → 18.09.2026 · 3 дн.");
+  await expect(page.getByRole("tooltip")).toContainText("Дарья");
+  await expect(page.getByRole("tooltip")).toContainText("420");
+  await page.locator('[data-issue="4"]').click();
+  await expect(page.locator('.pc-day[data-apartment="4"][data-date="2024-05-05"]')).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("[data-month]")).toHaveValue("2024-05");
+  await expect(page.locator(".pc-detail")).toContainText("05.05.2024");
+});
+
+test("бесконечная шкала подгружает край без скачка и ограничивает кеш и DOM", async ({ page }) => {
+  await page.setViewportSize({ width: 1500, height: 900 });
+  const requests = [];
+  page.on("request", (request) => { if (request.url().includes("/calendar?")) requests.push(request.url()); });
+  await openCalendar(page);
+  const scroll = page.locator(".pc-scroll");
+  const expectedDate = await scroll.evaluate((node) => {
+    const cell = node.querySelector(".pc-day[data-date]");
+    const width = parseFloat(getComputedStyle(document.getElementById("paymentCalendarModal")).getPropertyValue("--pc-day-width"));
+    const origin = Date.parse(`${cell.dataset.date}T00:00:00Z`) / 86400000 - (parseFloat(cell.style.left) - 184) / width;
+    node.scrollLeft = 0;
+    return new Date(origin * 86400000).toISOString().slice(0, 10);
+  });
+  await expect(page.locator(`.pc-day[data-apartment="1"][data-date="${expectedDate}"]`)).toBeAttached();
+  await expect.poll(() => scroll.evaluate((node) => node.scrollLeft)).toBeGreaterThan(9000);
+  const first = await page.locator(`.pc-day[data-apartment="1"][data-date="${expectedDate}"]`).boundingBox();
+  const label = await page.locator('[data-row="1"] .pc-frozen').boundingBox();
+  expect(Math.abs(first.x - label.x - label.width)).toBeLessThan(5);
+  expect(requests.length).toBeGreaterThan(1);
+  for (let year = 2010; year < 2021; year++) {
+    await page.locator("[data-month]").fill(`${year}-09`);
+    await expect(page.locator(`.pc-day[data-apartment="1"][data-date="${year}-09-01"]`)).toBeAttached();
+  }
+  expect(Number(await page.locator("#paymentCalendarModal").getAttribute("data-cached-pages"))).toBeLessThanOrEqual(8);
+  expect(await page.locator(".pc-day").count()).toBeLessThan(700);
+  await expect(page.locator(".pc-today-line")).toHaveCount(0);
+});
+
+test("масштаб колёсиком держит дату под курсором, ползунок и сброс работают", async ({ page }) => {
+  await page.setViewportSize({ width: 1500, height: 900 });
+  await openCalendar(page);
+  const cell = page.locator('.pc-day[data-apartment="1"][data-date="2026-09-01"]');
+  await cell.scrollIntoViewIfNeeded();
+  const before = await cell.boundingBox();
+  const anchor = before.x + before.width / 2;
+  await page.mouse.move(anchor, before.y + 15);
+  await page.mouse.wheel(0, 120);
+  await expect(page.locator(".pc-zoom output")).not.toHaveText("100%");
+  const after = await cell.boundingBox();
+  expect(Math.abs(after.x + after.width / 2 - anchor)).toBeLessThan(2);
+  await page.locator(".pc-zoom input").fill("10");
+  await expect(page.locator(".pc-zoom output")).toHaveText("10%");
+  await expect(page.locator("#paymentCalendarModal")).toHaveClass(/pc-overview/);
+  expect(await page.locator(".pc-day").count()).toBeLessThan(3000);
+  await page.locator('[data-action="reset-zoom"]').click();
+  await expect(page.locator(".pc-zoom output")).toHaveText("100%");
+  await expect(page.locator("#paymentCalendarModal")).not.toHaveClass(/pc-overview/);
 });

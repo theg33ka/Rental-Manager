@@ -169,7 +169,8 @@ Effective resolution is not a public endpoint: shared backend logic resolves apa
 | `POST /api/tariffs` | Owner | Add tariff | service_id, starts_on, name, tiers → tariff | Service/date/tier parser; valid monotonic tiers |
 | `GET /api/utility-bills` | Owner | List bills/lines/payments/reminders | — → bills | UtilityBill/Line/Receipt |
 | `GET /api/utilities/timeline` | Owner | View utility event timeline | — → normalized events | Read-only composite |
-| `GET /api/utilities/calendar` | Owner | Daily occupancy/payment calendar | required start/end (inclusive), mode=utility/rent → dates, statuses, objects/apartments, leases, entries, days | 1–124 days; read-only; current payment state for each covered day, no generation or recalculation |
+| `GET /api/utilities/calendar` | Owner | Daily occupancy/payment calendar | required start/end (inclusive), mode=utility/rent → dates, statuses, objects/apartments, leases, entries, periods, days | 1–124 days; exact invoice bands include full amounts and half-open dates; read-only; current payment state for each covered day, no generation or recalculation |
+| `GET /api/utilities/calendar/summary` | Owner | Hidden overdue periods across history | mode=utility/rent → apartments with issues (start/end exclusive, status=gap/overdue) | Read-only boundary sweep, no daily expansion; same day rules as calendar |
 | `POST /api/utility-bills/calculate` | Owner | Calculate one service | service_id, period start/end, allow_estimate → bill + warnings | Readings/tariff/period; apartment total cannot exceed object; duplicate draft rules |
 | `POST /api/utility-bills/calculate-object` | Owner | Calculate all active services of object | object_id, period, allow_estimate → created/errors arrays | Object/services exist; per-service errors retained |
 | `DELETE /api/utility-bills/{id}` | Owner | Delete allowed bill | id → `{ok}` | 404/status/dependency constraints; destructive |

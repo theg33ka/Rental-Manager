@@ -22,6 +22,9 @@ STATUS_LABELS = {
     "unbilled": "Не начислено",
     "incomplete": "Не всё начислено",
     "conflict": "Проверить договоры",
+    "recent": "Можно выставить",
+    "to_bill": "Пора выставить",
+    "gap": "Пропуск оплаты",
 }
 
 
@@ -37,7 +40,7 @@ def calendar_charge_status(debt: float, paid: float, due: date | None, today: da
     return "partial" if paid > 0.009 else "issued"
 
 
-def payment_calendar(
+def _calendar_data(
     session: Session,
     start: date,
     end: date,
@@ -48,8 +51,6 @@ def payment_calendar(
 ) -> dict[str, Any]:
     if mode not in {"utility", "rent"}:
         raise ValueError("Выберите аренду или коммуналку")
-    if end < start or (end - start).days >= MAX_CALENDAR_DAYS or end == date.max:
-        raise ValueError(f"Выберите период от 1 до {MAX_CALENDAR_DAYS} дней")
     today = today or date.today()
     stop = end + timedelta(days=1)
     ignored = ignored_lease_ids or set()
@@ -81,7 +82,7 @@ def payment_calendar(
             if line.lease_id in ignored or (line.lease and IGNORE_LEASE_MARK in (line.lease.notes or "")):
                 continue
             line_start, line_end = utility_line_period(line)
-            if line_end <= line_start or line_start >= stop or line_end <= start:
+            if line_end <= line_start:
                 continue
             advance = line.line_type == "advance" or line.bill.bill_type == "advance"
             draft = line.bill.status == "draft" or line.status == "draft"
@@ -127,45 +128,132 @@ def payment_calendar(
                 "forecast": False,
             })
 
+    paid_until: dict[tuple[int, int], str] = {}
+    if mode == "utility":
+        paid_lines = session.scalars(
+            select(UtilityBillLine).join(UtilityBill)
+            .options(joinedload(UtilityBillLine.bill), joinedload(UtilityBillLine.lease))
+            .where(UtilityBill.status.notin_(["draft", "cancelled"]),
+                   UtilityBillLine.status.notin_(["draft", "cancelled"]),
+                   UtilityBill.bill_type != "advance", UtilityBillLine.line_type != "advance",
+                   UtilityBillLine.lease_id.in_([lease.id for lease in leases]),
+                   UtilityBillLine.paid_amount + 0.009 >= UtilityBillLine.total_amount)
+        ).all()
+        for paid_line in paid_lines:
+            if not paid_line.lease_id or paid_line.lease_id in ignored:
+                continue
+            if paid_line.lease and IGNORE_LEASE_MARK in (paid_line.lease.notes or ""):
+                continue
+            paid_start, paid_end = utility_line_period(paid_line)
+            if paid_end > paid_start:
+                key = (paid_line.lease_id, paid_line.bill.service_id)
+                paid_until[key] = max(paid_until.get(key, ""), paid_end.isoformat())
+    return {"objects": objects, "apartments": apartments, "stays": stays, "entries": entries, "services": services, "paid_until": paid_until}
+
+
+def calendar_day(apartment_id: int, object_id: int, day: str, snapshot: dict[str, Any], mode: str, today: date) -> dict[str, Any]:
+    occupants = [lease for lease in snapshot["stays"][apartment_id] if lease.start_date.isoformat() <= day and (not lease.end_date or day <= lease.end_date.isoformat())]
+    occupants_ids = {lease.id for lease in occupants}
+    selected = [entry for entry in snapshot["entries"][apartment_id] if entry["start"] <= day < entry["end"]]
+    usage = [entry for entry in selected if entry["kind"] != "advance"]
+    expected = snapshot["services"][object_id]
+    billed_services = {entry.get("service_id") for entry in usage if entry["status"] != "draft" and entry["lease_id"] in occupants_ids}
+    missing = [name for key, name in expected.items() if key not in billed_services] if mode == "utility" and occupants else []
+    states = {entry["status"] for entry in usage}
+    conflict = len(occupants) > 1 or any(entry["lease_id"] not in occupants_ids for entry in usage)
+    if conflict:
+        status = "conflict"
+    elif not occupants:
+        status = "vacant"
+    else:
+        status = next((candidate for candidate in ["overdue", "partial", "issued", "deferred", "draft"] if candidate in states), "unbilled" if not usage else "incomplete" if missing else "paid")
+        if mode == "utility" and status in {"unbilled", "incomplete"} and day <= today.isoformat():
+            gap = any(service_id not in billed_services and snapshot["paid_until"].get((lease.id, service_id), "") > day for lease in occupants for service_id in expected)
+            # Позднее оплаченный период того же договора выявляет пропуск по той же услуге.
+            if not expected and not usage:
+                gap = any(lease_id in occupants_ids and paid_end > day for (lease_id, _), paid_end in snapshot["paid_until"].items())
+            status = "gap" if gap else "to_bill" if day < (today - timedelta(days=31)).isoformat() else "incomplete" if status == "incomplete" else "recent"
+    return {
+        "date": day, "status": status, "lease_ids": sorted(occupants_ids),
+        "entry_ids": [entry["id"] for entry in selected], "missing_services": missing,
+        "move_in": any(lease.start_date.isoformat() == day for lease in occupants),
+        "move_out": any(lease.end_date and lease.end_date.isoformat() == day for lease in occupants),
+        "forecast": any(entry["forecast"] for entry in usage),
+    }
+
+
+def calendar_periods(entries: list[dict[str, Any]], today: date) -> list[dict[str, Any]]:
+    groups: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
+    for entry in entries:
+        groups[(entry.get("bill_id", entry["id"]), entry["lease_id"], entry["kind"])].append(entry)
+    result = []
+    for grouped in groups.values():
+        runs: list[list[dict[str, Any]]] = []
+        for entry in sorted(grouped, key=lambda item: (item["start"], item["end"])):
+            if runs and entry["start"] <= max(item["end"] for item in runs[-1]):
+                runs[-1].append(entry)
+            else:
+                runs.append([entry])
+        for run in runs:
+            first = run[0]
+            start, end = min(item["start"] for item in run), max(item["end"] for item in run)
+            amount, paid, debt = (money(sum(item[key] for item in run)) for key in ["amount", "paid", "debt"])
+            statuses = {item["status"] for item in run}
+            status = next((value for value in ["overdue", "partial", "issued", "deferred", "draft"] if value in statuses), "paid")
+            result.append({
+                "id": f"{first['id']}:{start}", "entry_ids": [item["id"] for item in run],
+                "lease_id": first["lease_id"], "kind": first["kind"], "title": first["title"],
+                "start": start, "end": end, "days": (date.fromisoformat(end)-date.fromisoformat(start)).days,
+                "amount": amount, "paid": paid, "debt": debt, "status": status,
+                "forecast": any(item["forecast"] for item in run),
+            })
+    return sorted(result, key=lambda item: (item["start"], item["end"], item["id"]))
+
+
+def payment_calendar(session: Session, start: date, end: date, *, mode: str = "utility", today: date | None = None, ignored_lease_ids: set[int] | None = None) -> dict[str, Any]:
+    if end < start or (end - start).days >= MAX_CALENDAR_DAYS or end == date.max:
+        raise ValueError(f"Выберите период от 1 до {MAX_CALENDAR_DAYS} дней")
+    today = today or date.today()
+    snapshot = _calendar_data(session, start, end, mode=mode, today=today, ignored_lease_ids=ignored_lease_ids)
     dates = [(start + timedelta(days=offset)).isoformat() for offset in range((end-start).days + 1)]
     rows_by_object: dict[int, list[dict[str, Any]]] = defaultdict(list)
-    for apartment in apartments:
-        apartment_stays = stays[apartment.id]
-        apartment_entries = entries[apartment.id]
-        days = []
-        for day in dates:
-            occupants = [lease for lease in apartment_stays if lease.start_date.isoformat() <= day and (not lease.end_date or day <= lease.end_date.isoformat())]
-            occupants_ids = {lease.id for lease in occupants}
-            selected = [entry for entry in apartment_entries if entry["start"] <= day < entry["end"]]
-            usage = [entry for entry in selected if entry["kind"] != "advance"]
-            missing = []
-            if mode == "utility" and occupants:
-                billed_services = {entry["service_id"] for entry in usage if entry["status"] != "draft" and entry["lease_id"] in occupants_ids}
-                missing = [name for key, name in services[apartment.object_id].items() if key not in billed_services]
-            states = {entry["status"] for entry in usage}
-            conflict = len(occupants) > 1 or any(entry["lease_id"] not in occupants_ids for entry in usage)
-            if conflict:
-                status = "conflict"
-            elif not occupants:
-                status = "vacant"
-            elif not usage:
-                status = "unbilled"
-            else:
-                status = next((candidate for candidate in ["overdue", "partial", "issued", "deferred", "draft"] if candidate in states), "incomplete" if missing else "paid")
-            days.append({
-                "date": day, "status": status, "lease_ids": sorted(occupants_ids),
-                "entry_ids": [entry["id"] for entry in selected], "missing_services": missing,
-                "move_in": any(lease.start_date.isoformat() == day for lease in occupants),
-                "move_out": any(lease.end_date and lease.end_date.isoformat() == day for lease in occupants),
-                "forecast": any(entry["forecast"] for entry in usage),
-            })
+    for apartment in snapshot["apartments"]:
+        apartment_stays = snapshot["stays"][apartment.id]
+        apartment_entries = snapshot["entries"][apartment.id]
+        days = [calendar_day(apartment.id, apartment.object_id, day, snapshot, mode, today) for day in dates]
         rows_by_object[apartment.object_id].append({
             "id": apartment.id, "name": apartment.name, "active": apartment.active,
             "leases": [{"id": lease.id, "tenant": lease.tenant.full_name, "start": lease.start_date.isoformat(), "end": lease.end_date.isoformat() if lease.end_date else None} for lease in apartment_stays],
-            "entries": apartment_entries, "days": days,
+            "entries": apartment_entries, "periods": calendar_periods(apartment_entries, today), "days": days,
         })
     return {
         "start": start.isoformat(), "end": end.isoformat(), "today": today.isoformat(), "mode": mode,
         "dates": dates, "statuses": STATUS_LABELS,
-        "objects": [{"id": obj.id, "name": obj.name, "active": obj.active, "apartments": rows_by_object[obj.id]} for obj in objects],
+        "objects": [{"id": obj.id, "name": obj.name, "active": obj.active, "apartments": rows_by_object[obj.id]} for obj in snapshot["objects"]],
     }
+
+
+def payment_calendar_summary(session: Session, *, mode: str = "utility", today: date | None = None, ignored_lease_ids: set[int] | None = None) -> dict[str, Any]:
+    today = today or date.today()
+    snapshot = _calendar_data(session, date.min, today, mode=mode, today=today, ignored_lease_ids=ignored_lease_ids)
+    result = []
+    for apartment in snapshot["apartments"]:
+        boundaries = {today.isoformat(), (today + timedelta(days=1)).isoformat(), (today - timedelta(days=31)).isoformat()}
+        for lease in snapshot["stays"][apartment.id]:
+            boundaries.add(lease.start_date.isoformat())
+            if lease.end_date and lease.end_date < today:
+                boundaries.add((lease.end_date + timedelta(days=1)).isoformat())
+        for entry in snapshot["entries"][apartment.id]:
+            boundaries.update([entry["start"], entry["end"]])
+        ordered = sorted(day for day in boundaries if day <= (today + timedelta(days=1)).isoformat())
+        issues: list[dict[str, str]] = []
+        for start, end in zip(ordered, ordered[1:]):
+            state = calendar_day(apartment.id, apartment.object_id, start, snapshot, mode, today)
+            if state["status"] not in {"gap", "overdue"}:
+                continue
+            if issues and issues[-1]["end"] == start and issues[-1]["status"] == state["status"]:
+                issues[-1]["end"] = end
+            else:
+                issues.append({"start": start, "end": end, "status": state["status"]})
+        result.append({"apartment_id": apartment.id, "issues": issues})
+    return {"today": today.isoformat(), "mode": mode, "apartments": result}

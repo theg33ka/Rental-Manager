@@ -133,7 +133,7 @@ from rental_manager.services.billing import (
     utility_line_period,
 )
 from rental_manager.services.deepseek_client import DeepSeekClient, DeepSeekClientError, DeepSeekResult
-from rental_manager.services.payment_calendar import payment_calendar
+from rental_manager.services.payment_calendar import payment_calendar, payment_calendar_summary
 from rental_manager.services.owner_ai_tools import build_owner_read_tools_context
 from rental_manager.services.owner_operations import (
     OWNER_OPERATION_SPECS,
@@ -13874,6 +13874,14 @@ def utility_timeline(session: Session = Depends(get_session)) -> list[dict[str, 
 def utility_payment_calendar(start: date, end: date, mode: str = "utility", session: Session = Depends(get_session)) -> dict[str, Any]:
     try:
         return payment_calendar(session, start, end, mode=mode, ignored_lease_ids=ignored_lease_ids(session))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/utilities/calendar/summary")
+def utility_calendar_summary(mode: str = "utility", session: Session = Depends(get_session)) -> dict[str, Any]:
+    try:
+        return payment_calendar_summary(session, mode=mode, ignored_lease_ids=ignored_lease_ids(session))
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 

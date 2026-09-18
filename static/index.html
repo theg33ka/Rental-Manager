@@ -219,12 +219,12 @@
       @keyframes loading-rotate { to { transform: rotate(360deg); } }
       @keyframes loading-dot { 0%, 100% { opacity: .35; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-2px); } }
     </style>
-    <link rel="stylesheet" href="/static/styles.css?v=2026-09-17-calendar-v1" />
+    <link rel="stylesheet" href="/static/styles.css?v=2026-09-18-calendar-v2" />
     <link rel="stylesheet" href="/static/premium.css?v=2026-07-23-edit-utility-v8" />
     <link rel="stylesheet" href="/static/neon-ui.css?v=2026-08-29-themes-v2" />
     <link rel="stylesheet" href="/static/white-ui.css?v=2026-08-29-themes-v2" />
     <link rel="stylesheet" href="/static/pen-ui.css?v=2026-08-30-pen-v1" />
-    <link rel="stylesheet" href="/static/payment-calendar.css?v=2026-09-17-calendar-v1" />
+    <link rel="stylesheet" href="/static/payment-calendar.css?v=2026-09-18-calendar-v2" />
   </head>
   <body class="auth-locked app-loading" data-palette="neon">
     <script>
@@ -570,6 +570,7 @@
           <div><p class="eyebrow">Коммунальные услуги</p><h2>Счета и распределение</h2><p class="muted">Показания, расчёт начислений, выпуск и оплата поставщикам.</p></div>
           <div class="pill-row"><button id="openPaymentCalendarBtn" type="button" class="primary">Календарь оплат</button><button id="openTariffsBtn" type="button">Тарифы</button></div>
         </div>
+        <div id="paymentCalendarModal" class="payment-calendar-page" hidden></div>
         <div class="pen-utility-layout">
           <div class="pen-utility-main">
             <details class="operational-tool">
@@ -1063,9 +1064,8 @@
     <div id="receiptDocumentModal" class="modal-shell" hidden></div>
     <div id="quickActionsModal" class="modal-shell" hidden></div>
     <div id="portfolioEditorModal" class="modal-shell" hidden></div>
-    <div id="paymentCalendarModal" class="modal-shell" hidden></div>
     <div id="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/static/js/bootstrap.js?v=2026-09-17-calendar-v1"></script>
+    <script type="module" src="/static/js/bootstrap.js?v=2026-09-18-calendar-v2"></script>
   </body>
 </html>
 

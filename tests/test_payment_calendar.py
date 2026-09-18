@@ -1,6 +1,6 @@
 import asyncio
 import json
-from datetime import date
+from datetime import date, timedelta
 from unittest.mock import patch
 
 from fastapi import HTTPException
@@ -10,7 +10,7 @@ from starlette.responses import JSONResponse
 from rental_manager import main
 from rental_manager.models import Apartment, Lease, RentalObject, RentCharge, Tenant, UtilityBill, UtilityBillLine, UtilityService
 from rental_manager.security.sessions import issue_session
-from rental_manager.services.payment_calendar import payment_calendar
+from rental_manager.services.payment_calendar import payment_calendar, payment_calendar_summary
 from tests.test_billing import DatabaseTestCase
 
 
@@ -80,7 +80,7 @@ class PaymentCalendarTests(DatabaseTestCase):
             _, apartment, lease, service = self.fixture(session)
             self.line(session, apartment, lease, service, "2026-09-01", "2026-09-08", paid=100, kind="advance")
             row = self.calendar(session)["objects"][0]["apartments"][0]
-            self.assertEqual(row["days"][0]["status"], "unbilled")
+            self.assertEqual(row["days"][0]["status"], "recent")
             self.assertEqual(len(row["days"][0]["entry_ids"]), 1)
             self.line(session, apartment, lease, service, "2026-09-01", "2026-09-08", paid=100, draft=True, status="paid")
             self.assertEqual(self.calendar(session)["objects"][0]["apartments"][0]["days"][0]["status"], "draft")
@@ -90,7 +90,7 @@ class PaymentCalendarTests(DatabaseTestCase):
             _, apartment, lease, service = self.fixture(session)
             apartment.active = False
             self.line(session, apartment, lease, service, "2026-09-01", "2026-09-08", status="cancelled")
-            self.assertEqual(self.calendar(session)["objects"][0]["apartments"][0]["days"][0]["status"], "unbilled")
+            self.assertEqual(self.calendar(session)["objects"][0]["apartments"][0]["days"][0]["status"], "recent")
             ignored = self.calendar(session, ignored_lease_ids={lease.id})["objects"][0]["apartments"][0]
             self.assertEqual(ignored["days"][0]["status"], "vacant")
             self.assertFalse(ignored["active"])
@@ -119,7 +119,7 @@ class PaymentCalendarTests(DatabaseTestCase):
             self.line(session, apartment, lease, service, "2026-09-01", "2026-09-03", paid=100)
             row = self.calendar(session)["objects"][0]["apartments"][0]
             self.assertEqual(row["days"][1]["status"], "paid")
-            self.assertEqual(row["days"][2]["status"], "unbilled")
+            self.assertEqual(row["days"][2]["status"], "recent")
             for start, end, mode in [(date(2026, 1, 1), date(2026, 12, 1), "utility"), (date(2026, 9, 2), date(2026, 9, 1), "utility"), (date(2026, 9, 1), date(2026, 9, 1), "other")]:
                 with self.subTest(start=start, mode=mode), self.assertRaises(HTTPException) as error:
                     main.utility_payment_calendar(start, end, mode, session)
@@ -128,13 +128,14 @@ class PaymentCalendarTests(DatabaseTestCase):
             self.assertEqual(single["dates"], ["2026-09-01"])
 
     def test_calendar_requires_owner_session(self):
-        for role, expected in [(None, 401), ("guest", 403), ("owner", 200)]:
-            with self.subTest(role=role), self.Session() as session:
+        cases = [(role, expected, path) for role, expected in [(None, 401), ("guest", 403), ("owner", 200)] for path in ["/api/utilities/calendar", "/api/utilities/calendar/summary"]]
+        for role, expected, path in cases:
+            with self.subTest(role=role, path=path), self.Session() as session:
                 headers = []
                 if role:
                     issued = issue_session(session, role)
                     headers.append((b"cookie", f"rental_manager_panel_session={issued.token}".encode("ascii")))
-                scope = {"type": "http", "method": "GET", "path": "/api/utilities/calendar", "headers": headers, "query_string": b"start=2026-09-01&end=2026-09-30", "server": ("test", 80), "client": ("127.0.0.1", 1234), "scheme": "http"}
+                scope = {"type": "http", "method": "GET", "path": path, "headers": headers, "query_string": b"start=2026-09-01&end=2026-09-30", "server": ("test", 80), "client": ("127.0.0.1", 1234), "scheme": "http"}
 
                 async def call_next(_):
                     return JSONResponse({"ok": True})
@@ -142,3 +143,76 @@ class PaymentCalendarTests(DatabaseTestCase):
                 with patch.object(main, "SessionLocal", self.Session):
                     response = asyncio.run(main.panel_auth_middleware(Request(scope), call_next))
                 self.assertEqual(response.status_code, expected)
+
+    def test_unbilled_age_boundary_and_future(self):
+        with self.Session() as session:
+            _, apartment, lease, _ = self.fixture(session)
+            lease.end_date = None
+            session.flush()
+            today = date(2026, 9, 17)
+            payload = payment_calendar(session, today - timedelta(days=32), today + timedelta(days=1), today=today)
+            days = payload["objects"][0]["apartments"][0]["days"]
+            self.assertEqual(days[0]["status"], "to_bill")
+            self.assertTrue(all(day["status"] == "recent" for day in days[1:-1]))
+            self.assertEqual(days[-1]["status"], "unbilled")
+
+    def test_gap_uses_later_paid_usage_outside_window_of_same_tenant(self):
+        with self.Session() as session:
+            _, apartment, lease, service = self.fixture(session)
+            self.line(session, apartment, lease, service, "2026-09-01", "2026-09-08", paid=100)
+            day = payment_calendar(session, date(2026, 7, 1), date(2026, 7, 1), today=date(2026, 9, 17))["objects"][0]["apartments"][0]["days"][0]
+            self.assertEqual(day["status"], "gap")
+            new = Lease(apartment=apartment, tenant=Tenant(full_name="Новый"), start_date=date(2026, 9, 15), payment_day=15)
+            session.add(new)
+            session.flush()
+            self.assertEqual(self.calendar(session)["objects"][0]["apartments"][0]["days"][14]["status"], "recent")
+            session.expire_all()
+            summary = payment_calendar_summary(session, today=date(2026, 9, 17))
+            self.assertEqual(summary["apartments"][0]["issues"], [{"start": "2026-06-26", "end": "2026-09-01", "status": "gap"}])
+            self.assertFalse(session.dirty)
+            self.assertFalse(session.new)
+
+    def test_drafts_advances_cancelled_and_other_tenant_cannot_create_gap(self):
+        with self.Session() as session:
+            _, apartment, lease, service = self.fixture(session)
+            self.line(session, apartment, lease, service, "2026-09-01", "2026-09-08", paid=100, draft=True)
+            self.line(session, apartment, lease, service, "2026-09-01", "2026-09-08", paid=100, kind="advance")
+            self.line(session, apartment, lease, service, "2026-09-01", "2026-09-08", paid=100, status="cancelled")
+            new = Lease(apartment=apartment, tenant=Tenant(full_name="Новый"), start_date=date(2026, 9, 15), payment_day=15)
+            session.add(new)
+            session.flush()
+            self.line(session, apartment, new, service, "2026-09-15", "2026-09-18", paid=100)
+            day = payment_calendar(session, date(2026, 7, 1), date(2026, 7, 1), today=date(2026, 9, 17))["objects"][0]["apartments"][0]["days"][0]
+            self.assertEqual(day["status"], "to_bill")
+            self.assertEqual(payment_calendar_summary(session, today=date(2026, 9, 17))["apartments"][0]["issues"], [])
+
+    def test_invoice_bands_keep_whole_period_amount_and_separate_holes(self):
+        with self.Session() as session:
+            _, apartment, lease, service = self.fixture(session)
+            first = self.line(session, apartment, lease, service, "2026-06-26", "2026-08-01", paid=100)
+            second = self.line(session, apartment, lease, service, "2026-08-01", "2026-08-05", paid=20)
+            second.bill = first.bill
+            third = self.line(session, apartment, lease, service, "2026-09-01", "2026-09-08", due=date(2026, 9, 10))
+            third.bill = first.bill
+            session.flush()
+            periods = self.calendar(session)["objects"][0]["apartments"][0]["periods"]
+            self.assertEqual(len(periods), 2)
+            self.assertEqual((periods[0]["start"], periods[0]["end"], periods[0]["days"]), ("2026-06-26", "2026-08-05", 40))
+            self.assertEqual((periods[0]["amount"], periods[0]["paid"], periods[0]["debt"], periods[0]["status"]), (200, 120, 80, "partial"))
+            self.assertEqual((periods[1]["days"], periods[1]["status"]), (7, "overdue"))
+
+    def test_summary_matches_daily_red_ranges_without_expanding_years(self):
+        with self.Session() as session:
+            _, apartment, lease, service = self.fixture(session)
+            lease.start_date = date(2000, 1, 1)
+            lease.end_date = None
+            self.line(session, apartment, lease, service, "2026-09-01", "2026-09-08", paid=100)
+            self.line(session, apartment, lease, service, "2026-09-08", "2026-09-12", due=date(2026, 9, 10))
+            from rental_manager.services import payment_calendar as module
+            with patch.object(module, "calendar_day", wraps=module.calendar_day) as evaluate:
+                summary = payment_calendar_summary(session, today=date(2026, 9, 17))
+                self.assertLess(evaluate.call_count, 15)
+            issues = summary["apartments"][0]["issues"]
+            self.assertEqual(issues[0], {"start": "2000-01-01", "end": "2026-09-01", "status": "gap"})
+            for day in self.calendar(session)["objects"][0]["apartments"][0]["days"][:17]:
+                self.assertEqual(day["status"] in {"gap", "overdue"}, any(issue["start"] <= day["date"] < issue["end"] for issue in issues))
