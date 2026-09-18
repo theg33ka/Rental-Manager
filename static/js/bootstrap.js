@@ -4,6 +4,6 @@ import { createPaymentCalendar } from "./payment-calendar.js?v=2026-09-18-calend
 window.RentalApi = apiClient;
 window.createPaymentCalendar = createPaymentCalendar;
 const script = document.createElement("script");
-script.src = "/static/app.js?v=2026-09-18-calendar-v2";
+script.src = "/static/app.js?v=2026-09-18-portfolio-v1";
 script.defer = true;
 document.body.append(script);
