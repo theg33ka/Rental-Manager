@@ -29,6 +29,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from rental_manager.database import Base, DATABASE_URL, ROOT_DIR, SessionLocal, get_session, init_db
+from rental_manager.services.lease_deletion import detach_lease_audit, prepare_lease_deletion
 from rental_manager.models import (
     AgentActionProposal,
     AgentMemory,
@@ -12705,6 +12706,7 @@ def delete_lease(lease_id: int, session: Session = Depends(get_session)) -> dict
     if not lease:
         raise HTTPException(404, "Договор не найден")
     tenant = lease.tenant
+    prepare_lease_deletion(session, lease.id)
     for state in session.scalars(select(AgentTenantState).where(AgentTenantState.lease_id == lease.id)).all():
         session.delete(state)
     for situation in session.scalars(select(PaymentSituation).where(PaymentSituation.lease_id == lease.id)).all():
@@ -12732,7 +12734,10 @@ def delete_lease(lease_id: int, session: Session = Depends(get_session)) -> dict
         conversation.lease_id = None
         conversation.tenant_id = None
     session.execute(delete(MessageLog).where(MessageLog.lease_id == lease.id))
-    for receipt in session.scalars(select(PaymentReceipt).where(PaymentReceipt.lease_id == lease.id)).all():
+    charge_ids = select(RentCharge.id).where(RentCharge.lease_id == lease.id)
+    for receipt in session.scalars(select(PaymentReceipt).where(
+        or_(PaymentReceipt.lease_id == lease.id, PaymentReceipt.rent_charge_id.in_(charge_ids))
+    )).all():
         linked_expense = linked_expense_fund_record(session, receipt.id)
         if linked_expense:
             session.delete(linked_expense)
@@ -12740,11 +12745,17 @@ def delete_lease(lease_id: int, session: Session = Depends(get_session)) -> dict
     for line in session.scalars(select(UtilityBillLine).where(UtilityBillLine.lease_id == lease.id)).all():
         line.lease_id = None
         line.status = "not_required"
+    session.flush()
     session.execute(delete(RentCharge).where(RentCharge.lease_id == lease.id))
     set_lease_ignored(session, lease.id, False)
+    delete_tenant = tenant is not None and not session.scalar(
+        select(Lease.id).where(Lease.tenant_id == tenant.id, Lease.id != lease.id).limit(1)
+    )
+    detach_lease_audit(session, lease, delete_tenant=delete_tenant)
+    session.expire(lease, ["rent_charges", "manual_debts"])
     session.delete(lease)
     session.flush()
-    if tenant and not session.scalar(select(Lease.id).where(Lease.tenant_id == tenant.id).limit(1)):
+    if delete_tenant:
         session.delete(tenant)
     session.commit()
     return {"ok": True}
