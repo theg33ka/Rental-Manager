@@ -43,6 +43,8 @@ test("портфель сортирует квартиры и отделяет �
     renderLeases();
   });
   await expect(page.locator("#leaseList tbody tr td:nth-child(2)")).toHaveText(["БД1", "БД2", "БД10", "ЧД1"]);
+  await page.locator("#leaseList tbody tr").first().locator("summary").click();
+  await expect(page.locator("#leaseList tbody tr").first().getByRole("button", { name: "Повторить переезд", exact: true })).toBeVisible();
   await expect(page.locator("#informationalLeases")).toBeVisible();
   await expect(page.locator("#informationalLeaseList tbody tr")).toHaveCount(1);
   await expect(page.locator("#informationalLeaseList")).toContainText("Информационный жилец");

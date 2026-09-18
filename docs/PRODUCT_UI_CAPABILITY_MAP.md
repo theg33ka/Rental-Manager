@@ -337,6 +337,7 @@ Skill: draft → proposed → active → disabled
 - Trigger: жилец меняет квартиру или уезжает.
 - Steps: выбрать operation/date/target → backend validates vacancy → closes old lease → optionally opens new lease → updates charges/utilities/history → sends configured notifications.
 - Edge: final utility state and ignored leases.
+- Если ошибочный договор назначения удалён, в закрытом исходном договоре доступно «Повторить переезд». Пользователь подтверждает изменение дат; backend проверяет последующие договоры жильца и пересечения проживания, затем восстанавливает начисления исходного договора до новой даты переезда.
 - Result: no overlapping active lease; tenant history preserved.
 
 ### Flow 9. Компенсировать личный расход

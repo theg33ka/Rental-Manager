@@ -3088,7 +3088,7 @@ function renderLeases() {
           <summary>Ещё</summary>
           <div>
             <label class="checkbox-inline"><input type="checkbox" ${lease.ignored ? "checked" : ""} onchange="toggleLeaseIgnored(${lease.id}, this.checked)" /> Только информация</label>
-            ${lease.active ? `<button class="mini" onclick="transferLease(${lease.id})">Оформить переезд</button>` : ""}
+            <button class="mini" onclick="transferLease(${lease.id})">${lease.active ? "Оформить переезд" : "Повторить переезд"}</button>
             ${lease.active ? `<button class="mini danger-soft" onclick="moveOut(${lease.id})">Оформить выезд</button>` : ""}
             <button class="mini danger-soft" onclick="deleteLease(${lease.id})">Удалить договор</button>
           </div>
@@ -4845,6 +4845,7 @@ function moneyPromptValue(value) {
 async function transferLease(id) {
   const lease = state.bootstrap.leases.find((item) => Number(item.id) === Number(id));
   if (!lease) return;
+  if (!lease.active && !confirm("Повторно оформить переезд из закрытого договора? Дата окончания исходного договора и начисления будут обновлены.")) return;
   const transferDate = prompt("Дата переезда", today());
   if (!transferDate) return;
 
@@ -4883,6 +4884,7 @@ async function transferLease(id) {
       transfer_date: transferDate,
       ip_amount: ipAmount,
       personal_amount: personalAmount,
+      repeat_closed_transfer: !lease.active,
     }),
   });
   toast(`Переезд оформлен: ${result.old_lease.apartment} → ${result.new_lease.apartment}`);

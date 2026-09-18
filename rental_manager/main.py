@@ -12600,7 +12600,8 @@ def transfer_lease(lease_id: int, payload: dict[str, Any], session: Session = De
     lease = session.get(Lease, lease_id)
     if not lease:
         raise HTTPException(404, "Договор не найден")
-    if not lease.active:
+    repeat_closed_transfer = not lease.active and setting_bool_value(payload.get("repeat_closed_transfer", False))
+    if not lease.active and not repeat_closed_transfer:
         raise HTTPException(400, "Переезд можно оформить только для активного договора")
 
     target_apartment_id = parse_transfer_apartment_id(payload)
@@ -12621,6 +12622,19 @@ def transfer_lease(lease_id: int, payload: dict[str, Any], session: Session = De
     if transfer_date <= lease.start_date:
         raise HTTPException(400, "Дата переезда должна быть позже даты текущего заезда")
     old_end = transfer_date - timedelta(days=1)
+
+    if repeat_closed_transfer:
+        other_leases = session.scalars(select(Lease).where(Lease.id != lease.id)).all()
+        for other in other_leases:
+            if lease_ignored(session, other.id):
+                continue
+            if other.tenant_id == lease.tenant_id and (other.end_date is None or other.end_date >= transfer_date):
+                raise HTTPException(400, "У жильца уже есть другой договор после выбранной даты. Проверьте историю переездов.")
+            if (other.apartment_id == lease.apartment_id and other.start_date <= old_end
+                    and (other.end_date is None or other.end_date >= lease.start_date)):
+                raise HTTPException(400, "Новая дата пересекается с проживанием другого жильца в исходной квартире")
+            if other.apartment_id == target_apartment.id and (other.end_date is None or other.end_date >= transfer_date):
+                raise HTTPException(400, "В выбранной квартире есть договор, пересекающийся с датами переезда")
 
     target_conflict = next(
         (
@@ -12657,6 +12671,10 @@ def transfer_lease(lease_id: int, payload: dict[str, Any], session: Session = De
     ip_amount = parse_transfer_money(payload, "ip_amount", float(lease.ip_amount or 0))
     personal_amount = parse_transfer_money(payload, "personal_amount", float(lease.personal_amount or 0))
 
+    if repeat_closed_transfer:
+        lease.end_date = old_end
+        lease.active = True
+        session.flush()
     generate_rent_charges(session, until=old_end)
     old_notes = [lease.notes or "", f"Переезд в {target_apartment.name} с {transfer_date:%d.%m.%Y}."]
     lease.end_date = old_end

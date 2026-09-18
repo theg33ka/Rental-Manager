@@ -130,7 +130,7 @@ Effective resolution is not a public endpoint: shared backend logic resolves apa
 | `GET /api/leases` | Owner | List active/history contracts | — → leases | Lease joined to Tenant/Apartment |
 | `POST /api/leases/onboard` | Owner | Onboard tenant | apartment, contacts, start/end, payment_day, IP/personal/deposit/notes/ignored → lease | Apartment required/free; date/day/money validation; creates Tenant+Lease+charges |
 | `PATCH /api/leases/{id}` | Owner | Edit tenant/contract terms | supported tenant+lease fields → lease | 404; vacancy/date/day validation; recalculation/generation |
-| `POST /api/leases/{id}/transfer` | Owner | Move tenant | target apartment/date/terms → new/old lease payload | Target free; dates and utility transition validated; transactional |
+| `POST /api/leases/{id}/transfer` | Owner | Move tenant | target apartment/date/terms; optional `repeat_closed_transfer: true` → new/old lease payload | Closed contract retry requires explicit flag, no subsequent tenant contract or overlapping source/target occupancy; transactional |
 | `POST /api/leases/{id}/move-out` | Owner | End occupancy | end_date and optional final utility inputs → result | Active lease/date rules; final notifications/lines may fail explicitly |
 | `DELETE /api/leases/{id}` | Owner | Delete contract under safety rules | id → `{ok}`/summary | Dependencies/history restrictions; recalculates balances; destructive |
 
