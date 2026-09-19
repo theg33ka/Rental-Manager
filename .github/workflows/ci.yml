@@ -70,6 +70,8 @@ jobs:
       - uses: android-actions/setup-android@v3
       - run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
       - shell: powershell
+        run: ./android/RentalManager/test-java.ps1 -JavaHome $env:JAVA_HOME
+      - shell: powershell
         run: ./android/RentalManager/build-apk.ps1 -JavaHome $env:JAVA_HOME
       - uses: actions/upload-artifact@v4
         with:

@@ -78,6 +78,8 @@ public class MainActivity extends Activity {
     private LinearLayout bottomBar;
     private TextView screenTitle;
     private TextView screenSubtitle;
+    private TextView updateBanner;
+    private final Runnable updateListener = () -> refreshUpdateBanner();
     private LinearLayout loadingOverlay;
     private LoadingRingView loadingRingView;
     private TextView loadingTitleView;
@@ -139,6 +141,8 @@ public class MainActivity extends Activity {
         requestNotificationPermission();
         buildShell();
         ReminderScheduler.schedule(this);
+        AppUpdates.schedule(this);
+        AppUpdates.check(this, true, false, null);
         checkServerConnection(true);
         checkAuthAndLoad();
     }
@@ -147,6 +151,13 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         activityResumed = true;
+        AppUpdates.observe(updateListener);
+        refreshUpdateBanner();
+        AppUpdates.check(this, false, false, null);
+        if (getIntent().getBooleanExtra("open_update", false)) {
+            getIntent().removeExtra("open_update");
+            AppUpdates.showDialog(this);
+        }
         if (screenSubtitle != null) screenSubtitle.setText(api.baseUrl());
         checkServerConnection(false);
         if (!lastConnectionOk) startReconnectLoop();
@@ -155,8 +166,20 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         activityResumed = false;
+        AppUpdates.unobserve(updateListener);
         stopReconnectLoop();
         super.onPause();
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+    }
+
+    private void refreshUpdateBanner() {
+        if (updateBanner == null) return;
+        updateBanner.setVisibility(AppUpdates.ready(this) ? View.VISIBLE : View.GONE);
+        updateBanner.setText(AppUpdates.status(this));
     }
 
     private void buildShell() {
@@ -186,6 +209,13 @@ public class MainActivity extends Activity {
         header.addView(menu);
         root.addView(header);
 
+        updateBanner = label("", 14, green, true);
+        updateBanner.setPadding(dp(18), dp(12), dp(18), dp(12));
+        updateBanner.setMinHeight(dp(48));
+        updateBanner.setOnClickListener(v -> AppUpdates.showDialog(this));
+        root.addView(updateBanner);
+        refreshUpdateBanner();
+
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(false);
         content = new LinearLayout(this);
@@ -203,6 +233,7 @@ public class MainActivity extends Activity {
         appFrame.addView(root, new FrameLayout.LayoutParams(-1, -1));
         buildLoadingOverlay();
         setContentView(appFrame);
+        MobileUi.applyWindow(this, appFrame);
 
         refresh.setOnClickListener(v -> loadCurrentTab(true));
         menu.setOnClickListener(v -> showAppMenuDialog());
@@ -603,7 +634,7 @@ public class MainActivity extends Activity {
         form.addView(secondaryButton("Сменить хост приложения", v -> showHostDialog()), new LinearLayout.LayoutParams(-1, dp(46)));
         form.addView(secondaryButton("Публичный URL и Telegram", v -> showServerSettingsDialog()), new LinearLayout.LayoutParams(-1, dp(46)));
         form.addView(secondaryButton("Экспорт базы", v -> download("/api/admin/database-export", "rental-manager-db.json")), new LinearLayout.LayoutParams(-1, dp(46)));
-        form.addView(secondaryButton("Обновить приложение", v -> download("/mobile-app.apk", "rental-manager-mobile.apk")), new LinearLayout.LayoutParams(-1, dp(46)));
+        form.addView(secondaryButton("Обновления приложения", v -> AppUpdates.showDialog(this)), new LinearLayout.LayoutParams(-1, dp(46)));
         form.addView(secondaryButton("Push-уведомления", v -> startActivity(new Intent(this, NotificationSettingsActivity.class))), new LinearLayout.LayoutParams(-1, dp(46)));
         form.addView(secondaryButton("Выйти из PIN-сессии", v -> logout()), new LinearLayout.LayoutParams(-1, dp(46)));
         new AlertDialog.Builder(this)
@@ -2029,7 +2060,7 @@ public class MainActivity extends Activity {
         settings.addView(secondaryButton("Сменить хост", v -> showHostDialog()));
         settings.addView(secondaryButton("Открыть", v -> showServerSettingsDialog()));
         settings.addView(secondaryButton("Экспорт базы", v -> download("/api/admin/database-export", "rental-manager-db.json")));
-        settings.addView(secondaryButton("Обновить приложение", v -> download("/mobile-app.apk", "rental-manager-mobile.apk")));
+        settings.addView(secondaryButton("Обновления приложения", v -> AppUpdates.showDialog(this)));
         settings.addView(secondaryButton("Выйти из PIN-сессии", v -> logout()));
         content.addView(settings);
         }

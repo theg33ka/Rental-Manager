@@ -1,12 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <style name="AppTheme" parent="@android:style/Theme.Material.NoActionBar">
-        <item name="android:fontFamily">sans</item>
+        <item name="android:fontFamily">sans-serif</item>
         <item name="android:windowNoTitle">true</item>
         <item name="android:windowActionBar">false</item>
         <item name="android:windowLightStatusBar">false</item>
-        <item name="android:statusBarColor">#070A0E</item>
-        <item name="android:navigationBarColor">#070A0E</item>
-        <item name="android:colorAccent">#0A84FF</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:statusBarColor">#091018</item>
+        <item name="android:navigationBarColor">#091018</item>
+        <item name="android:windowBackground">#091018</item>
+        <item name="android:colorBackground">#111C27</item>
+        <item name="android:colorAccent">#5CE0B4</item>
+        <item name="android:colorControlActivated">#5CE0B4</item>
+        <item name="android:colorControlNormal">#9CAFBE</item>
+        <item name="android:textColorPrimary">#EEF5F9</item>
+        <item name="android:textColorSecondary">#9CAFBE</item>
+        <item name="android:colorButtonNormal">#192835</item>
+        <item name="android:forceDarkAllowed">false</item>
+        <item name="android:windowSoftInputMode">adjustResize</item>
     </style>
 </resources>

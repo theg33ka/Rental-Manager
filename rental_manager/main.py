@@ -137,6 +137,7 @@ from rental_manager.services.billing import (
 )
 from rental_manager.services.deepseek_client import DeepSeekClient, DeepSeekClientError, DeepSeekResult
 from rental_manager.services.payment_calendar import payment_calendar, payment_calendar_summary
+from rental_manager.services.mobile_updates import mobile_update_metadata
 from rental_manager.services.owner_ai_tools import build_owner_read_tools_context
 from rental_manager.services.owner_operations import (
     OWNER_OPERATION_SPECS,
@@ -657,7 +658,10 @@ PANEL_AUTH_COOKIE = "rental_manager_panel_session"
 PANEL_CSRF_COOKIE = "rental_manager_csrf"
 PANEL_AUTH_MAX_AGE_SECONDS = 60 * 60 * 24 * 30
 PANEL_ALLOWED_GUEST_TAB_PATHS = {"/api/bootstrap", "/api/app-state"}
-MOBILE_APK_PATH = ROOT_DIR / "android" / "RentalManager" / "build" / "rental-manager-mobile.apk"
+MOBILE_APK_PATH = Path(
+    os.environ.get("RENTAL_MANAGER_MOBILE_APK_PATH", "").strip()
+    or ROOT_DIR / "android" / "RentalManager" / "build" / "rental-manager-mobile.apk"
+)
 MONTH_NAMES = [
     "январь",
     "февраль",
@@ -922,14 +926,22 @@ def health() -> dict[str, str]:
 
 
 @app.get("/mobile-app.apk")
-def mobile_app_apk() -> FileResponse:
-    if not MOBILE_APK_PATH.exists():
+def mobile_app_apk(sha256: str = "") -> FileResponse:
+    if not MOBILE_APK_PATH.is_file():
         raise HTTPException(status_code=404, detail="APK ещё не собран")
+    if sha256 and mobile_update_metadata(MOBILE_APK_PATH).get("sha256") != sha256:
+        raise HTTPException(status_code=409, detail="Версия обновления изменилась. Повторите проверку.")
     return FileResponse(
         MOBILE_APK_PATH,
         media_type="application/vnd.android.package-archive",
         filename="rental-manager-mobile.apk",
+        headers={"Cache-Control": "no-store"},
     )
+
+
+@app.get("/api/mobile-update")
+def mobile_update() -> JSONResponse:
+    return JSONResponse(mobile_update_metadata(MOBILE_APK_PATH), headers={"Cache-Control": "no-store"})
 
 
 def is_public_path(path: str) -> bool:
@@ -938,6 +950,7 @@ def is_public_path(path: str) -> bool:
         "/health",
         "/healthz",
         "/mobile-app.apk",
+        "/api/mobile-update",
         "/api/auth/status",
         "/api/auth/pin",
         "/api/integrations/telegram/webhook",

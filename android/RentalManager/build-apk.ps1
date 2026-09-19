@@ -6,19 +6,42 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if ($PSBoundParameters.ContainsKey("KeystorePath") -and [string]::IsNullOrWhiteSpace($KeystorePath)) {
+    throw "An explicitly supplied signing keystore path must not be empty"
+}
 
 function Run-Native([string]$Command, [string[]]$Arguments) {
     & $Command @Arguments
     if ($LASTEXITCODE -ne 0) {
-        throw "Command failed: $Command $Arguments"
+        throw "Command failed: $Command (exit $LASTEXITCODE)"
     }
 }
 
-$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Root = (Resolve-Path -LiteralPath $PSScriptRoot).ProviderPath
+$BuildRoot = [IO.Path]::GetFullPath((Join-Path $Root "build"))
+function Assert-BuildPath([string]$Path) {
+    $FullPath = [IO.Path]::GetFullPath($Path)
+    if (!$FullPath.StartsWith($BuildRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Build output is outside the build directory: $FullPath"
+    }
+    $Ancestor = $FullPath
+    while ($Ancestor -and $Ancestor.Length -ge $Root.Length) {
+        if (Test-Path -LiteralPath $Ancestor) {
+            if ((Get-Item -LiteralPath $Ancestor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw "Build output cannot use a symbolic link or junction: $Ancestor"
+            }
+        }
+        $Ancestor = Split-Path -Parent $Ancestor
+    }
+    return $FullPath
+}
 $ManifestPath = Join-Path $Root "app\src\main\AndroidManifest.xml"
 [xml]$ManifestXml = Get-Content -LiteralPath $ManifestPath
 $AndroidNamespace = "http://schemas.android.com/apk/res/android"
 $VersionName = $ManifestXml.manifest.GetAttribute("versionName", $AndroidNamespace)
+if ($VersionName -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
+    throw "Android versionName must contain three numeric components"
+}
 $VersionedApk = Join-Path $Root "build\rental-manager-mobile-$VersionName.apk"
 $BuildTools = Join-Path $SdkRoot "build-tools\$BuildToolsVersion"
 $AndroidJar = Join-Path $SdkRoot "platforms\android-35\android.jar"
@@ -28,14 +51,30 @@ $Keytool = Join-Path $JavaHome "bin\keytool.exe"
 if (!$KeystorePath) {
     $KeystorePath = Join-Path $Root "signing\rental-manager-dev.keystore"
 }
+elseif (!(Test-Path -LiteralPath $KeystorePath -PathType Leaf)) {
+    throw "The explicitly supplied signing keystore does not exist; refusing to create a replacement"
+}
 
 if (!(Test-Path $AndroidJar)) {
     throw "Android platform jar not found: $AndroidJar"
 }
 
-Remove-Item -Recurse -Force "$Root\build\compiled", "$Root\build\gen", "$Root\build\classes", "$Root\build\dex" -ErrorAction SilentlyContinue
-Remove-Item -Force "$Root\build\unsigned.apk", "$Root\build\classes.jar", "$Root\build\rental-manager-mobile-aligned.apk", "$Root\build\rental-manager-mobile.apk" -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath $VersionedApk -Force -ErrorAction SilentlyContinue
+$BuildDirectories = @("compiled", "gen", "classes", "dex") | ForEach-Object { Assert-BuildPath (Join-Path $BuildRoot $_) }
+$BuildFiles = @("unsigned.apk", "classes.jar", "rental-manager-mobile-aligned.apk", "rental-manager-mobile.apk", "rental-manager-mobile-$VersionName.apk") | ForEach-Object { Assert-BuildPath (Join-Path $BuildRoot $_) }
+foreach ($Path in $BuildDirectories) {
+    if (Test-Path -LiteralPath $Path) {
+        $LinkedEntries = @(Get-ChildItem -LiteralPath $Path -Recurse -Force | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint })
+        if ($LinkedEntries.Count -gt 0) {
+            throw "Build cleanup refuses symbolic links or junctions inside: $Path"
+        }
+    }
+}
+foreach ($Path in $BuildDirectories) {
+    if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Recurse -Force }
+}
+foreach ($Path in $BuildFiles) {
+    if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force }
+}
 New-Item -ItemType Directory -Force "$Root\build\compiled", "$Root\build\gen", "$Root\build\classes", "$Root\build\dex" | Out-Null
 
 Run-Native "$BuildTools\aapt2.exe" @("compile", "--dir", "$Root\app\src\main\res", "-o", "$Root\build\compiled")

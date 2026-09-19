@@ -22,6 +22,7 @@
 | `GET /healthz` | Public | Deployment health | — → status/build/provider | Read-only |
 | `GET /health` | Public | Compatibility health alias | — → same as healthz | Legacy alias |
 | `GET /mobile-app.apk` | Public transport | Скачать Android artifact | — → APK file | 404 if artifact absent; binary not committed |
+| `GET /api/mobile-update` | Public transport | Автопроверка обновления Android | — → `available`, `version_code`, `version_name`, `package_name`, `min_sdk`, `download_url`, `sha256`, `size_bytes` | Version/hash read from served APK; absent/invalid artifact returns `{available:false}`; `Cache-Control: no-store` |
 | `GET /api/auth/status` | Public | Узнать session role/CSRF state | Cookie → authenticated/role/csrf | PanelSession |
 | `POST /api/auth/pin` | Public | Войти owner/guest | PIN, remember → role + cookies + CSRF | Compromised/invalid PIN, throttling/blocked attempts |
 | `POST /api/auth/logout` | Owner/guest + CSRF | Завершить текущую session | Cookie → `{ok}` and cleared cookies | Revokes PanelSession |
@@ -31,6 +32,8 @@
 | `POST /api/settings` | Owner | Сохранить global/integration/AI/security settings | Allowed key/value map → normalized settings | Unknown ignored; AI ranges/model/time validated; blank secrets/PIN preserve current; PIN revokes other sessions |
 | `GET /api/performance` | Owner | Мониторинг backend/AI/data counts | — → request/background/AI usage snapshot | Read-only technical view |
 | `POST /api/ai/test` | Owner | Проверить AI key/model | — → model/result/usage cost | AI disabled/budget/daily feature limits and provider failure |
+
+Android update metadata reads the compiled manifest inside the served APK, never the source manifest. `RENTAL_MANAGER_MOBILE_APK_PATH` can point to an APK in persistent storage; the default is `android/RentalManager/build/rental-manager-mobile.apk`. Release publication must atomically replace this file after signature verification. `download_url` includes a SHA-256 query: if the release changes before download, the APK endpoint returns `409` and the client checks metadata again. APK binaries and signing keys are not committed to Git.
 
 ## 2. Hermes Core
 
