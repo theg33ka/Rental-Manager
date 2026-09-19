@@ -23,6 +23,8 @@ final class NotificationPrefs {
     static final String KEY_SUSPICIOUS_RECEIPTS = "suspicious_receipts";
     static final String KEY_MONTHLY_REPORTS = "monthly_reports";
     static final String KEY_MANUAL_DEBTS = "manual_debts";
+    private static final String KEY_LAST_DIGEST = "notification_last_digest_v2";
+    private static final String KEY_LAST_DIGEST_SERVER = "notification_last_digest_server_v2";
 
     static final String MODE_LOUD = "loud";
     static final String MODE_VIBRATE = "vibrate";
@@ -82,7 +84,18 @@ final class NotificationPrefs {
     }
 
     static boolean stickyDebtEnabled(Context context) {
-        return prefs(context).getBoolean(KEY_STICKY_DEBT, true);
+        return prefs(context).getBoolean(KEY_STICKY_DEBT, false);
+    }
+
+    static String lastDigest(Context context) {
+        SharedPreferences saved = prefs(context);
+        if (!baseUrl(context).equals(saved.getString(KEY_LAST_DIGEST_SERVER, ""))) return "";
+        return saved.getString(KEY_LAST_DIGEST, "");
+    }
+
+    static void rememberDigest(Context context, String fingerprint) {
+        prefs(context).edit().putString(KEY_LAST_DIGEST, fingerprint)
+            .putString(KEY_LAST_DIGEST_SERVER, baseUrl(context)).apply();
     }
 
     static String mode(Context context) {

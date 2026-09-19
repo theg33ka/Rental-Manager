@@ -10,20 +10,49 @@ final class DashboardDigest {
     int alertCount = 0;
     int debtorApartmentCount = 0;
     final List<String> lines = new ArrayList<>();
+    final List<String> eventTokens = new ArrayList<>();
+    final List<Target> targets = new ArrayList<>();
+
+    static final class Target {
+        final String tab;
+        final String action;
+        final String label;
+
+        Target(String tab, String action, String label) {
+            this.tab = tab;
+            this.action = action;
+            this.label = label;
+        }
+    }
+
+    void addTarget(String tab, String action, String label) {
+        for (Target target : targets) if (target.tab.equals(tab) && target.action.equals(action)) return;
+        targets.add(new Target(tab, action, label));
+    }
+
+    Target primaryTarget() {
+        return targets.isEmpty() ? new Target("dashboard", "", "Открыть пульт") : targets.get(0);
+    }
+
+    String fingerprint() {
+        return NotificationPolicy.fingerprint(eventTokens);
+    }
 
     static DashboardDigest unauthorized() {
         DashboardDigest digest = new DashboardDigest();
         digest.authorized = false;
         digest.alertCount = 0;
-        digest.lines.add("Нужно войти по PIN в панели");
+        digest.lines.add("Откройте приложение и войдите по PIN. Данные не обновлены.");
+        digest.addTarget("dashboard", "login", "Войти");
         return digest;
     }
 
     static DashboardDigest error(String message) {
         DashboardDigest digest = new DashboardDigest();
         digest.networkOk = false;
-        digest.error = message == null ? "Не удалось проверить пульт" : message;
+        digest.error = "Не удалось обновить данные. Проверьте подключение к серверу.";
         digest.lines.add(digest.error);
+        digest.addTarget("dashboard", "connection", "Открыть пульт");
         return digest;
     }
 
@@ -34,8 +63,7 @@ final class DashboardDigest {
     String title() {
         if (!networkOk) return "Rental Manager: связи нет";
         if (!authorized) return "Rental Manager: нужен PIN";
-        if (debtorApartmentCount > 0) return "Есть задачи по аренде";
-        if (alertCount > 0) return "Пульт просит внимания";
+        if (alertCount > 0) return "Требуют внимания: " + alertCount;
         return "Rental Manager";
     }
 
@@ -46,7 +74,7 @@ final class DashboardDigest {
         if (!lines.isEmpty()) {
             return joinLimited(lines, 4);
         }
-        return "Критичных задач нет";
+        return "Нет задач по выбранным категориям";
     }
 
     String bigText() {

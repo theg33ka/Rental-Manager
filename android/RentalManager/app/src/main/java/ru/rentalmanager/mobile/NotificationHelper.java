@@ -18,6 +18,8 @@ final class NotificationHelper {
     static final String CHANNEL_STICKY = "rental_manager_status_panel_v3";
     static final int NOTIFICATION_DIGEST = 5101;
     static final int NOTIFICATION_STICKY_DEBT = 5102;
+    static final String EXTRA_TAB = "notification_tab";
+    static final String EXTRA_ACTION = "notification_action";
 
     private NotificationHelper() {
     }
@@ -33,6 +35,7 @@ final class NotificationHelper {
         );
         reminders.setDescription("Аренда, коммуналка, отчёты и проверки пульта.");
         reminders.enableVibration(true);
+        reminders.setLockscreenVisibility(Notification.VISIBILITY_PRIVATE);
         reminders.setLightColor(Color.rgb(37, 109, 90));
         manager.createNotificationChannel(reminders);
 
@@ -44,6 +47,7 @@ final class NotificationHelper {
         vibrate.setDescription("Без звука, но с вибрацией.");
         vibrate.setSound(null, null);
         vibrate.enableVibration(true);
+        vibrate.setLockscreenVisibility(Notification.VISIBILITY_PRIVATE);
         manager.createNotificationChannel(vibrate);
 
         NotificationChannel silent = new NotificationChannel(
@@ -54,6 +58,7 @@ final class NotificationHelper {
         silent.setDescription("Проверки пульта без звука и вибрации.");
         silent.setSound(null, null);
         silent.enableVibration(false);
+        silent.setLockscreenVisibility(Notification.VISIBILITY_PRIVATE);
         manager.createNotificationChannel(silent);
 
         NotificationChannel sticky = new NotificationChannel(
@@ -64,59 +69,61 @@ final class NotificationHelper {
         sticky.setDescription("Компактная статус-панель, пока есть квартиры-должники без отсрочки.");
         sticky.enableVibration(false);
         sticky.setSound(null, null);
+        sticky.setLockscreenVisibility(Notification.VISIBILITY_PRIVATE);
         sticky.setLightColor(Color.rgb(255, 69, 58));
         manager.createNotificationChannel(sticky);
     }
 
-    static void notifyDigest(Context context, DashboardDigest digest, boolean manual) {
+    static synchronized void notifyDigest(Context context, DashboardDigest digest, boolean manual) {
         ensureChannels(context);
-        boolean statusPanelActive = updateStickyDebt(context, digest);
-        if (statusPanelActive && !manual) {
+        updateStickyDebt(context, digest);
+        boolean healthy = digest.networkOk && digest.authorized;
+        int decision = NotificationPolicy.decision(NotificationPrefs.notificationsEnabled(context),
+            canPostNotifications(context), manual, isQuietNow(context), healthy, digest.hasAlerts(),
+            digest.fingerprint(), NotificationPrefs.lastDigest(context));
+        if (decision == NotificationPolicy.CANCEL) {
             cancel(context, NOTIFICATION_DIGEST);
+            if (healthy && !digest.hasAlerts()) NotificationPrefs.rememberDigest(context, "");
             return;
         }
-        if (!NotificationPrefs.notificationsEnabled(context) && !manual) return;
-        if (!manual && isQuietNow(context)) return;
-        if (!manual && !digest.hasAlerts() && digest.networkOk && digest.authorized) {
-            cancel(context, NOTIFICATION_DIGEST);
-            return;
-        }
-        if (!canPostNotifications(context)) return;
+        if (decision == NotificationPolicy.SKIP) return;
         NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
         if (manager == null) return;
-        Notification.Builder builder = baseBuilder(context, reminderChannel(context))
+        boolean silent = decision == NotificationPolicy.POST_SILENT;
+        String channel = silent ? CHANNEL_REMINDERS_SILENT : reminderChannel(context);
+        Notification.Builder builder = baseBuilder(context, channel)
             .setSmallIcon(R.drawable.ic_stat_rental)
             .setContentTitle(digest.title())
             .setContentText(digest.text())
             .setStyle(new Notification.BigTextStyle().bigText(digest.bigText()))
-            .setContentIntent(openAppIntent(context))
+            .setContentIntent(openAppIntent(context, digest.primaryTarget()))
             .setCategory(Notification.CATEGORY_REMINDER)
-            .setVisibility(Notification.VISIBILITY_PUBLIC)
+            .setVisibility(Notification.VISIBILITY_PRIVATE)
+            .setPublicVersion(privatePreview(context, channel))
             .setAutoCancel(true)
             .setShowWhen(true);
-        applyMode(context, builder);
+        for (int i = 0; i < digest.targets.size() && i < 3; i++) {
+            DashboardDigest.Target target = digest.targets.get(i);
+            builder.addAction(0, target.label, openAppIntent(context, target));
+        }
+        if (silent) builder.setPriority(Notification.PRIORITY_LOW).setDefaults(0).setSound(null).setVibrate(null);
+        else applyMode(context, builder);
         manager.notify(NOTIFICATION_DIGEST, builder.build());
+        if (healthy) NotificationPrefs.rememberDigest(context, digest.fingerprint());
     }
 
     static boolean updateStickyDebt(Context context, DashboardDigest digest) {
-        if (!NotificationPrefs.stickyDebtEnabled(context) || digest.debtorApartmentCount <= 0 || !canPostNotifications(context)) {
+        context.stopService(new Intent(context, PersistentDebtService.class));
+        if (!NotificationPolicy.showSticky(NotificationPrefs.notificationsEnabled(context),
+                NotificationPrefs.stickyDebtEnabled(context), canPostNotifications(context),
+                digest.networkOk && digest.authorized, digest.debtorApartmentCount)) {
             cancel(context, NOTIFICATION_STICKY_DEBT);
-            context.stopService(new Intent(context, PersistentDebtService.class));
             return false;
         }
-        Intent service = new Intent(context, PersistentDebtService.class);
-        service.putExtra("title", "Квартиры с долгами: " + digest.debtorApartmentCount);
-        service.putExtra("text", digest.text());
-        try {
-            if (Build.VERSION.SDK_INT >= 26) {
-                context.startForegroundService(service);
-            } else {
-                context.startService(service);
-            }
-        } catch (Exception ignored) {
-            NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
-            if (manager != null) manager.notify(NOTIFICATION_STICKY_DEBT, stickyNotification(context, digest.title(), digest.text()));
-        }
+        NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (manager == null) return false;
+        manager.notify(NOTIFICATION_STICKY_DEBT, stickyNotification(context,
+            "Квартиры с долгами: " + digest.debtorApartmentCount, "Откройте оплаты, чтобы проверить задолженность."));
         return true;
     }
 
@@ -126,17 +133,30 @@ final class NotificationHelper {
             .setSmallIcon(R.drawable.ic_stat_rental)
             .setContentTitle(title)
             .setContentText(text)
-            .setSubText("статус")
-            .setContentIntent(openAppIntent(context))
+            .setSubText("Долги по выбранным категориям")
+            .setContentIntent(openAppIntent(context, new DashboardDigest.Target("payments", "", "Оплаты")))
             .setCategory(Notification.CATEGORY_STATUS)
-            .setVisibility(Notification.VISIBILITY_PUBLIC)
+            .setVisibility(Notification.VISIBILITY_PRIVATE)
+            .setPublicVersion(privatePreview(context, CHANNEL_STICKY))
             .setPriority(Notification.PRIORITY_LOW)
             .setDefaults(0)
             .setOnlyAlertOnce(true)
             .setOngoing(true)
             .setAutoCancel(false)
-            .setShowWhen(true)
+            .setShowWhen(false)
             .build();
+    }
+
+    static synchronized void refreshPreferences(Context context) {
+        cancel(context, NOTIFICATION_DIGEST);
+        cancel(context, NOTIFICATION_STICKY_DEBT);
+        context.stopService(new Intent(context, PersistentDebtService.class));
+    }
+
+    private static Notification privatePreview(Context context, String channel) {
+        return baseBuilder(context, channel).setSmallIcon(R.drawable.ic_stat_rental)
+            .setContentTitle("Rental Manager").setContentText("Откройте приложение для просмотра")
+            .setVisibility(Notification.VISIBILITY_PUBLIC).build();
     }
 
     static void cancel(Context context, int id) {
@@ -171,35 +191,28 @@ final class NotificationHelper {
         builder.setPriority(Notification.PRIORITY_HIGH).setDefaults(Notification.DEFAULT_ALL);
     }
 
-    private static PendingIntent openAppIntent(Context context) {
+    private static PendingIntent openAppIntent(Context context, DashboardDigest.Target target) {
         Intent intent = new Intent(context, MainActivity.class);
-        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        intent.putExtra(EXTRA_TAB, target.tab);
+        intent.putExtra(EXTRA_ACTION, target.action);
         int flags = PendingIntent.FLAG_UPDATE_CURRENT;
         if (Build.VERSION.SDK_INT >= 23) flags |= PendingIntent.FLAG_IMMUTABLE;
-        return PendingIntent.getActivity(context, 0, intent, flags);
+        return PendingIntent.getActivity(context, (target.tab + ":" + target.action).hashCode(), intent, flags);
     }
 
     private static boolean canPostNotifications(Context context) {
-        if (Build.VERSION.SDK_INT < 33) return true;
-        return context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED;
+        NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (manager == null || Build.VERSION.SDK_INT >= 24 && !manager.areNotificationsEnabled()) return false;
+        return Build.VERSION.SDK_INT < 33
+            || context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED;
     }
 
     private static boolean isQuietNow(Context context) {
-        int start = minutes(NotificationPrefs.quietStart(context), 22 * 60);
-        int end = minutes(NotificationPrefs.quietEnd(context), 8 * 60);
+        int start = NotificationPolicy.minutes(NotificationPrefs.quietStart(context), 22 * 60);
+        int end = NotificationPolicy.minutes(NotificationPrefs.quietEnd(context), 8 * 60);
         java.util.Calendar calendar = java.util.Calendar.getInstance();
         int now = calendar.get(java.util.Calendar.HOUR_OF_DAY) * 60 + calendar.get(java.util.Calendar.MINUTE);
-        if (start == end) return false;
-        if (start < end) return now >= start && now < end;
-        return now >= start || now < end;
-    }
-
-    private static int minutes(String value, int fallback) {
-        try {
-            String[] parts = value.split(":");
-            return Math.max(0, Math.min(1439, Integer.parseInt(parts[0]) * 60 + Integer.parseInt(parts[1])));
-        } catch (Exception ignored) {
-            return fallback;
-        }
+        return NotificationPolicy.isQuiet(now, start, end);
     }
 }

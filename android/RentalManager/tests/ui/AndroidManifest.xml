@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="ru.rentalmanager.mobile" android:versionCode="1" android:versionName="ui-smoke">
+    <uses-sdk android:minSdkVersion="23" android:targetSdkVersion="35" />
+    <application android:theme="@style/AppTheme" android:label="Rental Manager UI Smoke"
+        android:debuggable="true" android:allowBackup="false">
+        <activity android:name="ru.rentalmanager.mobile.UiSmokeActivity" android:exported="true" />
+    </application>
+    <instrumentation android:name="ru.rentalmanager.mobile.UiSmokeInstrumentation"
+        android:targetPackage="ru.rentalmanager.mobile.uitest" android:label="Isolated UI smoke" />
+</manifest>

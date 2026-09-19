@@ -59,17 +59,17 @@ public class MainActivity extends Activity {
         "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"
     };
 
-    private final int bg = Color.rgb(8, 11, 15);
-    private final int surface = Color.rgb(17, 24, 32);
-    private final int surface2 = Color.rgb(24, 33, 43);
-    private final int hairline = Color.rgb(42, 51, 62);
-    private final int text = Color.rgb(244, 241, 233);
-    private final int muted = Color.rgb(143, 154, 167);
-    private final int blue = Color.rgb(198, 165, 107);
-    private final int green = Color.rgb(111, 155, 124);
-    private final int orange = Color.rgb(201, 154, 85);
-    private final int red = Color.rgb(201, 111, 104);
-    private final int gray = Color.rgb(105, 116, 128);
+    private final int bg = MobileUi.BG;
+    private final int surface = MobileUi.SURFACE;
+    private final int surface2 = MobileUi.SURFACE_ALT;
+    private final int hairline = MobileUi.BORDER;
+    private final int text = MobileUi.TEXT;
+    private final int muted = MobileUi.MUTED;
+    private final int blue = MobileUi.ACCENT;
+    private final int green = MobileUi.SUCCESS;
+    private final int orange = MobileUi.WARNING;
+    private final int red = MobileUi.DANGER;
+    private final int gray = MobileUi.MUTED;
 
     private ApiClient api;
     private FrameLayout appFrame;
@@ -77,6 +77,12 @@ public class MainActivity extends Activity {
     private LinearLayout content;
     private LinearLayout bottomBar;
     private TextView screenTitle;
+    private Button backButton;
+    private ScrollView pageScroll;
+    private String searchQuery = "";
+    private boolean progressLoadFailed;
+    private int selectedPaymentLeaseId;
+    private String selectedPaymentKind = "rent";
     private TextView screenSubtitle;
     private TextView updateBanner;
     private final Runnable updateListener = () -> refreshUpdateBanner();
@@ -98,7 +104,7 @@ public class MainActivity extends Activity {
     private JSONObject progressMonthSummary = new JSONObject();
     private String currentTab = "dashboard";
     private String servicesMode = "utilities";
-    private String premiumPaymentFilter = "all";
+    private String premiumPaymentFilter = "open";
     private String progressRentMonthKey = "";
     private long bootstrapLoadedAt = 0L;
     private long paymentsLoadedAt = 0L;
@@ -158,7 +164,7 @@ public class MainActivity extends Activity {
             getIntent().removeExtra("open_update");
             AppUpdates.showDialog(this);
         }
-        if (screenSubtitle != null) screenSubtitle.setText(api.baseUrl());
+        if (screenSubtitle != null) setConnectionStatus(lastConnectionOk, lastConnectionOk ? "На связи" : "Нет связи");
         checkServerConnection(false);
         if (!lastConnectionOk) startReconnectLoop();
     }
@@ -174,6 +180,7 @@ public class MainActivity extends Activity {
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
+        if (bootstrapLoadedAt > 0 && intent.hasExtra("notification_tab")) renderCurrentTab();
     }
 
     private void refreshUpdateBanner() {
@@ -184,69 +191,96 @@ public class MainActivity extends Activity {
 
     private void buildShell() {
         appFrame = new FrameLayout(this);
-        root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
+        appFrame.setBackgroundColor(bg);
+        root = MobileUi.column(this);
         root.setBackgroundColor(bg);
-
-        LinearLayout header = new LinearLayout(this);
-        header.setOrientation(LinearLayout.HORIZONTAL);
-        header.setGravity(Gravity.CENTER_VERTICAL);
-        header.setPadding(dp(18), dp(18), dp(14), dp(10));
-
-        LinearLayout titleBox = new LinearLayout(this);
-        titleBox.setOrientation(LinearLayout.VERTICAL);
-        TextView eyebrow = label("Rental Manager", 12, muted, false);
-        screenTitle = label("Пульт", 31, text, true);
-        screenSubtitle = label(api.baseUrl(), 12, muted, false);
-        titleBox.addView(eyebrow);
+        LinearLayout header = MobileUi.row(this);
+        header.setPadding(dp(18), dp(12), dp(18), dp(12));
+        backButton = MobileUi.iconButton(this, "back", "Назад");
+        backButton.setOnClickListener(v -> navigate("receipts".equals(currentTab) ? "payments" : "more"));
+        header.addView(backButton);
+        LinearLayout titleBox = MobileUi.column(this);
+        titleBox.setPadding(dp(8), 0, dp(8), 0);
+        screenTitle = label("Пульт", 25, text, true);
+        screenSubtitle = label("Подключение…", 12, muted, false);
         titleBox.addView(screenTitle);
         titleBox.addView(screenSubtitle);
         header.addView(titleBox, new LinearLayout.LayoutParams(0, -2, 1));
-
-        Button refresh = pillButton("Обновить", false);
+        Button refresh = MobileUi.iconButton(this, "refresh", "Обновить данные");
+        refresh.setOnClickListener(v -> { progressRentMonthKey = ""; progressLoadFailed = false; loadCurrentTab(true); });
         header.addView(refresh);
-        Button menu = pillButton("RM", false);
-        header.addView(menu);
+        Button menu = MobileUi.iconButton(this, "settings", "Настройки приложения");
+        LinearLayout.LayoutParams menuParams = new LinearLayout.LayoutParams(dp(48), dp(48));
+        menuParams.setMarginStart(dp(8));
+        header.addView(menu, menuParams);
+        menu.setOnClickListener(v -> showAppMenuDialog());
         root.addView(header);
-
         updateBanner = label("", 14, green, true);
         updateBanner.setPadding(dp(18), dp(12), dp(18), dp(12));
         updateBanner.setMinHeight(dp(48));
         updateBanner.setOnClickListener(v -> AppUpdates.showDialog(this));
         root.addView(updateBanner);
         refreshUpdateBanner();
-
-        ScrollView scroll = new ScrollView(this);
-        scroll.setFillViewport(false);
-        content = new LinearLayout(this);
-        content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(14), dp(4), dp(14), dp(18));
-        scroll.addView(content);
-        root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
-
-        bottomBar = new LinearLayout(this);
-        bottomBar.setOrientation(LinearLayout.HORIZONTAL);
-        bottomBar.setGravity(Gravity.CENTER);
-        bottomBar.setPadding(dp(8), dp(8), dp(8), dp(8));
-        bottomBar.setBackgroundColor(Color.rgb(11, 15, 21));
-        root.addView(bottomBar, new LinearLayout.LayoutParams(-1, dp(72)));
+        pageScroll = new ScrollView(this);
+        pageScroll.setClipToPadding(false);
+        pageScroll.setFillViewport(true);
+        content = MobileUi.column(this);
+        content.setPadding(dp(18), dp(4), dp(18), dp(24));
+        pageScroll.addView(content);
+        root.addView(pageScroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        bottomBar = MobileUi.row(this);
+        bottomBar.setPadding(dp(8), dp(6), dp(8), dp(6));
+        bottomBar.setBackgroundColor(surface);
+        root.addView(bottomBar, new LinearLayout.LayoutParams(-1, -2));
         appFrame.addView(root, new FrameLayout.LayoutParams(-1, -1));
         buildLoadingOverlay();
         setContentView(appFrame);
         MobileUi.applyWindow(this, appFrame);
-
-        refresh.setOnClickListener(v -> loadCurrentTab(true));
-        menu.setOnClickListener(v -> showAppMenuDialog());
         buildBottomNav();
+    }
+
+    private boolean isGuest() {
+        return "guest".equals(obj(bootstrap, "auth").optString("role"));
+    }
+
+    private void navigate(String tab) {
+        currentTab = tab;
+        searchQuery = "";
+        buildBottomNav();
+        if (pageScroll != null) pageScroll.scrollTo(0, 0);
+        loadCurrentTab(false);
+    }
+
+    @Override public void onBackPressed() {
+        if (!isOperationalTab(currentTab)) navigate("receipts".equals(currentTab) ? "payments" : "more");
+        else if (!"dashboard".equals(currentTab)) navigate("dashboard");
+        else super.onBackPressed();
+    }
+
+    private void consumeNotificationRoute() {
+        String action = getIntent().getStringExtra("notification_action");
+        String tab = getIntent().getStringExtra("notification_tab");
+        if (tab == null) return;
+        getIntent().removeExtra("notification_tab");
+        getIntent().removeExtra("notification_action");
+        if ("receipts".equals(action)) currentTab = "receipts";
+        else if ("reports".equals(action)) currentTab = "reports";
+        else if ("readings".equals(action) || "utilities".equals(action)) {
+            currentTab = "services";
+            servicesMode = "readings".equals(action) ? "meters" : "utilities";
+        } else if (isOperationalTab(tab)) currentTab = tab;
+        if (isGuest()) currentTab = "reports".equals(currentTab) ? "reports" : "dashboard";
     }
 
     private void buildBottomNav() {
         bottomBar.removeAllViews();
-        if (!isOperationalTab(currentTab)) currentTab = "dashboard";
+        if (backButton != null) backButton.setVisibility(isOperationalTab(currentTab) ? View.GONE : View.VISIBLE);
         addNav("Пульт", "dashboard");
-        addNav("Дела", "tasks");
-        addNav("Оплаты", "payments");
-        addNav("Объекты", "properties");
+        if (!isGuest()) {
+            addNav("Дела", "tasks");
+            addNav("Оплаты", "payments");
+            addNav("Объекты", "properties");
+        }
         addNav("Ещё", "more");
     }
 
@@ -255,13 +289,10 @@ public class MainActivity extends Activity {
     }
 
     private void addNav(String title, String tab) {
-        Button button = navButton(navTitle(title, tab), tab.equals(currentTab));
-        button.setOnClickListener(v -> {
-            currentTab = tab;
-            buildBottomNav();
-            loadCurrentTab(false);
-        });
-        bottomBar.addView(button, new LinearLayout.LayoutParams(0, -1, 1));
+        String active = isOperationalTab(currentTab) ? currentTab : "receipts".equals(currentTab) ? "payments" : "more";
+        LinearLayout item = MobileUi.navItem(this, "dashboard".equals(tab) ? "home" : tab, title, tab.equals(active));
+        item.setOnClickListener(v -> navigate(tab));
+        bottomBar.addView(item, new LinearLayout.LayoutParams(0, -2, 1));
     }
 
     private String navTitle(String title, String tab) {
@@ -308,7 +339,7 @@ public class MainActivity extends Activity {
     private void setConnectionStatus(boolean ok, String status) {
         if (screenSubtitle == null) return;
         lastConnectionOk = ok;
-        screenSubtitle.setText((ok ? "● " : "● ") + status + " · " + api.baseUrl());
+        screenSubtitle.setText((ok ? "●  " : "○  ") + status);
         screenSubtitle.setTextColor(ok ? green : red);
         if (ok) {
             stopReconnectLoop();
@@ -330,23 +361,30 @@ public class MainActivity extends Activity {
 
     private void showLogin() {
         hideLoadingCard();
-        screenTitle.setText("Вход");
-        screenSubtitle.setText(api.baseUrl());
+        screenTitle.setText("Rental Manager");
+        screenSubtitle.setText("Управление арендой");
+        bottomBar.setVisibility(View.GONE);
+        backButton.setVisibility(View.GONE);
         content.removeAllViews();
-        addHero("Пульт аренды", "Войдите по PIN-коду владельца для полного доступа или по гостевому PIN для просмотра отчётов.");
+        addHero("Всё по делу.\nДаже в пути.", "Оплаты, квартиры и задачи — в одном месте. Введите PIN, чтобы продолжить.");
         LinearLayout card = card();
         EditText pin = input("PIN-код", true);
         pin.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
         CheckBox remember = checkbox("Запомнить устройство");
         remember.setChecked(true);
         Button login = primaryButton("Войти");
-        Button host = secondaryButton("Сменить хост");
+        Button host = secondaryButton("Адрес сервера");
         card.addView(field("PIN", pin));
         card.addView(remember);
         card.addView(login, new LinearLayout.LayoutParams(-1, dp(50)));
-        card.addView(host, new LinearLayout.LayoutParams(-1, dp(46)));
+        card.addView(host, new LinearLayout.LayoutParams(-1, -2));
         content.addView(card);
-        login.setOnClickListener(v -> runApi("Вхожу", () -> api.login(pin.getText().toString(), remember.isChecked()), value -> loadCurrentTab(true)));
+        login.setOnClickListener(v -> {
+            if (pin.getText().toString().trim().isEmpty()) { pin.setError("Введите PIN"); return; }
+            login.setEnabled(false);
+            runApi("Вхожу", () -> { try { return api.login(pin.getText().toString(), remember.isChecked()); }
+                finally { runOnUiThread(() -> login.setEnabled(true)); } }, value -> loadCurrentTab(true));
+        });
         host.setOnClickListener(v -> showHostDialog());
     }
 
@@ -378,10 +416,18 @@ public class MainActivity extends Activity {
     }
 
     private void renderOperationalCurrentTab() {
+        consumeNotificationRoute();
+        bottomBar.setVisibility(View.VISIBLE);
+        buildBottomNav();
         if ("properties".equals(currentTab)) renderPremiumProperties();
         else if ("payments".equals(currentTab)) renderPremiumPayments();
         else if ("tasks".equals(currentTab)) renderPremiumTasks();
         else if ("more".equals(currentTab)) renderMore();
+        else if ("services".equals(currentTab)) renderServices();
+        else if ("tenants".equals(currentTab)) renderTenants();
+        else if ("receipts".equals(currentTab)) renderReceipts();
+        else if ("reports".equals(currentTab)) renderReports();
+        else if ("settings".equals(currentTab)) renderSettings();
         else renderPremiumDashboard();
     }
 
@@ -630,67 +676,99 @@ public class MainActivity extends Activity {
     }
 
     private void showAppMenuDialog() {
-        LinearLayout form = dialogForm();
-        form.addView(secondaryButton("Сменить хост приложения", v -> showHostDialog()), new LinearLayout.LayoutParams(-1, dp(46)));
-        form.addView(secondaryButton("Публичный URL и Telegram", v -> showServerSettingsDialog()), new LinearLayout.LayoutParams(-1, dp(46)));
-        form.addView(secondaryButton("Экспорт базы", v -> download("/api/admin/database-export", "rental-manager-db.json")), new LinearLayout.LayoutParams(-1, dp(46)));
-        form.addView(secondaryButton("Обновления приложения", v -> AppUpdates.showDialog(this)), new LinearLayout.LayoutParams(-1, dp(46)));
-        form.addView(secondaryButton("Push-уведомления", v -> startActivity(new Intent(this, NotificationSettingsActivity.class))), new LinearLayout.LayoutParams(-1, dp(46)));
-        form.addView(secondaryButton("Выйти из PIN-сессии", v -> logout()), new LinearLayout.LayoutParams(-1, dp(46)));
-        new AlertDialog.Builder(this)
-            .setTitle("Rental Manager")
-            .setView(wrapDialog(form))
-            .setPositiveButton("Закрыть", null)
-            .show();
+        String[] entries = {"Обновления приложения", "Адрес сервера", "Уведомления"};
+        new AlertDialog.Builder(this).setTitle("Приложение").setItems(entries, (dialog, which) -> {
+            if (which == 0) AppUpdates.showDialog(this);
+            else if (which == 1) showHostDialog();
+            else startActivity(new Intent(this, NotificationSettingsActivity.class));
+        }).setNegativeButton("Закрыть", null).show();
     }
 
     private void renderPremiumDashboard() {
         screenTitle.setText("Пульт");
         content.removeAllViews();
         JSONObject dashboard = obj(bootstrap, "dashboard");
-        ensureProgressRentData();
-        content.addView(label(monthTitle(selectedMonth), 15, muted, false));
+        if (!isGuest()) ensureProgressRentData();
+        LinearLayout month = row();
+        month.addView(monthArrow("‹", -1), new LinearLayout.LayoutParams(dp(48), dp(48)));
+        TextView heading = label(monthTitle(selectedMonth), 17, text, true);
+        heading.setGravity(Gravity.CENTER);
+        month.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
+        month.addView(monthArrow("›", 1), new LinearLayout.LayoutParams(dp(48), dp(48)));
+        content.addView(month);
         addPremiumFinancialCard(dashboard);
+        if (isGuest()) {
+            addDestination("document", "Отчёты", "Скачать сводку за период", () -> navigate("reports"));
+            return;
+        }
+        content.addView(section("Быстрые действия"));
+        LinearLayout quick = row();
+        addAction(quick, "Принять оплату", () -> showManualPaymentDialog(), true);
+        addAction(quick, "Показания", () -> showReadingDialog(), false);
+        content.addView(quick);
         content.addView(section("Требует внимания"));
-        addPremiumAttentionCards(dashboard, 4);
+        addPremiumAttentionCards(dashboard, 3);
+        content.addView(secondaryButton("Все дела", v -> navigate("tasks")));
         content.addView(section("Ближайшие платежи"));
         addPremiumUpcomingPayments(3);
     }
 
     private void addPremiumFinancialCard(JSONObject dashboard) {
         JSONObject summary = premiumMonthSummary(dashboard);
-        double salaryPaid = summary.optDouble("salary_paid");
-        double salaryDue = summary.optDouble("salary_due");
-        double billPaid = summary.optDouble("bill_payment_paid");
-        double billDue = summary.optDouble("bill_payment_due");
-        double advancePaid = summary.optDouble("advance_paid");
-        double advanceDue = summary.optDouble("advance_due");
-        int occupied = summary.optInt("occupied");
-        int totalApartments = summary.optInt("total_apartments");
-        int paidCount = summary.optInt("paid_count");
-        int pendingCount = summary.optInt("pending_count");
-        int overdueCount = summary.optInt("overdue_count");
-        boolean billsIssued = summary.optBoolean("utility_bills_issued");
-        boolean providerPaid = summary.optBoolean("utility_provider_paid");
-
         LinearLayout card = premiumCard();
-        card.addView(label("Денежный поток месяца", 14, muted, false));
-        card.addView(label("ЗП: " + moneyPair(salaryPaid, salaryDue), 31, text, true));
-        card.addView(premiumUtilityStatusLine("Статус коммуналки:", billsIssued, providerPaid));
-        card.addView(premiumValueLine("- Оплата счетов:", moneyPair(billPaid, billDue)));
-        card.addView(premiumValueLine("- Сумма авансов:", moneyPair(advancePaid, advanceDue)));
-        card.addView(premiumValueLine("Заселённых квартир:", occupied + " / " + totalApartments));
-        LinearLayout chips = row();
-        chips.addView(premiumChip("Оплачено " + paidCount, green), new LinearLayout.LayoutParams(0, dp(38), 1));
-        chips.addView(premiumChip("Ожидается " + pendingCount, orange), new LinearLayout.LayoutParams(0, dp(38), 1));
-        chips.addView(premiumChip("Просрочено " + overdueCount, red), new LinearLayout.LayoutParams(0, dp(38), 1));
-        card.addView(chips);
-        LinearLayout actions = row();
-        actions.addView(monthArrow("‹", -1), new LinearLayout.LayoutParams(dp(50), dp(52)));
-        actions.addView(primaryButton("Записать оплату", v -> showManualPaymentDialog()), new LinearLayout.LayoutParams(0, dp(52), 1));
-        actions.addView(monthArrow("›", 1), new LinearLayout.LayoutParams(dp(50), dp(52)));
-        card.addView(actions);
+        card.setBackground(MobileUi.shape(this, Color.rgb(18, 42, 43), 24, Color.rgb(38, 82, 76)));
+        card.addView(label("ДЕНЕЖНЫЙ ПОТОК МЕСЯЦА", 11, blue, true));
+        if (summary.length() == 0) {
+            card.addView(label(progressLoadFailed ? "Сводка недоступна" : "Сводка загружается", 23, text, true));
+            card.addView(label("Суммы появятся после получения данных за выбранный месяц.", 14, muted, false));
+            if (progressLoadFailed) card.addView(secondaryButton("Повторить", v -> {
+                progressRentMonthKey = ""; progressLoadFailed = false; ensureProgressRentData(); renderCurrentTab();
+            }));
+            content.addView(card);
+            return;
+        }
+        card.addView(label("Зарплата · получено", 14, muted, false));
+        card.addView(label(money(summary.optDouble("salary_paid")), 34, text, true));
+        card.addView(label("из " + money(summary.optDouble("salary_due")) + " за месяц", 14, muted, false));
+        android.widget.ProgressBar progress = new android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        progress.setMax(1000);
+        double due = summary.optDouble("salary_due");
+        progress.setProgress(due > 0 ? (int) Math.min(1000, 1000 * summary.optDouble("salary_paid") / due) : 0);
+        progress.setProgressTintList(android.content.res.ColorStateList.valueOf(blue));
+        progress.setProgressBackgroundTintList(android.content.res.ColorStateList.valueOf(hairline));
+        LinearLayout.LayoutParams bar = new LinearLayout.LayoutParams(-1, dp(6));
+        bar.setMargins(0, dp(16), 0, dp(18));
+        card.addView(progress, bar);
+        card.addView(premiumValueLine("Коммунальные счета", moneyPair(summary.optDouble("bill_payment_paid"), summary.optDouble("bill_payment_due"))));
+        card.addView(premiumValueLine("Авансы коммуналки", moneyPair(summary.optDouble("advance_paid"), summary.optDouble("advance_due"))));
+        card.addView(label("Получено / начислено; авансы — получено / план", 11, muted, false));
+        LinearLayout utility = row();
+        utility.setPadding(0, dp(12), 0, dp(4));
+        addStatus(utility, summary.optBoolean("utility_bills_issued") ? "Счета выставлены" : "Не все счета выставлены", summary.optBoolean("utility_bills_issued") ? green : orange);
+        addStatus(utility, summary.optBoolean("utility_provider_paid") ? "Поставщик оплачен" : "Поставщик не оплачен", summary.optBoolean("utility_provider_paid") ? green : orange);
+        card.addView(utility);
+        card.addView(premiumValueLine("Занято квартир", summary.optInt("occupied") + " из " + summary.optInt("total_apartments")));
+        LinearLayout counts = row();
+        counts.setPadding(0, dp(10), 0, 0);
+        addCountTile(counts, "Оплачено", summary.optInt("paid_count"), green);
+        addCountTile(counts, "Ожидается", summary.optInt("pending_count"), orange);
+        addCountTile(counts, "Просрочено", summary.optInt("overdue_count"), red);
+        card.addView(counts);
         content.addView(card);
+    }
+
+    private void addCountTile(LinearLayout parent, String title, int count, int color) {
+        LinearLayout tile = MobileUi.column(this);
+        tile.addView(label(Integer.toString(count), 23, color, true));
+        tile.addView(label(title, 11, muted, false));
+        parent.addView(tile, new LinearLayout.LayoutParams(0, -2, 1));
+    }
+
+    private void addStatus(LinearLayout parent, String title, int color) {
+        TextView chip = premiumChip(title, color);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1);
+        params.setMargins(0, 0, dp(4), 0);
+        parent.addView(chip, params);
     }
 
     private JSONObject premiumMonthSummary(JSONObject dashboard) {
@@ -702,98 +780,18 @@ public class MainActivity extends Activity {
             && summary.optInt("month") == selectedMonth.get(Calendar.MONTH) + 1) {
             return summary;
         }
-        return buildLocalPremiumMonthSummary();
+        return new JSONObject();
     }
 
-    private JSONObject buildLocalPremiumMonthSummary() {
-        JSONObject summary = new JSONObject();
-        double salaryPaid = 0;
-        double salaryDue = 0;
-        int paidCount = 0;
-        int pendingCount = 0;
-        int overdueCount = 0;
-        JSONArray charges = rentChargesForSelectedMonth();
-        for (int i = 0; i < charges.length(); i++) {
-            JSONObject charge = charges.optJSONObject(i);
-            if (charge == null) continue;
-            salaryPaid += charge.optDouble("personal_paid");
-            salaryDue += charge.optDouble("personal_due");
-            String status = charge.optString("status");
-            if (isDoneStatus(status)) paidCount++;
-            else if (isCriticalStatus(status) && !isFutureDate(charge.optString("due_date"))) overdueCount++;
-            else pendingCount++;
-        }
-        double billPaid = 0;
-        double billDue = 0;
-        Set<Integer> issuedServices = new LinkedHashSet<>();
-        JSONArray bills = utilityBillsForSelectedMonth();
-        for (int i = 0; i < bills.length(); i++) {
-            JSONObject bill = bills.optJSONObject(i);
-            if (bill == null || "draft".equals(bill.optString("status"))) continue;
-            issuedServices.add(bill.optInt("service_id"));
-            JSONArray lines = arr(bill, "lines");
-            for (int j = 0; j < lines.length(); j++) {
-                JSONObject line = lines.optJSONObject(j);
-                if (line == null) continue;
-                billPaid += line.optDouble("paid_amount");
-                billDue += line.optDouble("total_amount");
-            }
-        }
-        int totalApartments = 0;
-        int occupied = 0;
-        for (int i = 0; i < arr(bootstrap, "objects").length(); i++) {
-            JSONObject object = arr(bootstrap, "objects").optJSONObject(i);
-            if (object == null) continue;
-            JSONArray apartments = arr(object, "apartments");
-            for (int j = 0; j < apartments.length(); j++) {
-                JSONObject apartment = apartments.optJSONObject(j);
-                if (apartment == null || !apartment.optBoolean("active", true)) continue;
-                totalApartments++;
-                if (apartment.optInt("active_lease_id") > 0) occupied++;
-            }
-        }
-        int activeServices = 0;
-        for (int i = 0; i < arr(bootstrap, "services").length(); i++) {
-            JSONObject service = arr(bootstrap, "services").optJSONObject(i);
-            if (service != null && service.optBoolean("active", true)) activeServices++;
-        }
-        try {
-            summary.put("salary_paid", salaryPaid);
-            summary.put("salary_due", salaryDue);
-            summary.put("bill_payment_paid", billPaid);
-            summary.put("bill_payment_due", billDue);
-            summary.put("advance_paid", 0);
-            summary.put("advance_due", 0);
-            summary.put("occupied", occupied);
-            summary.put("total_apartments", totalApartments);
-            summary.put("paid_count", paidCount);
-            summary.put("pending_count", pendingCount);
-            summary.put("overdue_count", overdueCount);
-            summary.put("utility_bills_issued", activeServices == 0 || issuedServices.size() >= activeServices);
-            summary.put("utility_provider_paid", bills.length() > 0 && allMonthBillsProviderPaid(bills));
-        } catch (Exception ignored) {
-        }
-        return summary;
-    }
 
-    private boolean allMonthBillsProviderPaid(JSONArray bills) {
-        boolean hasIssued = false;
-        for (int i = 0; i < bills.length(); i++) {
-            JSONObject bill = bills.optJSONObject(i);
-            if (bill == null || "draft".equals(bill.optString("status"))) continue;
-            hasIssued = true;
-            if (!bill.optBoolean("provider_paid")) return false;
-        }
-        return hasIssued;
-    }
+
+
 
     private LinearLayout premiumValueLine(String title, String value) {
-        LinearLayout line = row();
-        line.setPadding(0, dp(1), 0, dp(1));
-        line.addView(label(title, 15, text, false), new LinearLayout.LayoutParams(0, -2, 1));
-        TextView amount = label(value, 15, text, true);
-        amount.setGravity(Gravity.RIGHT);
-        line.addView(amount, new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout line = MobileUi.column(this);
+        line.setPadding(0, dp(7), 0, dp(7));
+        line.addView(label(title, 13, muted, false));
+        line.addView(label(value, 17, text, true));
         return line;
     }
 
@@ -836,14 +834,26 @@ public class MainActivity extends Activity {
             card.addView(label(attentionGroupTitle(item, title), 18, text, true));
             card.addView(label(attentionLine(key, title, item), 13, muted, false));
             card.setOnClickListener(v -> {
-                currentTab = targetTab;
-                buildBottomNav();
-                loadCurrentTab(false);
+                openAttention(key, item);
             });
             content.addView(card);
             added++;
         }
         return added;
+    }
+
+    private void openAttention(String key, JSONObject item) {
+        if ("suspicious_receipts".equals(key)) { navigate("receipts"); return; }
+        if (key.contains("reading")) { openService("meters"); return; }
+        if (key.startsWith("utility") || "provider_debts".equals(key)) { openService("utilities"); return; }
+        if (key.startsWith("rent")) {
+            for (int i = 0; i < rentCharges.length(); i++) {
+                JSONObject charge = rentCharges.optJSONObject(i);
+                if (charge != null && (charge.optInt("id", -1) == item.optInt("id", -2)
+                    || charge.optInt("id", -1) == item.optInt("rent_charge_id", -2))) { showRentActions(charge); return; }
+            }
+        }
+        navigate("payments");
     }
 
     private void addPremiumUpcomingPayments(int limit) {
@@ -884,22 +894,42 @@ public class MainActivity extends Activity {
     private void renderPremiumProperties() {
         screenTitle.setText("Объекты");
         content.removeAllViews();
-        content.addView(primaryButton("Заселить жильца", v -> showOnboardDialog(null)), new LinearLayout.LayoutParams(-1, dp(52)));
+        LinearLayout actions = row();
+        addAction(actions, "Заселить", () -> showOnboardDialog(null), true);
+        addAction(actions, "Договоры", () -> navigate("tenants"), false);
+        content.addView(actions);
+        LinearLayout list = MobileUi.column(this);
+        addSearch("Квартира, объект или жилец", () -> fillProperties(list));
+        content.addView(list);
+        fillProperties(list);
+    }
+
+    private void fillProperties(LinearLayout list) {
+        list.removeAllViews();
         forEach(arr(bootstrap, "objects"), object -> {
+            LinearLayout group = MobileUi.column(this);
             forEach(arr(object, "apartments"), apartment -> {
                 if (!apartment.optBoolean("active", true)) return;
                 JSONObject lease = findLease(apartment.optInt("active_lease_id"));
+                if (!matchesSearch(object.optString("name"), apartment.optString("name"), lease == null ? "Свободно" : lease.optString("tenant"))) return;
                 JSONObject charge = lease == null ? null : currentChargeForLease(lease.optInt("id"));
-                int color = charge == null ? gray : statusColor(charge.optString("status"));
-                LinearLayout card = premiumCardWithAccent(color);
-                card.addView(label(joinNonEmpty(object.optString("name"), apartment.optString("name")), 18, text, true));
-                card.addView(label(lease == null ? "Свободно" : lease.optString("tenant"), 13, muted, false));
-                card.addView(label(lease == null ? "Нет активного договора" : "Аренда в месяц " + money(lease.optDouble("ip_amount") + lease.optDouble("personal_amount")), 14, text, false));
-                card.addView(premiumChip(charge == null ? "Нет начисления" : statusLabel(charge.optString("status")), color), new LinearLayout.LayoutParams(-1, dp(38)));
+                LinearLayout card = premiumCard();
+                LinearLayout heading = row();
+                heading.addView(label(apartment.optString("name"), 21, text, true), new LinearLayout.LayoutParams(0, -2, 1));
+                heading.addView(premiumChip(lease == null ? "Свободна" : "Заселена", lease == null ? blue : muted));
+                card.addView(heading);
+                card.addView(label(lease == null ? "Готова к заселению" : lease.optString("tenant"), 16, text, true));
+                if (charge != null) {
+                    card.addView(label(statusLabel(charge.optString("status")) + " · до " + compactDate(charge.optString("due_date")), 13, statusColor(charge.optString("status")), false));
+                    if (charge.optDouble("debt") > 0) card.addView(label("Осталось " + money(charge.optDouble("debt")), 18, text, true));
+                } else card.addView(label(lease == null ? "Открыть и заселить  ›" : "Открыть договор  ›", 13, muted, false));
+                MobileUi.makeClickable(card);
                 card.setOnClickListener(v -> showPremiumPropertyDetails(apartment, lease, charge));
-                content.addView(card);
+                group.addView(card);
             });
+            if (group.getChildCount() > 0) { list.addView(section(object.optString("name"))); list.addView(group); }
         });
+        if (list.getChildCount() == 0) addEmpty(list, "Квартиры не найдены", searchQuery.isEmpty() ? "Активные квартиры появятся после добавления объекта." : "Попробуйте другое имя или номер квартиры.");
     }
 
     private void showPremiumPropertyDetails(JSONObject apartment, JSONObject lease, JSONObject charge) {
@@ -914,7 +944,7 @@ public class MainActivity extends Activity {
         hero.addView(label(lease == null ? "Договор: пусто" : "Договор: активен с " + lease.optString("start_date"), 13, muted, false));
         form.addView(hero);
         if (lease != null) {
-            form.addView(primaryButton("Записать оплату", v -> showManualPaymentDialog()), new LinearLayout.LayoutParams(-1, dp(52)));
+            form.addView(primaryButton("Записать оплату", v -> showManualPaymentFor(lease.optInt("id"))), new LinearLayout.LayoutParams(-1, dp(52)));
             form.addView(secondaryButton("Отправить напоминание", v -> {
                 JSONObject target = new JSONObject();
                 try {
@@ -923,11 +953,20 @@ public class MainActivity extends Activity {
                 }
                 String template = charge != null && "overdue".equals(charge.optString("status")) ? "message_rent_overdue" : "message_rent_due";
                 previewMessage(target, template);
-            }), new LinearLayout.LayoutParams(-1, dp(46)));
-            form.addView(secondaryButton("История", v -> download("/api/reports/history.xlsx?apartment_id=" + apartment.optInt("id"), "history.xlsx")), new LinearLayout.LayoutParams(-1, dp(46)));
+            }), new LinearLayout.LayoutParams(-1, -2));
+            form.addView(secondaryButton("История", v -> download("/api/reports/history.xlsx?apartment_id=" + apartment.optInt("id"), "history.xlsx")), new LinearLayout.LayoutParams(-1, -2));
+        }
+        if (lease != null) {
+            form.addView(section("Договор"));
+            form.addView(secondaryButton("Изменить условия", v -> showOnboardDialog(lease)));
+            if (charge != null) form.addView(secondaryButton("Отсрочка оплаты", v -> deferRent(charge)));
+            form.addView(secondaryButton(lease.optBoolean("ignored") ? "Вернуть из архива" : "В архив", v -> confirm("Изменить архивный статус договора? Долги и история сохранятся.", () -> toggleLeaseIgnore(lease))));
+            form.addView(secondaryButton("Оформить выезд", v -> moveOut(lease)));
+        } else {
+            form.addView(primaryButton("Заселить жильца", v -> showOnboardDialog(null)));
         }
         new AlertDialog.Builder(this)
-            .setTitle("Объект")
+            .setTitle("Квартира")
             .setView(wrapDialog(form))
             .setPositiveButton("Закрыть", null)
             .show();
@@ -936,58 +975,93 @@ public class MainActivity extends Activity {
     private void renderPremiumPayments() {
         screenTitle.setText("Оплаты");
         content.removeAllViews();
-        content.addView(primaryButton("Записать оплату", v -> showManualPaymentDialog()), new LinearLayout.LayoutParams(-1, dp(52)));
-        LinearLayout filters = row();
-        filters.addView(paymentFilterButton("Все", "all"), new LinearLayout.LayoutParams(0, dp(42), 1));
-        filters.addView(paymentFilterButton("Оплачено", "paid"), new LinearLayout.LayoutParams(0, dp(42), 1));
-        filters.addView(paymentFilterButton("Ожидается", "pending"), new LinearLayout.LayoutParams(0, dp(42), 1));
-        filters.addView(paymentFilterButton("Просрочка", "overdue"), new LinearLayout.LayoutParams(0, dp(42), 1));
-        content.addView(filters);
-        int[] added = {0};
-        forEach(rentCharges, charge -> {
-            if (!premiumPaymentMatches(charge.optString("status"), charge.optString("due_date"))) return;
-            int color = isFutureDate(charge.optString("due_date")) && !isDoneStatus(charge.optString("status")) ? gray : statusColor(charge.optString("status"));
-            LinearLayout card = premiumCardWithAccent(color);
-            card.addView(label(charge.optString("tenant"), 18, text, true));
-            card.addView(label(joinNonEmpty(charge.optString("object"), charge.optString("apartment")), 13, muted, false));
-            card.addView(label("Аренда " + money(charge.optDouble("total_due")) + " · до " + compactDate(charge.optString("due_date")), 14, text, false));
-            card.addView(label(statusLabel(charge.optString("status")), 13, color, true));
-            content.addView(card);
-            added[0]++;
-        });
-        forEach(utilityBills, bill -> forEach(arr(bill, "lines"), line -> {
-            if (!premiumPaymentMatches(line.optString("status"), line.optString("due_date"))) return;
-            int color = statusColor(line.optString("status"));
-            LinearLayout card = premiumCardWithAccent(color);
-            card.addView(label(line.optString("tenant"), 18, text, true));
-            card.addView(label(joinNonEmpty(line.optString("object"), line.optString("apartment"), line.optString("service")), 13, muted, false));
-            card.addView(label("Коммуналка " + money(line.optDouble("total_amount")) + " · до " + compactDate(line.optString("due_date")), 14, text, false));
-            card.addView(label(statusLabel(line.optString("status")), 13, color, true));
-            content.addView(card);
-            added[0]++;
-        }));
-        if (added[0] == 0) {
-            LinearLayout empty = premiumCard();
-            empty.addView(label("Нет оплат по фильтру", 18, text, true));
-            empty.addView(label("Выберите другой статус.", 13, muted, false));
-            content.addView(empty);
+        LinearLayout actions = row();
+        addAction(actions, "Принять оплату", () -> showManualPaymentDialog(), true);
+        addAction(actions, "Чеки · " + suspiciousReceipts.length(), () -> navigate("receipts"), false);
+        content.addView(actions);
+        android.widget.HorizontalScrollView filters = new android.widget.HorizontalScrollView(this);
+        filters.setHorizontalScrollBarEnabled(false);
+        LinearLayout options = row();
+        String[] titles = {"К оплате", "Просрочено", "Оплачено", "Все"};
+        String[] keys = {"open", "overdue", "paid", "all"};
+        for (int i = 0; i < keys.length; i++) {
+            Button filter = paymentFilterButton(titles[i], keys[i]);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, -2);
+            params.setMargins(0, dp(4), dp(8), dp(8));
+            options.addView(filter, params);
         }
+        filters.addView(options);
+        content.addView(filters);
+        LinearLayout list = MobileUi.column(this);
+        addSearch("Жилец, квартира или услуга", () -> fillPayments(list));
+        content.addView(list);
+        fillPayments(list);
+    }
+
+    private void fillPayments(LinearLayout list) {
+        list.removeAllViews();
+        forEach(rentCharges, charge -> {
+            if (!premiumPaymentMatches(charge.optString("status"), charge.optString("due_date")) || !matchesSearch(charge.optString("tenant"), charge.optString("object"), charge.optString("apartment"), "Аренда")) return;
+            LinearLayout card = paymentCard("Аренда", charge, charge.optDouble("total_due"));
+            card.addView(secondaryButton("Оплата и отсрочка", v -> showRentActions(charge)));
+            list.addView(card);
+        });
+        forEach(utilityBills, bill -> {
+            if ("draft".equals(bill.optString("status"))) return;
+            forEach(arr(bill, "lines"), line -> {
+                if (!premiumPaymentMatches(line.optString("status"), line.optString("due_date")) || !matchesSearch(line.optString("tenant"), line.optString("object"), line.optString("apartment"), line.optString("service"), "Коммуналка")) return;
+                LinearLayout card = paymentCard(firstNonEmpty(line.optString("service"), bill.optString("service"), "Коммуналка"), line, line.optDouble("total_amount"));
+                card.addView(secondaryButton("Записать оплату", v -> {
+                    selectedPaymentKind = "utility";
+                    showManualPaymentFor(line.optInt("lease_id"));
+                }));
+                list.addView(card);
+            });
+        });
+        if (list.getChildCount() == 0) addEmpty(list, "Платежи не найдены", "Измените поиск или выберите другой статус.");
+    }
+
+    private LinearLayout paymentCard(String type, JSONObject item, double amount) {
+        LinearLayout card = premiumCard();
+        LinearLayout top = row();
+        top.addView(label(type, 13, muted, false), new LinearLayout.LayoutParams(0, -2, 1));
+        top.addView(premiumChip(statusLabel(item.optString("status")), statusColor(item.optString("status"))));
+        card.addView(top);
+        card.addView(label(item.optString("tenant"), 18, text, true));
+        card.addView(label(joinNonEmpty(item.optString("object"), item.optString("apartment")), 13, muted, false));
+        card.addView(label(money(item.has("debt") && !isDoneStatus(item.optString("status")) ? item.optDouble("debt") : amount), 26, text, true));
+        card.addView(label((isDoneStatus(item.optString("status")) || !item.has("debt") ? "Начислено" : "Осталось") + " · срок " + compactDate(item.optString("due_date")), 13, muted, false));
+        return card;
+    }
+
+    private void showRentActions(JSONObject charge) {
+        LinearLayout form = dialogForm();
+        form.addView(label(charge.optString("tenant"), 22, text, true));
+        form.addView(label(joinNonEmpty(charge.optString("object"), charge.optString("apartment")), 14, muted, false));
+        form.addView(premiumValueLine("ИП · оплачено / начислено", moneyPair(charge.optDouble("ip_paid"), charge.optDouble("ip_due"))));
+        form.addView(premiumValueLine("Перевод · оплачено / начислено", moneyPair(charge.optDouble("personal_paid"), charge.optDouble("personal_due"))));
+        form.addView(primaryButton("Принять на ИП", v -> payRent(charge, "ip")));
+        form.addView(secondaryButton("Принять перевод", v -> payRent(charge, "personal")));
+        form.addView(secondaryButton("Дать отсрочку", v -> deferRent(charge)));
+        new AlertDialog.Builder(this).setTitle("Аренда · " + compactDate(charge.optString("due_date"))).setView(wrapDialog(form)).setNegativeButton("Закрыть", null).show();
+    }
+
+    private void showManualPaymentFor(int leaseId) {
+        selectedPaymentLeaseId = leaseId;
+        showManualPaymentDialog();
     }
 
     private void renderPremiumTasks() {
         screenTitle.setText("Дела");
         content.removeAllViews();
-        content.addView(primaryButton("Запустить напоминания", v -> runApi("Напоминания", () -> api.postJson("/api/reminders/run", new JSONObject()), value -> syncAfterMutation())), new LinearLayout.LayoutParams(-1, dp(52)));
+        content.addView(label("Здесь собраны действия, которым нужно ваше внимание.", 14, muted, false));
         List<MonthTask> tasks = buildPremiumTasks(obj(bootstrap, "dashboard"));
-        addPremiumTaskGroup(tasks, "Сегодня", 0);
+        addPremiumTaskGroup(tasks, "Сегодня и просрочено", 0);
         addPremiumTaskGroup(tasks, "На неделе", 1);
         addPremiumTaskGroup(tasks, "Позже", 2);
-        if (tasks.isEmpty()) {
-            LinearLayout empty = premiumCard();
-            empty.addView(label("Открытых дел нет", 18, text, true));
-            empty.addView(label("Важные действия сейчас закрыты.", 13, muted, false));
-            content.addView(empty);
-        }
+        if (tasks.isEmpty()) addEmpty(content, "На сегодня всё", "Новые платежи, показания и чеки появятся здесь.");
+        content.addView(section("Напоминания жильцам"));
+        content.addView(secondaryButton("Запустить напоминания", v -> confirm("Отправить жильцам положенные напоминания сейчас?", () -> runApi("Напоминания", () -> api.postJson("/api/reminders/run", new JSONObject()), value -> syncAfterMutation()))));
     }
 
     private List<MonthTask> buildPremiumTasks(JSONObject dashboard) {
@@ -998,11 +1072,11 @@ public class MainActivity extends Activity {
         collectPremiumTasks(tasks, dashboard, "manual_debts", "Закрыть ручной долг", "Нужна ручная проверка", orange);
         collectPremiumTasks(tasks, dashboard, "suspicious_receipts", "Проверить чек", "Нужно решение", red);
         collectPremiumTasks(tasks, dashboard, "provider_reading_due", "Передать показания", "Срок поставщику близко", orange);
-        forEach(arr(dashboard, "monthly_reports"), report -> tasks.add(new MonthTask(1, "Проверить месячный отчёт", report.optString("title"), orange)));
+        forEach(arr(dashboard, "monthly_reports"), report -> tasks.add(new MonthTask(1, "Проверить месячный отчёт", report.optString("title"), orange, () -> navigate("reports"))));
         forEach(rentCharges, charge -> {
             if (isDoneStatus(charge.optString("status")) || !isFutureDate(charge.optString("due_date"))) return;
             int group = daysFromToday(charge.optString("due_date")) <= 7 ? 1 : 2;
-            tasks.add(new MonthTask(group, "Будущая аренда: " + compactApartment(charge), charge.optString("tenant") + " · " + compactDate(charge.optString("due_date")), gray));
+            tasks.add(new MonthTask(group, "Будущая аренда: " + compactApartment(charge), charge.optString("tenant") + " · " + compactDate(charge.optString("due_date")), gray, () -> showRentActions(charge)));
         });
         return tasks;
     }
@@ -1012,7 +1086,7 @@ public class MainActivity extends Activity {
             String due = firstNonEmpty(item.optString("due_date"), item.optString("created_at"), today());
             int days = daysFromToday(due);
             int group = days <= 0 ? 0 : days <= 7 ? 1 : 2;
-            tasks.add(new MonthTask(group, title + ": " + attentionGroupTitle(item, title), joinNonEmpty(step, compactDate(due), item.optString("tenant")), color));
+            tasks.add(new MonthTask(group, title + ": " + attentionGroupTitle(item, title), joinNonEmpty(step, compactDate(due), item.optString("tenant")), color, () -> openAttention(key, item)));
         });
     }
 
@@ -1027,6 +1101,9 @@ public class MainActivity extends Activity {
             LinearLayout card = premiumCardWithAccent(task.color);
             card.addView(label(task.title, 17, text, true));
             card.addView(label(task.detail, 13, muted, false));
+            card.addView(label("Открыть дело  ›", 13, blue, true));
+            MobileUi.makeClickable(card);
+            card.setOnClickListener(v -> { if (task.action != null) task.action.run(); else navigate("payments"); });
             content.addView(card);
         }
     }
@@ -1042,6 +1119,7 @@ public class MainActivity extends Activity {
 
     private boolean premiumPaymentMatches(String status, String dueDate) {
         if ("all".equals(premiumPaymentFilter)) return true;
+        if ("open".equals(premiumPaymentFilter)) return !isDoneStatus(status);
         if ("paid".equals(premiumPaymentFilter)) return isDoneStatus(status);
         if ("overdue".equals(premiumPaymentFilter)) return isCriticalStatus(status) && !isFutureDate(dueDate);
         return !isDoneStatus(status) && !isCriticalStatus(status);
@@ -1069,16 +1147,12 @@ public class MainActivity extends Activity {
     }
 
     private LinearLayout premiumCard() {
-        LinearLayout card = card();
-        card.setPadding(dp(18), dp(16), dp(18), dp(16));
-        card.setBackground(round(surface, 255, dp(24), Color.TRANSPARENT));
-        card.setElevation(dp(2));
-        return card;
+        return card();
     }
 
     private LinearLayout premiumCardWithAccent(int accent) {
-        LinearLayout card = premiumCard();
-        card.setBackground(round(surface, 255, dp(24), accent));
+        LinearLayout card = card();
+        card.setBackground(MobileUi.shape(this, surface, 22, MobileUi.alpha(accent, 100)));
         return card;
     }
 
@@ -1093,11 +1167,7 @@ public class MainActivity extends Activity {
     }
 
     private TextView premiumChip(String title, int color) {
-        TextView chip = label(title, 12, color, true);
-        chip.setGravity(Gravity.CENTER);
-        chip.setPadding(dp(8), dp(5), dp(8), dp(5));
-        chip.setBackground(round(color, 34, dp(12), Color.TRANSPARENT));
-        return chip;
+        return MobileUi.chip(this, title, color);
     }
 
     private int daysFromToday(String value) {
@@ -1218,6 +1288,7 @@ public class MainActivity extends Activity {
     private Button monthArrow(String title, int delta) {
         Button button = secondaryButton(title);
         button.setTextSize(20);
+        button.setPadding(0, 0, 0, 0);
         button.setOnClickListener(v -> {
             shiftSelectedMonth(delta);
             renderCurrentTab();
@@ -1366,38 +1437,33 @@ public class MainActivity extends Activity {
         String key = selectedMonthKey();
         if (key.equals(progressRentMonthKey) || progressRentLoading) return;
         progressRentLoading = true;
+        progressLoadFailed = false;
         int year = selectedMonth.get(Calendar.YEAR);
         int month = selectedMonth.get(Calendar.MONTH) + 1;
         new Thread(() -> {
             try {
                 JSONObject loaded = api.getJson("/api/month-progress?year=" + year + "&month=" + month);
                 runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) return;
                     progressRentCharges = arr(loaded, "rent_charges");
                     progressUtilityBills = arr(loaded, "utility_bills");
                     progressProviderReadings = arr(loaded, "provider_readings");
                     progressMonthSummary = obj(loaded, "summary");
                     progressRentMonthKey = key;
                     progressRentLoading = false;
-                    if ("dashboard".equals(currentTab) && key.equals(selectedMonthKey())) {
-                        renderCurrentTab();
-                    }
+                    if ("dashboard".equals(currentTab)) renderCurrentTab();
                 });
-            } catch (Exception first) {
-                try {
-                    JSONArray loaded = api.getArray("/api/rent-charges?start=" + selectedMonthStart() + "&end=" + selectedMonthEnd());
-                    runOnUiThread(() -> {
-                        progressRentCharges = loaded;
-                        progressUtilityBills = new JSONArray();
-                        progressProviderReadings = new JSONArray();
-                        progressMonthSummary = new JSONObject();
-                        progressRentMonthKey = key;
-                        progressRentLoading = false;
-                    });
-                } catch (Exception ignored) {
-                    runOnUiThread(() -> progressRentLoading = false);
-                }
+            } catch (Exception error) {
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    progressRentLoading = false;
+                    progressLoadFailed = true;
+                    progressRentMonthKey = key;
+                    progressMonthSummary = new JSONObject();
+                    if ("dashboard".equals(currentTab)) renderCurrentTab();
+                });
             }
-        }, "rental-progress-rent").start();
+        }, "rental-month-summary").start();
     }
 
     private String scoreDateForItem(String key, JSONObject item) {
@@ -1618,7 +1684,7 @@ public class MainActivity extends Activity {
                 buildBottomNav();
                 loadCurrentTab(false);
             });
-            card.addView(open, new LinearLayout.LayoutParams(-1, dp(42)));
+            card.addView(open, new LinearLayout.LayoutParams(-1, -2));
             content.addView(card);
         }
     }
@@ -1717,9 +1783,9 @@ public class MainActivity extends Activity {
                 card.addView(label(joinNonEmpty(lease.optString("object"), lease.optString("apartment")) + " · с " + lease.optString("start_date"), 14, muted, false));
                 card.addView(label("ИП " + money(lease.optDouble("ip_amount")) + " · перевод " + money(lease.optDouble("personal_amount")), 14, muted, false));
                 LinearLayout actions = row();
-                actions.addView(smallButton("Изменить", v -> showOnboardDialog(lease)), new LinearLayout.LayoutParams(0, dp(42), 1));
-                actions.addView(smallButton(lease.optBoolean("ignored") ? "Из архива" : "В архив", v -> toggleLeaseIgnore(lease)), new LinearLayout.LayoutParams(0, dp(42), 1));
-                actions.addView(smallButton("Выезд", v -> moveOut(lease)), new LinearLayout.LayoutParams(0, dp(42), 1));
+                actions.addView(smallButton("Изменить", v -> showOnboardDialog(lease)), new LinearLayout.LayoutParams(0, -2, 1));
+                actions.addView(smallButton(lease.optBoolean("ignored") ? "Из архива" : "В архив", v -> toggleLeaseIgnore(lease)), new LinearLayout.LayoutParams(0, -2, 1));
+                actions.addView(smallButton("Выезд", v -> moveOut(lease)), new LinearLayout.LayoutParams(0, -2, 1));
                 card.addView(actions);
                 content.addView(card);
             });
@@ -1826,8 +1892,8 @@ public class MainActivity extends Activity {
         }
         if (showSection("payments_actions")) {
             LinearLayout actions = row();
-            actions.addView(smallButton("Сгенерировать", v -> runApi("Генерирую", () -> api.postJson("/api/rent-charges/generate", new JSONObject()), value -> syncAfterMutation())), new LinearLayout.LayoutParams(0, dp(44), 1));
-            actions.addView(smallButton("Ручная оплата", v -> showManualPaymentDialog()), new LinearLayout.LayoutParams(0, dp(44), 1));
+            actions.addView(smallButton("Сгенерировать", v -> runApi("Генерирую", () -> api.postJson("/api/rent-charges/generate", new JSONObject()), value -> syncAfterMutation())), new LinearLayout.LayoutParams(0, -2, 1));
+            actions.addView(smallButton("Ручная оплата", v -> showManualPaymentDialog()), new LinearLayout.LayoutParams(0, -2, 1));
             content.addView(actions);
         }
 
@@ -1841,9 +1907,9 @@ public class MainActivity extends Activity {
                 card.addView(label("К оплате " + money(charge.optDouble("total_due")) + " · долг " + money(charge.optDouble("debt")), 14, muted, false));
                 card.addView(label(statusLabel(charge.optString("status")), 13, color, true));
                 LinearLayout row1 = row();
-                row1.addView(smallButton("ИП", v -> payRent(charge, "ip")), new LinearLayout.LayoutParams(0, dp(42), 1));
-                row1.addView(smallButton("Перевод", v -> payRent(charge, "personal")), new LinearLayout.LayoutParams(0, dp(42), 1));
-                row1.addView(smallButton("Отсрочка", v -> deferRent(charge)), new LinearLayout.LayoutParams(0, dp(42), 1));
+                row1.addView(smallButton("ИП", v -> payRent(charge, "ip")), new LinearLayout.LayoutParams(0, -2, 1));
+                row1.addView(smallButton("Перевод", v -> payRent(charge, "personal")), new LinearLayout.LayoutParams(0, -2, 1));
+                row1.addView(smallButton("Отсрочка", v -> deferRent(charge)), new LinearLayout.LayoutParams(0, -2, 1));
                 card.addView(row1);
                 content.addView(card);
             });
@@ -1856,8 +1922,8 @@ public class MainActivity extends Activity {
                 card.addView(label(money(receipt.optDouble("amount")), 18, text, true));
                 card.addView(label(joinNonEmpty(receipt.optString("apartment"), receipt.optString("tenant"), receipt.optString("recipient_name")), 14, muted, false));
                 LinearLayout actions2 = row();
-                actions2.addView(smallButton("Принять", v -> moderateReceipt(receipt, "accept")), new LinearLayout.LayoutParams(0, dp(42), 1));
-                actions2.addView(smallButton("Скрыть", v -> ignoreReceipt(receipt)), new LinearLayout.LayoutParams(0, dp(42), 1));
+                actions2.addView(smallButton("Принять", v -> moderateReceipt(receipt, "accept")), new LinearLayout.LayoutParams(0, -2, 1));
+                actions2.addView(smallButton("Скрыть", v -> ignoreReceipt(receipt)), new LinearLayout.LayoutParams(0, -2, 1));
                 card.addView(actions2);
                 content.addView(card);
             });
@@ -1867,7 +1933,11 @@ public class MainActivity extends Activity {
     private void showManualPaymentDialog() {
         LinearLayout form = dialogForm();
         Spinner lease = spinner(leaseLabels(), leaseIds());
+        if (selectedPaymentLeaseId > 0) selectSpinnerValue(lease, Integer.toString(selectedPaymentLeaseId));
+        selectedPaymentLeaseId = 0;
         Spinner kind = spinner(new String[]{"Аренда", "Коммуналка", "Аванс коммуналки"}, new String[]{"rent", "utility", "utility_advance"});
+        selectSpinnerValue(kind, selectedPaymentKind);
+        selectedPaymentKind = "rent";
         Spinner channel = spinner(new String[]{"Перевод", "ИП", "На расходы"}, new String[]{"personal", "ip", "expense_fund"});
         EditText amount = input("0", false);
         EditText paidAt = input("2026-05-21T12:00", false);
@@ -1902,23 +1972,25 @@ public class MainActivity extends Activity {
     }
 
     private void renderServices() {
-        screenTitle.setText("Учёт");
         content.removeAllViews();
-        if (showSection("services_hero")) {
-            addHero("Коммуналка, счётчики, расходы", "Всё, что обычно расползается по вкладкам, собрано в один рабочий экран.");
+        String[] titles = {"Коммуналка", "Счётчики", "Тарифы", "Расходы"};
+        String[] modes = {"utilities", "meters", "tariffs", "expenses"};
+        android.widget.HorizontalScrollView scroll = new android.widget.HorizontalScrollView(this);
+        scroll.setHorizontalScrollBarEnabled(false);
+        LinearLayout tabs = row();
+        for (int i = 0; i < modes.length; i++) {
+            if (modes[i].equals(servicesMode)) screenTitle.setText(titles[i]);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, -2);
+            params.setMargins(0, dp(4), dp(8), dp(12));
+            tabs.addView(modeButton(titles[i], modes[i]), params);
         }
-        if (showSection("services_modes")) {
-            LinearLayout tabs = row();
-            tabs.addView(modeButton("Коммуналка", "utilities"), new LinearLayout.LayoutParams(0, dp(44), 1));
-            tabs.addView(modeButton("Счётчики", "meters"), new LinearLayout.LayoutParams(0, dp(44), 1));
-            tabs.addView(modeButton("Тарифы", "tariffs"), new LinearLayout.LayoutParams(0, dp(44), 1));
-            tabs.addView(modeButton("Расходы", "expenses"), new LinearLayout.LayoutParams(0, dp(44), 1));
-            content.addView(tabs);
-        }
+        scroll.addView(tabs);
+        content.addView(scroll);
         if ("meters".equals(servicesMode)) renderMeters();
         else if ("tariffs".equals(servicesMode)) renderTariffs();
         else if ("expenses".equals(servicesMode)) renderExpenses();
         else renderUtilities();
+        if (content.getChildCount() <= 3) addEmpty(content, "Пока нет записей", "Добавьте первую запись кнопкой выше.");
     }
 
     private void renderUtilities() {
@@ -1936,9 +2008,9 @@ public class MainActivity extends Activity {
             card.addView(label(bill.optString("period_start") + " — " + bill.optString("period_end"), 13, muted, false));
             card.addView(label("Итого " + money(bill.optDouble("total_cost")), 15, text, true));
             LinearLayout row = row();
-            row.addView(smallButton("Выставить", v -> issueBill(bill)), new LinearLayout.LayoutParams(0, dp(42), 1));
-            row.addView(smallButton("Поставщик оплачен", v -> providerPaid(bill)), new LinearLayout.LayoutParams(0, dp(42), 1));
-            row.addView(smallButton("Удалить", v -> deleteBill(bill)), new LinearLayout.LayoutParams(0, dp(42), 1));
+            row.addView(smallButton("Выставить", v -> issueBill(bill)), new LinearLayout.LayoutParams(0, -2, 1));
+            row.addView(smallButton("Поставщик оплачен", v -> providerPaid(bill)), new LinearLayout.LayoutParams(0, -2, 1));
+            row.addView(smallButton("Удалить", v -> deleteBill(bill)), new LinearLayout.LayoutParams(0, -2, 1));
             card.addView(row);
             content.addView(card);
         });
@@ -1999,71 +2071,152 @@ public class MainActivity extends Activity {
     private void renderMore() {
         screenTitle.setText("Ещё");
         content.removeAllViews();
-        if (showSection("more_hero")) {
-            addHero("Отчёты, сообщения, настройки", "Административные действия, уведомления, сообщения и параметры сервера.");
+        if (!isGuest()) {
+            content.addView(section("Работа с объектами"));
+            addDestination("wallet", "Коммуналка", "Расчёт, счета и оплата поставщику", () -> openService("utilities"));
+            addDestination("trend", "Счётчики", "Внести показания", () -> openService("meters"));
+            addDestination("document", "Расходы", "Затраты и компенсации", () -> openService("expenses"));
+            addDestination("settings", "Тарифы", "Ставки и периоды действия", () -> openService("tariffs"));
+            addDestination("buildings", "Договоры и квартиры", "Заселение, изменения и выезд", () -> navigate("tenants"));
+            content.addView(section("Связь и контроль"));
+            addDestination("tasks", "Чеки на проверку", suspiciousReceipts.length() + " ожидают решения", () -> navigate("receipts"));
+            addDestination("bell", "Сообщения жильцам", "Получатели и предпросмотр отправки", () -> showMessageTargets());
+            addDestination("shield", "Hermes", "Дела, предложения и обязательства", () -> startActivity(new Intent(this, HermesActivity.class)));
         }
+        content.addView(section("Приложение"));
+        addDestination("document", "Отчёты", "Скачать Excel за нужный период", () -> navigate("reports"));
+        if (!isGuest()) addDestination("bell", "Уведомления", "События, тихие часы и частота", () -> startActivity(new Intent(this, NotificationSettingsActivity.class)));
+        addDestination("settings", "Настройки", "Подключение, обновления и вход", () -> navigate("settings"));
+    }
 
-        LinearLayout ui = card();
-        ui.addView(label("Видимость экранов", 19, text, true));
-        ui.addView(label("Выберите, какие блоки показывать на каждой странице.", 14, muted, false));
-        ui.addView(primaryButton("Настроить страницы", v -> showPageSectionsDialog()));
-        content.addView(ui);
+    private void addDestination(String icon, String title, String subtitle, Runnable action) {
+        LinearLayout item = MobileUi.row(this);
+        item.setPadding(dp(16), dp(14), dp(14), dp(14));
+        item.setMinimumHeight(dp(76));
+        item.setBackground(MobileUi.ripple(this, surface, 18, hairline));
+        TextView symbol = label("", 1, blue, false);
+        symbol.setCompoundDrawables(MobileUi.icon(this, icon, blue, 24), null, null, null);
+        item.addView(symbol, new LinearLayout.LayoutParams(dp(38), dp(28)));
+        LinearLayout words = MobileUi.column(this);
+        words.addView(label(title, 16, text, true));
+        if (!subtitle.isEmpty()) words.addView(label(subtitle, 12, muted, false));
+        item.addView(words, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView arrow = label("›", 25, muted, false);
+        arrow.setPadding(dp(10), 0, 0, 0);
+        item.addView(arrow);
+        item.setOnClickListener(v -> action.run());
+        item.setFocusable(true);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+        params.setMargins(0, 0, 0, dp(8));
+        content.addView(item, params);
+    }
 
-        LinearLayout hermes = card();
-        hermes.addView(label("Hermes Core", 19, text, true));
-        hermes.addView(label("Кейсы, обязательства, подтверждения, настройки автономности и стоимость AI.", 14, muted, false));
-        hermes.addView(primaryButton("Открыть центр управления AI", v -> startActivity(new Intent(this, HermesActivity.class))));
-        content.addView(hermes);
+    private void addAction(LinearLayout parent, String title, Runnable action, boolean primary) {
+        Button button = primary ? primaryButton(title) : secondaryButton(title);
+        button.setOnClickListener(v -> action.run());
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1);
+        params.setMargins(0, dp(4), dp(6), dp(4));
+        parent.addView(button, params);
+    }
 
-        if (showSection("more_notifications")) {
-        LinearLayout notif = card();
-        notif.addView(label("Пуш-уведомления", 19, text, true));
-        notif.addView(label("Частота, тихие часы, типы событий и постоянное уведомление о долгах.", 14, muted, false));
-        notif.addView(primaryButton("Настроить", v -> startActivity(new Intent(this, NotificationSettingsActivity.class))));
-        content.addView(notif);
+    private void openService(String mode) { servicesMode = mode; navigate("services"); }
+
+    private void renderSettings() {
+        screenTitle.setText("Настройки");
+        content.removeAllViews();
+        content.addView(section("Подключение"));
+        addDestination("settings", "Адрес сервера", api.baseUrl(), () -> showHostDialog());
+        if (!isGuest()) {
+            addDestination("settings", "Сервер и Telegram", "Публичный адрес и настройки бота", () -> showServerSettingsDialog());
+            addDestination("download", "Экспорт базы", "Скачать JSON", () -> download("/api/admin/database-export", "rental-manager-db.json"));
         }
+        content.addView(section("Версия " + AppUpdates.installedName(this)));
+        addDestination("download", "Обновления приложения", AppUpdates.status(this), () -> AppUpdates.showDialog(this));
+        addDestination("shield", "Выйти", "Завершить PIN-сессию на этом устройстве", () -> confirm("Выйти из приложения?", () -> logout()));
+    }
 
-        if (showSection("more_reports")) {
-        LinearLayout reports = card();
-        reports.addView(label("Excel-отчёты", 19, text, true));
-        EditText start = input("2026-05-01", false);
-        EditText end = input("2026-05-31", false);
-        start.setText(firstDay());
-        end.setText(today());
-        reports.addView(field("С", start));
-        reports.addView(field("По", end));
+    private void renderReports() {
+        screenTitle.setText("Отчёты");
+        content.removeAllViews();
+        LinearLayout period = card();
+        period.addView(label("Период отчёта", 18, text, true));
+        EditText start = dateInput(firstDay());
+        EditText end = dateInput(today());
+        period.addView(field("Начало", start));
+        period.addView(field("Конец", end));
+        content.addView(period);
         String[] names = {"Аренда", "Коммуналка", "Расходы", "Долги", "История", "Для хозяина"};
-        String[] paths = {"/api/reports/rent.xlsx", "/api/reports/utilities.xlsx", "/api/reports/expenses.xlsx", "/api/reports/debts.xlsx", "/api/reports/history.xlsx", "/api/reports/owner.xlsx"};
+        String[] paths = {"rent", "utilities", "expenses", "debts", "history", "owner"};
         for (int i = 0; i < names.length; i++) {
-            final int index = i;
-            reports.addView(secondaryButton(names[i], v -> {
-                String query = "?start=" + start.getText().toString() + "&end=" + end.getText().toString();
-                if (paths[index].contains("debts") || paths[index].contains("history")) query = "";
-                download(paths[index] + query, names[index] + ".xlsx");
-            }));
+            final String path = paths[i], name = names[i];
+            addDestination("download", name, "Долги".equals(name) || "История".equals(name) ? "Все сохранённые данные · Excel" : "За выбранный период · Excel", () -> {
+                if (start.getText().toString().compareTo(end.getText().toString()) > 0) { start.setError("Начало позже конца"); return; }
+                String query = "debts".equals(path) || "history".equals(path) ? "" : "?start=" + start.getText() + "&end=" + end.getText();
+                download("/api/reports/" + path + ".xlsx" + query, name + ".xlsx");
+            });
         }
-        content.addView(reports);
-        }
+    }
 
-        if (showSection("more_messages")) {
-        LinearLayout messages = card();
-        messages.addView(label("Сообщения жильцам", 19, text, true));
-        messages.addView(label("Превью и отправка через Telegram-бота.", 14, muted, false));
-        messages.addView(primaryButton("Открыть получателей", v -> showMessageTargets()));
-        messages.addView(secondaryButton("Прогнать напоминания", v -> runApi("Напоминания", () -> api.postJson("/api/reminders/run", new JSONObject()), value -> toast("Напоминания обработаны"))));
-        content.addView(messages);
-        }
+    private EditText dateInput(String initial) {
+        EditText field = input("ГГГГ-ММ-ДД", false);
+        field.setText(initial);
+        field.setFocusable(false);
+        field.setOnClickListener(v -> {
+            Calendar date = Calendar.getInstance();
+            try {
+                String[] parts = field.getText().toString().split("-");
+                date.set(Integer.parseInt(parts[0]), Integer.parseInt(parts[1]) - 1, Integer.parseInt(parts[2]));
+            } catch (Exception ignored) { }
+            new android.app.DatePickerDialog(this, (picker, year, month, day) -> field.setText(String.format(Locale.US, "%04d-%02d-%02d", year, month + 1, day)),
+                date.get(Calendar.YEAR), date.get(Calendar.MONTH), date.get(Calendar.DAY_OF_MONTH)).show();
+        });
+        return field;
+    }
 
-        if (showSection("more_server_settings")) {
-        LinearLayout settings = card();
-        settings.addView(label("Настройки сервера", 19, text, true));
-        settings.addView(secondaryButton("Сменить хост", v -> showHostDialog()));
-        settings.addView(secondaryButton("Открыть", v -> showServerSettingsDialog()));
-        settings.addView(secondaryButton("Экспорт базы", v -> download("/api/admin/database-export", "rental-manager-db.json")));
-        settings.addView(secondaryButton("Обновления приложения", v -> AppUpdates.showDialog(this)));
-        settings.addView(secondaryButton("Выйти из PIN-сессии", v -> logout()));
-        content.addView(settings);
-        }
+    private void renderReceipts() {
+        screenTitle.setText("Проверка чеков");
+        content.removeAllViews();
+        content.addView(label("Сверьте платёж перед зачислением.", 14, muted, false));
+        if (suspiciousReceipts.length() == 0) { addEmpty(content, "Все чеки разобраны", "Новые чеки, которым нужна проверка, появятся здесь."); return; }
+        forEach(suspiciousReceipts, receipt -> {
+            LinearLayout card = premiumCard();
+            card.addView(premiumChip("Нужна проверка", orange));
+            card.addView(label(money(receipt.optDouble("amount")), 26, text, true));
+            card.addView(label(joinNonEmpty(receipt.optString("tenant"), receipt.optString("object"), receipt.optString("apartment")), 16, text, true));
+            card.addView(label(joinNonEmpty(receipt.optString("recipient_name"), receipt.optString("paid_at"), receipt.optString("suspicious_reason")), 13, muted, false));
+            LinearLayout actions = row();
+            addAction(actions, "Принять", () -> confirm("Зачесть этот платёж?", () -> moderateReceipt(receipt, "accept")), true);
+            addAction(actions, "Скрыть", () -> confirm("Убрать чек из проверки без зачисления?", () -> ignoreReceipt(receipt)), false);
+            card.addView(actions);
+            content.addView(card);
+        });
+    }
+
+    private void addEmpty(LinearLayout parent, String title, String detail) {
+        LinearLayout card = premiumCard();
+        card.addView(label(title, 19, text, true));
+        card.addView(label(detail, 14, muted, false));
+        parent.addView(card);
+    }
+
+    private void addSearch(String hint, Runnable changed) {
+        EditText search = input(hint, false);
+        search.setInputType(InputType.TYPE_CLASS_TEXT);
+        search.setCompoundDrawables(MobileUi.icon(this, "search", muted, 20), null, null, null);
+        search.setCompoundDrawablePadding(dp(10));
+        search.setText(searchQuery);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+        params.setMargins(0, dp(6), 0, dp(14));
+        content.addView(search, params);
+        search.addTextChangedListener(new android.text.TextWatcher() {
+            public void beforeTextChanged(CharSequence value, int start, int count, int after) {}
+            public void onTextChanged(CharSequence value, int start, int before, int count) { searchQuery = value.toString(); changed.run(); }
+            public void afterTextChanged(android.text.Editable value) {}
+        });
+    }
+
+    private boolean matchesSearch(String... values) {
+        return searchQuery.trim().isEmpty() || joinNonEmpty(values).toLowerCase(Locale.forLanguageTag("ru")).contains(searchQuery.trim().toLowerCase(Locale.forLanguageTag("ru")));
     }
 
     private void showMessageTargets() {
@@ -2079,7 +2232,7 @@ public class MainActivity extends Activity {
     }
 
     private boolean showSection(String key) {
-        return NotificationPrefs.prefs(this).getBoolean("ui_" + key, true);
+        return true;
     }
 
     private void showPageSectionsDialog() {
@@ -2334,7 +2487,7 @@ public class MainActivity extends Activity {
 
     private void payRent(JSONObject charge, String channel) {
         double suggested = "ip".equals(channel) ? Math.max(0, charge.optDouble("ip_due") - charge.optDouble("ip_paid")) : Math.max(0, charge.optDouble("personal_due") - charge.optDouble("personal_paid"));
-        promptNumber("Оплата " + channel, suggested, value -> {
+        promptNumber("Оплата · " + ("ip".equals(channel) ? "ИП" : "Перевод"), suggested, value -> {
             JSONObject body = new JSONObject();
             body.put("amount", value);
             body.put("channel", channel);
@@ -2548,14 +2701,14 @@ public class MainActivity extends Activity {
 
     private Button smallButton(String title, View.OnClickListener listener) {
         Button button = semanticSmallButton(title);
-        button.setTextSize(12);
+        button.setTextSize(13);
         button.setOnClickListener(listener);
         return button;
     }
 
     private Button smallButton(String title) {
         Button button = semanticSmallButton(title);
-        button.setTextSize(12);
+        button.setTextSize(13);
         return button;
     }
 
@@ -2595,12 +2748,12 @@ public class MainActivity extends Activity {
     }
 
     private Button styledButton(String title, int bgColor, int textColor) {
-        Button button = new Button(this);
-        button.setText(title);
-        button.setAllCaps(false);
-        button.setTextColor(textColor);
-        button.setTextSize(14);
-        button.setBackground(round(bgColor, activeAlpha(bgColor), dp(14), bgColor == Color.TRANSPARENT ? Color.TRANSPARENT : hairline));
+        Button button = MobileUi.button(this, title, bgColor == blue);
+        button.setTextColor(bgColor == blue ? bg : textColor);
+        button.setBackground(MobileUi.ripple(this, bgColor, 14, bgColor == blue || bgColor == Color.TRANSPARENT ? Color.TRANSPARENT : hairline));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+        params.setMargins(0, dp(4), 0, dp(4));
+        button.setLayoutParams(params);
         return button;
     }
 
@@ -2609,15 +2762,7 @@ public class MainActivity extends Activity {
     }
 
     private LinearLayout card() {
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(16), dp(14), dp(16), dp(14));
-        card.setBackground(round(surface, 255, dp(18), hairline));
-        card.setElevation(dp(3));
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
-        params.setMargins(0, 0, 0, dp(12));
-        card.setLayoutParams(params);
-        return card;
+        return MobileUi.card(this);
     }
 
     private LinearLayout cardWithAccent(int accent) {
@@ -2627,9 +2772,7 @@ public class MainActivity extends Activity {
     }
 
     private TextView section(String title) {
-        TextView view = label(title, 20, text, true);
-        view.setPadding(dp(4), dp(16), dp(4), dp(8));
-        return view;
+        return MobileUi.section(this, title);
     }
 
     private LinearLayout row() {
@@ -2641,24 +2784,11 @@ public class MainActivity extends Activity {
     }
 
     private TextView label(String value, int sp, int color, boolean bold) {
-        TextView view = new TextView(this);
-        view.setText(value == null ? "" : value);
-        view.setTextSize(sp);
-        view.setTextColor(color);
-        view.setPadding(0, dp(2), 0, dp(3));
-        if (bold) view.setTypeface(Typeface.DEFAULT_BOLD);
-        return view;
+        return MobileUi.text(this, value, sp, color, bold);
     }
 
     private EditText input(String hint, boolean password) {
-        EditText input = new EditText(this);
-        input.setHint(hint);
-        input.setHintTextColor(muted);
-        input.setTextColor(text);
-        input.setSingleLine(true);
-        input.setTextSize(15);
-        input.setPadding(dp(12), 0, dp(12), 0);
-        input.setBackground(round(surface2, 255, dp(12), hairline));
+        EditText input = MobileUi.field(this, hint);
         if (password) input.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
         return input;
     }
@@ -2676,7 +2806,7 @@ public class MainActivity extends Activity {
         wrap.setOrientation(LinearLayout.VERTICAL);
         wrap.setPadding(0, dp(6), 0, dp(8));
         wrap.addView(label(label, 12, muted, false));
-        wrap.addView(field, new LinearLayout.LayoutParams(-1, dp(48)));
+        wrap.addView(field, new LinearLayout.LayoutParams(-1, -2));
         return wrap;
     }
 
@@ -3102,7 +3232,7 @@ public class MainActivity extends Activity {
         if ("overdue".equals(status) || "suspicious".equals(status)) return red;
         if ("partial".equals(status) || "deferred".equals(status) || "issued".equals(status)) return orange;
         if ("paid".equals(status) || "paid_ahead".equals(status) || "accepted".equals(status)) return green;
-        return blue;
+        return muted;
     }
 
     private String today() {
@@ -3156,8 +3286,12 @@ public class MainActivity extends Activity {
         final String title;
         final String detail;
         final int color;
+        final Runnable action;
 
-        MonthTask(int group, String title, String detail, int color) {
+        MonthTask(int group, String title, String detail, int color) { this(group, title, detail, color, null); }
+
+        MonthTask(int group, String title, String detail, int color, Runnable action) {
+            this.action = action;
             this.group = group;
             this.title = title;
             this.detail = detail;

@@ -24,6 +24,10 @@ npm.cmd run test:web
 
 Playwright устанавливается командой `npm.cmd ci`, браузер при необходимости — `npx.cmd playwright install chromium`. Реальный внешний Telegram/DeepSeek smoke не входит в автоматический набор и выполняется только с явно выданным доступом и синтетическими данными.
 
+## Android
+
+`android/RentalManager/test-java.ps1` проверяет политику обновлений и уведомлений на JVM. `android/RentalManager/test-ui.ps1 -Serial emulator-5554` собирает отдельный QA APK без разрешения INTERNET, подставляет синтетические данные и сохраняет screenshots/report.json в игнорируемый `build/ui-smoke-*`. Production lifecycle, сессии и база при этом не используются. Проверяются пять вкладок, восстановленные разделы, пустые состояния, масштаб шрифта и отсутствие выдуманных финансовых сумм при недоступной месячной сводке. Это проверка интерфейса, а не сквозная проверка реальных денежных операций.
+
 ## Миграции
 
 При изменении схемы, auth settings или persisted repair обязательна проверка из `CHANGE_AND_MIGRATION_GUIDE.md`: один Alembic head, upgrade чистой БД и upgrade существующей схемы с контрольными данными. SQLite smoke не заменяет PostgreSQL-проверку ограничений и индексов.
