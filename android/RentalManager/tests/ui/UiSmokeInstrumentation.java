@@ -74,6 +74,19 @@ public final class UiSmokeInstrumentation extends Instrumentation {
                 if (text.toString().contains("Зарплата · получено")) throw new AssertionError("Missing summary shown as money");
             });
             capture("missing-month-summary", "dashboard");
+            main(() -> {
+                host.prepare(this, false);
+                JSONArray charges = (JSONArray) host.get("progressRentCharges");
+                charges.getJSONObject(0).put("personal_status", "paid").put("personal_paid", 12000).put("apartment", "БД4");
+                View details = (View) host.invoke("salaryDetails", new Class<?>[]{JSONArray.class}, charges);
+                StringBuilder text = new StringBuilder();
+                inspect(details, text, new JSONArray());
+                if (text.toString().contains("Анна") || text.toString().contains("Иван")) throw new AssertionError("Salary detail exposes tenant names");
+                if (!text.toString().contains("БД4") || !text.toString().contains("Получено") || !text.toString().contains("Ожидается")) throw new AssertionError("Salary detail missing apartment or personal status");
+                ViewGroup content = (ViewGroup) host.get("content");
+                content.removeAllViews(); content.addView(details);
+            });
+            capture("salary-by-apartment", "dashboard");
             writeReport();
             result.putString("stream", "UI_SMOKE_PASS " + captures.length() + " screenshots; " + output.getAbsolutePath() + "\n");
             finish(Activity.RESULT_OK, result);

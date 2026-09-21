@@ -727,9 +727,17 @@ public class MainActivity extends Activity {
             content.addView(card);
             return;
         }
-        card.addView(label("Зарплата · получено", 14, muted, false));
-        card.addView(label(money(summary.optDouble("salary_paid")), 34, text, true));
-        card.addView(label("из " + money(summary.optDouble("salary_due")) + " за месяц", 14, muted, false));
+        LinearLayout salary = MobileUi.column(this);
+        salary.addView(label("Зарплата · получено", 14, muted, false));
+        salary.addView(label(money(summary.optDouble("salary_paid")), 34, text, true));
+        salary.addView(label("из " + money(summary.optDouble("salary_due")) + " за месяц", 14, muted, false));
+        if (!isGuest()) {
+            salary.addView(label("По квартирам  ›", 13, blue, true));
+            salary.setContentDescription("Зарплата по квартирам за " + monthTitle(selectedMonth));
+            MobileUi.makeClickable(salary);
+            salary.setOnClickListener(v -> showSalaryDetails());
+        }
+        card.addView(salary);
         android.widget.ProgressBar progress = new android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         progress.setMax(1000);
         double due = summary.optDouble("salary_due");
@@ -762,6 +770,127 @@ public class MainActivity extends Activity {
         tile.addView(label(Integer.toString(count), 23, color, true));
         tile.addView(label(title, 11, muted, false));
         parent.addView(tile, new LinearLayout.LayoutParams(0, -2, 1));
+    }
+
+    private void showSalaryDetails() {
+        final Calendar month = (Calendar) selectedMonth.clone();
+        month.set(Calendar.DAY_OF_MONTH, 1);
+        Runnable[] reload = new Runnable[1];
+        android.app.Dialog dialog = new android.app.Dialog(this, android.R.style.Theme_Material_NoActionBar) {
+            private float startX, startY;
+            @Override public boolean dispatchTouchEvent(MotionEvent event) {
+                if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+                    startX = event.getX(); startY = event.getY();
+                } else if (event.getActionMasked() == MotionEvent.ACTION_UP) {
+                    float dx = event.getX() - startX;
+                    if (Math.abs(dx) > dp(64) && Math.abs(dx) > Math.abs(event.getY() - startY) * 1.5f) {
+                        MotionEvent cancel = MotionEvent.obtain(event);
+                        cancel.setAction(MotionEvent.ACTION_CANCEL);
+                        super.dispatchTouchEvent(cancel);
+                        cancel.recycle();
+                        month.add(Calendar.MONTH, dx < 0 ? 1 : -1);
+                        reload[0].run();
+                        return true;
+                    }
+                }
+                return super.dispatchTouchEvent(event);
+            }
+        };
+        LinearLayout page = MobileUi.column(this);
+        page.setBackgroundColor(bg);
+        LinearLayout header = row();
+        Button close = MobileUi.iconButton(this, "back", "Назад");
+        close.setOnClickListener(v -> dialog.dismiss());
+        header.addView(close);
+        header.addView(label("Зарплата", 23, text, true));
+        page.addView(header);
+        LinearLayout selector = row();
+        Button previous = MobileUi.iconButton(this, "back", "Предыдущий месяц");
+        previous.setOnClickListener(v -> { month.add(Calendar.MONTH, -1); reload[0].run(); });
+        selector.addView(previous);
+        TextView title = label("", 18, text, true);
+        title.setGravity(Gravity.CENTER);
+        selector.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+        Button next = secondaryButton("›", v -> { month.add(Calendar.MONTH, 1); reload[0].run(); });
+        next.setContentDescription("Следующий месяц");
+        selector.addView(next);
+        page.addView(selector);
+        LinearLayout body = dialogForm();
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.addView(body);
+        page.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        dialog.setContentView(page);
+        int[] request = {0};
+        reload[0] = () -> {
+            final int generation = ++request[0];
+            final int year = month.get(Calendar.YEAR);
+            final int monthNumber = month.get(Calendar.MONTH) + 1;
+            title.setText(monthTitle(month));
+            scroll.scrollTo(0, 0);
+            body.removeAllViews();
+            body.addView(label("Загружаем квартиры…", 15, muted, false));
+            new Thread(() -> {
+                try {
+                    JSONObject data = api.getJson("/api/month-progress?year=" + year + "&month=" + monthNumber);
+                    runOnUiThread(() -> {
+                        if (!dialog.isShowing() || isDestroyed() || generation != request[0]) return;
+                        body.removeAllViews();
+                        body.addView(salaryDetails(arr(data, "rent_charges")));
+                    });
+                } catch (Exception error) {
+                    runOnUiThread(() -> {
+                        if (!dialog.isShowing() || isDestroyed() || generation != request[0]) return;
+                        body.removeAllViews();
+                        body.addView(label("Не удалось загрузить квартиры. Проверьте соединение и вход.", 15, muted, false));
+                        body.addView(secondaryButton("Повторить", v -> reload[0].run()));
+                    });
+                }
+            }, "rental-salary-details").start();
+        };
+        dialog.show();
+        dialog.getWindow().setLayout(-1, -1);
+        MobileUi.applyWindow(this, page);
+        reload[0].run();
+    }
+
+    private LinearLayout salaryDetails(JSONArray charges) {
+        LinearLayout list = MobileUi.column(this);
+        list.addView(label("Личная часть аренды · листайте месяцы свайпом", 13, muted, false));
+        int shown = 0;
+        for (int i = 0; i < charges.length(); i++) {
+            JSONObject charge = charges.optJSONObject(i);
+            if (charge == null || charge.optDouble("personal_due") == 0 && charge.optDouble("personal_paid") == 0) continue;
+            LinearLayout item = premiumCard();
+            String dueDate = isoDate(charge.optString("due_date"));
+            String paidDate = "";
+            JSONArray payments = arr(charge, "payments");
+            for (int p = 0; p < payments.length(); p++) {
+                JSONObject payment = payments.optJSONObject(p);
+                if (payment == null || !"personal".equals(payment.optString("channel"))
+                    || !"accepted".equals(payment.optString("status"))) continue;
+                String date = isoDate(payment.optString("paid_at"));
+                if (date.compareTo(paidDate) > 0) paidDate = date;
+            }
+            String status = charge.optString("personal_status", "pending");
+            boolean received = isDoneStatus(status);
+            boolean debt = !received && !dueDate.isEmpty() && dueDate.compareTo(bootstrap.optString("today", today())) < 0;
+            int color = received ? green : debt ? orange : gray;
+            item.setBackground(MobileUi.shape(this, Color.argb(24, Color.red(color), Color.green(color), Color.blue(color)), 16, color));
+            String date = compactDate(dueDate);
+            if (!paidDate.isEmpty() && !paidDate.equals(dueDate)) date += " (" + compactDate(paidDate) + ")";
+            String amount = money(received ? charge.optDouble("personal_paid") : charge.optDouble("personal_due"));
+            item.addView(label(compactApartment(charge) + "  " + date + "  " + amount + "  "
+                + (received ? "Получено" : debt ? "Долг" : "Ожидается"), 16, color, true));
+            if (!received && charge.optDouble("personal_paid") > 0) {
+                item.addView(label("Получено " + money(charge.optDouble("personal_paid")) + " · осталось "
+                    + money(Math.max(0, charge.optDouble("personal_due") - charge.optDouble("personal_paid"))), 13, color, false));
+            }
+            list.addView(item);
+            shown++;
+        }
+        if (shown == 0) list.addView(label("В этом месяце нет начислений зарплаты.", 15, muted, false));
+        return list;
     }
 
     private void addStatus(LinearLayout parent, String title, int color) {
