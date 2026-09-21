@@ -79,6 +79,30 @@ class ArchiveAndDialogTests(DatabaseTestCase):
                 send.assert_not_called()
             self.assertFalse(main.reminder_meta(session, old, date.today())["eligible_auto"])
 
+    def test_archived_current_month_expected_charge_is_hidden_from_month_summary(self):
+        with self.Session() as session:
+            old, current, _, _ = self.fixture(session, moved=True)
+            archived = RentCharge(
+                lease=old, period_start=date(2026, 9, 1), period_end=date(2026, 9, 30),
+                due_date=date(2026, 9, 21), ip_due=1000, personal_due=21000,
+            )
+            current_charge = RentCharge(
+                lease=current, period_start=date(2026, 9, 1), period_end=date(2026, 9, 30),
+                due_date=date(2026, 9, 12), ip_due=1000, personal_due=12000,
+            )
+            session.add_all([archived, current_charge])
+            session.flush()
+            summary = main.month_dashboard_summary(session, 2026, 9, today=date(2026, 9, 21))
+            self.assertEqual(summary["salary_due"], 12000)
+            archived.due_date = date(2026, 9, 20)
+            archived.personal_paid = 5000
+            self.assertTrue(main.month_charge_visible(session, archived, date(2026, 9, 21)))
+            archived.personal_paid = 21000
+            archived.ip_paid = 1000
+            self.assertFalse(main.month_charge_visible(session, archived, date(2026, 9, 21)))
+            self.assertTrue(main.month_charge_visible(session, archived, date(2026, 10, 1)))
+            self.assertEqual(session.get(RentCharge, archived.id).personal_paid, 21000)
+
     def test_archived_chat_blocks_outgoing_but_current_contract_can_receive(self):
         with self.Session() as session:
             old, _, _, _ = self.fixture(session)

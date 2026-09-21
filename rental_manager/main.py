@@ -2436,6 +2436,8 @@ def serialize_rent_charge(
         "lease_id": charge.lease_id,
         "tenant_id": charge.lease.tenant_id,
         "lease_active": bool(charge.lease.active),
+        "lease_ignored": lease_ignored(session, charge.lease_id),
+        "current_payment": month_charge_visible(session, charge, date.today()) if session else bool(charge.lease.active),
         "object": charge.lease.apartment.object.name,
         "apartment": charge.lease.apartment.name,
         "tenant": charge.lease.tenant.full_name,
@@ -4058,6 +4060,7 @@ def api_month_progress(year: int, month: int, session: Session = Depends(get_ses
         )
         .order_by(RentCharge.due_date, RentCharge.id)
     ).all()
+    rent_charges = [charge for charge in rent_charges if month_charge_visible(session, charge, today)]
     for charge in rent_charges:
         update_rent_charge_status(charge, today)
 
@@ -4627,6 +4630,18 @@ def estimated_utility_advance_due(
     return money(total)
 
 
+def month_charge_visible(session: Session, charge: RentCharge, today: date) -> bool:
+    # Archive changes the operational view, never the stored history or debt.
+    if charge.lease.active and not lease_ignored(session, charge.lease_id):
+        return True
+    if charge.due_date < today.replace(day=1):
+        return True
+    return charge.due_date < today and (
+        float(charge.personal_due or 0) - float(charge.personal_paid or 0) > EPS
+        or float(charge.ip_due or 0) - float(charge.ip_paid or 0) > EPS
+    )
+
+
 def month_dashboard_summary(
     session: Session,
     year: int,
@@ -4651,6 +4666,10 @@ def month_dashboard_summary(
         )
         .order_by(RentCharge.due_date, RentCharge.id)
     ).all()
+    rent_charges = [
+        charge for charge in rent_charges
+        if month_charge_visible(session, charge, today)
+    ]
     salary_due = 0.0
     salary_paid = 0.0
     paid_count = 0

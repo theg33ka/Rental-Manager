@@ -89,6 +89,8 @@ Android aliases return the same representation and permissions as corresponding 
 | `PATCH /api/leases/{id}/automation` | Owner | Set lease automation controls | flags/cadence payload → lease automation view | 404/allowed values |
 | `PATCH /api/leases/{id}/ignore` | Owner | Archive/unarchive a lease | ignored boolean → lease | Archive stops messages and new automatic charges; existing debt, payments, calendar and reports remain visible |
 
+Monthly rent progress and salary totals exclude closed/ignored leases in the current and future months unless the charge is overdue with an outstanding balance. Earlier months retain their charge history. Rent charge payloads expose `lease_ignored` and `current_payment` for the operational Android payment list; full payment history is not deleted or filtered by this flag. Salary remains an obligation-month total, not cash received by receipt date.
+
 ## 4. Telegram, messages and reminders
 
 | Method / path | Auth | Purpose | Request → response | Validation / entities / capability |

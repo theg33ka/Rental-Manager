@@ -802,17 +802,21 @@ public class MainActivity extends Activity {
         Button close = MobileUi.iconButton(this, "back", "Назад");
         close.setOnClickListener(v -> dialog.dismiss());
         header.addView(close);
-        header.addView(label("Зарплата", 23, text, true));
+        TextView heading = label("Зарплата", 23, text, true);
+        heading.setPadding(dp(12), 0, 0, 0);
+        header.addView(heading);
+        header.setPadding(dp(16), dp(8), dp(16), dp(8));
         page.addView(header);
         LinearLayout selector = row();
+        selector.setPadding(dp(16), dp(4), dp(16), dp(12));
         Button previous = MobileUi.iconButton(this, "back", "Предыдущий месяц");
         previous.setOnClickListener(v -> { month.add(Calendar.MONTH, -1); reload[0].run(); });
         selector.addView(previous);
         TextView title = label("", 18, text, true);
         title.setGravity(Gravity.CENTER);
         selector.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
-        Button next = secondaryButton("›", v -> { month.add(Calendar.MONTH, 1); reload[0].run(); });
-        next.setContentDescription("Следующий месяц");
+        Button next = MobileUi.iconButton(this, "chevron", "Следующий месяц");
+        next.setOnClickListener(v -> { month.add(Calendar.MONTH, 1); reload[0].run(); });
         selector.addView(next);
         page.addView(selector);
         LinearLayout body = dialogForm();
@@ -875,16 +879,21 @@ public class MainActivity extends Activity {
             String status = charge.optString("personal_status", "pending");
             boolean received = isDoneStatus(status);
             boolean debt = !received && !dueDate.isEmpty() && dueDate.compareTo(bootstrap.optString("today", today())) < 0;
-            int color = received ? green : debt ? orange : gray;
-            item.setBackground(MobileUi.shape(this, Color.argb(24, Color.red(color), Color.green(color), Color.blue(color)), 16, color));
-            String date = compactDate(dueDate);
-            if (!paidDate.isEmpty() && !paidDate.equals(dueDate)) date += " (" + compactDate(paidDate) + ")";
-            String amount = money(received ? charge.optDouble("personal_paid") : charge.optDouble("personal_due"));
-            item.addView(label(compactApartment(charge) + "  " + date + "  " + amount + "  "
-                + (received ? "Получено" : debt ? "Долг" : "Ожидается"), 16, color, true));
+            boolean archived = !charge.optBoolean("lease_active", true) || charge.optBoolean("lease_ignored");
+            String currentMonth = bootstrap.optString("today", today()).substring(0, 7);
+            if (archived && dueDate.length() >= 7 && dueDate.substring(0, 7).compareTo(currentMonth) >= 0 && !debt) continue;
+            int color = received ? green : debt ? MobileUi.WARNING : MobileUi.MUTED;
+            item.setPadding(dp(16), dp(12), dp(16), dp(12));
+            String tenant = charge.optString("tenant", "").trim();
+            item.addView(label(compactApartment(charge) + (tenant.isEmpty() ? "" : " - " + tenant), 16, text, true));
+            item.addView(label("Срок: " + compactDate(dueDate), 13, muted, false));
+            item.addView(label("Факт: " + (paidDate.isEmpty() ? "нет оплаты" : compactDate(paidDate)), 13, muted, false));
+            double remaining = Math.max(0, charge.optDouble("personal_due") - charge.optDouble("personal_paid"));
+            String amount = money(received ? charge.optDouble("personal_paid") : remaining);
+            item.addView(label((received ? "Получено" : debt ? "Долг" : "Ожидается") + "  " + amount, 18, color, true));
             if (!received && charge.optDouble("personal_paid") > 0) {
-                item.addView(label("Получено " + money(charge.optDouble("personal_paid")) + " · осталось "
-                    + money(Math.max(0, charge.optDouble("personal_due") - charge.optDouble("personal_paid"))), 13, color, false));
+                item.addView(label("Получено " + money(charge.optDouble("personal_paid")) + " из "
+                    + money(charge.optDouble("personal_due")), 13, green, false));
             }
             list.addView(item);
             shown++;
@@ -989,7 +998,7 @@ public class MainActivity extends Activity {
         int added = 0;
         for (int i = 0; i < rentCharges.length() && added < limit; i++) {
             JSONObject charge = rentCharges.optJSONObject(i);
-            if (charge == null || isDoneStatus(charge.optString("status")) || !isFutureDate(charge.optString("due_date"))) continue;
+            if (charge == null || !charge.optBoolean("current_payment", true) || isDoneStatus(charge.optString("status")) || !isFutureDate(charge.optString("due_date"))) continue;
             LinearLayout card = premiumCard();
             card.addView(label(joinNonEmpty(charge.optString("object"), charge.optString("apartment")), 17, text, true));
             card.addView(label(charge.optString("tenant"), 13, muted, false));
@@ -1130,6 +1139,7 @@ public class MainActivity extends Activity {
     private void fillPayments(LinearLayout list) {
         list.removeAllViews();
         forEach(rentCharges, charge -> {
+            if ("open".equals(premiumPaymentFilter) && !charge.optBoolean("current_payment", true)) return;
             if (!premiumPaymentMatches(charge.optString("status"), charge.optString("due_date")) || !matchesSearch(charge.optString("tenant"), charge.optString("object"), charge.optString("apartment"), "Аренда")) return;
             LinearLayout card = paymentCard("Аренда", charge, charge.optDouble("total_due"));
             card.addView(secondaryButton("Оплата и отсрочка", v -> showRentActions(charge)));
@@ -1203,7 +1213,7 @@ public class MainActivity extends Activity {
         collectPremiumTasks(tasks, dashboard, "provider_reading_due", "Передать показания", "Срок поставщику близко", orange);
         forEach(arr(dashboard, "monthly_reports"), report -> tasks.add(new MonthTask(1, "Проверить месячный отчёт", report.optString("title"), orange, () -> navigate("reports"))));
         forEach(rentCharges, charge -> {
-            if (isDoneStatus(charge.optString("status")) || !isFutureDate(charge.optString("due_date"))) return;
+            if (!charge.optBoolean("current_payment", true) || isDoneStatus(charge.optString("status")) || !isFutureDate(charge.optString("due_date"))) return;
             int group = daysFromToday(charge.optString("due_date")) <= 7 ? 1 : 2;
             tasks.add(new MonthTask(group, "Будущая аренда: " + compactApartment(charge), charge.optString("tenant") + " · " + compactDate(charge.optString("due_date")), gray, () -> showRentActions(charge)));
         });

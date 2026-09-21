@@ -81,10 +81,18 @@ public final class UiSmokeInstrumentation extends Instrumentation {
                 View details = (View) host.invoke("salaryDetails", new Class<?>[]{JSONArray.class}, charges);
                 StringBuilder text = new StringBuilder();
                 inspect(details, text, new JSONArray());
-                if (text.toString().contains("Анна") || text.toString().contains("Иван")) throw new AssertionError("Salary detail exposes tenant names");
+                if (!text.toString().contains("Анна") || !text.toString().contains("Иван")) throw new AssertionError("Salary detail tenant names are incorrect");
                 if (!text.toString().contains("БД4") || !text.toString().contains("Получено") || !text.toString().contains("Ожидается")) throw new AssertionError("Salary detail missing apartment or personal status");
                 ViewGroup content = (ViewGroup) host.get("content");
                 content.removeAllViews(); content.addView(details);
+                charges.getJSONObject(0).put("personal_status", "partial").put("personal_paid", 5000)
+                    .put("payments", new JSONArray("[{\"channel\":\"personal\",\"status\":\"accepted\",\"paid_at\":\"2026-09-11T12:00:00\"}]"));
+                View partial = (View) host.invoke("salaryDetails", new Class<?>[]{JSONArray.class}, charges);
+                StringBuilder partialText = new StringBuilder();
+                inspect(partial, partialText, new JSONArray());
+                String remaining = (String) host.invoke("money", new Class<?>[]{double.class}, 7000d);
+                if (!partialText.toString().contains("Долг  " + remaining)
+                    || !partialText.toString().contains("Факт: 11.09")) throw new AssertionError("Partial salary amount or payment date is incorrect");
             });
             capture("salary-by-apartment", "dashboard");
             writeReport();
