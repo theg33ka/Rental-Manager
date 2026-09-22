@@ -879,9 +879,13 @@ public class MainActivity extends Activity {
             String status = charge.optString("personal_status", "pending");
             boolean received = isDoneStatus(status);
             boolean debt = !received && !dueDate.isEmpty() && dueDate.compareTo(bootstrap.optString("today", today())) < 0;
-            boolean archived = !charge.optBoolean("lease_active", true) || charge.optBoolean("lease_ignored");
-            String currentMonth = bootstrap.optString("today", today()).substring(0, 7);
-            if (archived && dueDate.length() >= 7 && dueDate.substring(0, 7).compareTo(currentMonth) >= 0 && !debt) continue;
+            if (charge.has("current_payment") && !charge.optBoolean("current_payment")) continue;
+            // Older servers do not expose current_payment; retain their archive flags until deployment catches up.
+            if (!charge.has("current_payment")) {
+                boolean archived = !charge.optBoolean("lease_active", true) || charge.optBoolean("lease_ignored");
+                String currentMonth = bootstrap.optString("today", today()).substring(0, 7);
+                if (archived && dueDate.length() >= 7 && dueDate.substring(0, 7).compareTo(currentMonth) >= 0 && !debt) continue;
+            }
             int color = received ? green : debt ? MobileUi.WARNING : MobileUi.MUTED;
             item.setPadding(dp(16), dp(12), dp(16), dp(12));
             String tenant = charge.optString("tenant", "").trim();
