@@ -79,14 +79,18 @@ final class NotificationHelper {
         updateStickyDebt(context, digest);
         boolean healthy = digest.networkOk && digest.authorized;
         int decision = NotificationPolicy.decision(NotificationPrefs.notificationsEnabled(context),
-            canPostNotifications(context), manual, isQuietNow(context), healthy, digest.hasAlerts(),
+            canPostNotifications(context), manual, isQuietNow(context) && !digest.critical, healthy, digest.hasAlerts(),
             digest.fingerprint(), NotificationPrefs.lastDigest(context));
         if (decision == NotificationPolicy.CANCEL) {
             cancel(context, NOTIFICATION_DIGEST);
             if (healthy && !digest.hasAlerts()) NotificationPrefs.rememberDigest(context, "");
             return;
         }
-        if (decision == NotificationPolicy.SKIP) return;
+        if (decision == NotificationPolicy.SKIP) {
+            if (healthy && digest.fingerprint().equals(NotificationPrefs.lastDigest(context)))
+                NotificationRepository.acknowledgeShown(context, digest);
+            return;
+        }
         NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
         if (manager == null) return;
         boolean silent = decision == NotificationPolicy.POST_SILENT;
@@ -110,6 +114,7 @@ final class NotificationHelper {
         else applyMode(context, builder);
         manager.notify(NOTIFICATION_DIGEST, builder.build());
         if (healthy) NotificationPrefs.rememberDigest(context, digest.fingerprint());
+        if (healthy) NotificationRepository.acknowledgeShown(context, digest);
     }
 
     static boolean updateStickyDebt(Context context, DashboardDigest digest) {

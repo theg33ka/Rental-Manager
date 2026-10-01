@@ -114,7 +114,7 @@ def case_details(session: Session, case_id: int) -> dict[str, Any] | None:
         select(DomainEvent)
         .where(
             (DomainEvent.contract_id == item.contract_id if item.contract_id else DomainEvent.id == -1)
-            | (DomainEvent.entity_id == str(item.id)),
+            | ((DomainEvent.entity_type == "OperationalCase") & (DomainEvent.entity_id == str(item.id))),
         )
         .order_by(DomainEvent.occurred_at.desc(), DomainEvent.id.desc())
         .limit(20)

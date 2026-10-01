@@ -19,13 +19,14 @@ class CashMigrationTests(unittest.TestCase):
             clean = Path(root) / "clean.db"
             self.migrate(clean, "head")
             with closing(sqlite3.connect(clean)) as db:
-                self.assertEqual(db.execute("SELECT version_num FROM alembic_version").fetchone()[0], "20261001_01")
+                self.assertEqual(db.execute("SELECT version_num FROM alembic_version").fetchone()[0], "20261002_01")
                 self.assertIsNotNone(db.execute("SELECT name FROM sqlite_master WHERE name='cash_payment_requests'").fetchone())
             existing = Path(root) / "existing.db"
             self.migrate(existing, "20260828_01")
             # Начальная ревизия использует текущую metadata; возвращаем только новые поля к старой схеме на тестовой БД.
             with closing(sqlite3.connect(existing)) as db:
                 db.execute("DROP TABLE cash_payment_requests")
+                db.execute("DROP TABLE agent_notifications")
                 db.execute("ALTER TABLE payment_profiles DROP COLUMN ip_payment_method")
                 db.execute("ALTER TABLE payment_profiles DROP COLUMN personal_payment_method")
                 columns = db.execute("PRAGMA table_info(payment_profiles)").fetchall()
@@ -40,3 +41,4 @@ class CashMigrationTests(unittest.TestCase):
                 row = db.execute("SELECT ip_recipient_account, ip_payment_method, personal_payment_method FROM payment_profiles WHERE name='Existing profile'").fetchone()
                 self.assertEqual(row, ('KEEP', 'transfer', 'transfer'))
                 self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
+                self.assertIsNotNone(db.execute("SELECT name FROM sqlite_master WHERE name='agent_notifications'").fetchone())

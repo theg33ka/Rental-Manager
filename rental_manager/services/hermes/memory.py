@@ -4,6 +4,7 @@ from datetime import date, datetime, time, timedelta
 import json
 import re
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
@@ -209,6 +210,7 @@ COMMITMENT_PATTERNS = (
     r"\bнапомни (?:мне )?через\b",
     r"\bэтим занимается мастер\b",
     r"\bпока не трогай\b",
+    r"\bне трога(?:й|ть)\b",
     r"\bя уже написал(?:а)? жильцу\b",
 )
 
@@ -227,8 +229,11 @@ def create_owner_commitment(
     now: datetime | None = None,
     briefing_time: str = "10:00",
 ) -> OwnerCommitment:
-    now = now or datetime.now()
+    local_input = now is None
+    now = now or datetime.now(ZoneInfo("Asia/Novosibirsk")).replace(tzinfo=None)
     due_at = parse_relative_due(text, now=now) or next_briefing_at(now=now, briefing_time=briefing_time)
+    if local_input:
+        due_at = due_at.replace(tzinfo=ZoneInfo("Asia/Novosibirsk")).astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
     existing = session.scalar(
         select(OwnerCommitment)
         .where(
@@ -261,8 +266,9 @@ def create_owner_commitment(
         case.waiting_for = "owner"
         case.assigned_actor = "owner"
         case.next_review_at = due_at
+        case.suppression_until = due_at
         case.updated_at = utc_now()
-        sync_case_memory(session, case)
+        sync_case_memory(session, case, important_message=text)
     emit_domain_event(
         session,
         "owner_commitment_created",

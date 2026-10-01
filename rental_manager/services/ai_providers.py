@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 import os
-from typing import Protocol
+from typing import Any, Protocol
 
 from rental_manager.services.deepseek_client import DeepSeekClient, DeepSeekResult
 
@@ -15,6 +15,7 @@ DEEPSEEK_MODELS = ("deepseek-v4-flash", "deepseek-v4-pro")
 
 class AiProvider(StrEnum):
     DEEPSEEK = "deepseek"
+    COMPATIBLE = "compatible"
 
 
 class AiProviderConfigError(ValueError):
@@ -26,10 +27,12 @@ class ChatCompletionClient(Protocol):
         self,
         *,
         model: str,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         temperature: float = 0.2,
         max_tokens: int = 1200,
         session_id: str = "",
+        tools: list[dict[str, Any]] | None = None,
+        timeout_seconds: float | None = None,
     ) -> DeepSeekResult: ...
 
 
@@ -81,11 +84,28 @@ def normalize_deepseek_model(value: str) -> str:
 
 
 def primary_provider(environ: Mapping[str, str] | None = None) -> AiProvider:
-    return AiProvider.DEEPSEEK
+    source = environ if environ is not None else os.environ
+    value = _env(source, "RENTAL_AI_PROVIDER", "deepseek")
+    try:
+        return AiProvider(value)
+    except ValueError as exc:
+        raise AiProviderConfigError("RENTAL_AI_PROVIDER: deepseek или compatible") from exc
 
 
 def provider_chain(environ: Mapping[str, str] | None = None) -> list[AiProvider]:
-    return [AiProvider.DEEPSEEK]
+    return [primary_provider(environ)]
+
+
+class CompatibleProviderAdapter:
+    def build(self, *, requested_model: str, deepseek_api_key: str,
+              environ: Mapping[str, str]) -> AiProviderRuntime:
+        base = _env(environ, "RENTAL_AI_BASE_URL")
+        key = _env(environ, "RENTAL_AI_API_KEY")
+        model = _env(environ, "RENTAL_AI_MODEL")
+        if not base.startswith("https://") or not key or not model:
+            raise AiProviderConfigError("Задайте RENTAL_AI_BASE_URL (https), RENTAL_AI_API_KEY и RENTAL_AI_MODEL")
+        return AiProviderRuntime(AiProvider.COMPATIBLE, model,
+            DeepSeekClient(base, key, timeout_seconds=60, provider_name="compatible"))
 
 
 class DeepSeekProviderAdapter:
@@ -117,6 +137,7 @@ class DeepSeekProviderAdapter:
 
 PROVIDER_ADAPTERS: dict[AiProvider, AiProviderAdapter] = {
     AiProvider.DEEPSEEK: DeepSeekProviderAdapter(),
+    AiProvider.COMPATIBLE: CompatibleProviderAdapter(),
 }
 
 
@@ -149,7 +170,7 @@ def build_provider_chain(
 ) -> list[AiProviderRuntime]:
     return [
         build_provider_runtime(
-            AiProvider.DEEPSEEK,
+            primary_provider(environ),
             requested_model=requested_model,
             deepseek_api_key=deepseek_api_key,
             environ=environ,

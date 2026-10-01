@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 import json
 import re
 from typing import Any
@@ -291,6 +291,13 @@ def reminder_allowed(
     quiet_start: time = time(hour=20),
     quiet_end: time = time(hour=10),
 ) -> tuple[bool, str]:
+    suppressed = session.scalar(select(OperationalCase.id).where(
+        OperationalCase.contract_id == situation.lease_id,
+        OperationalCase.status.in_({"new", "active", "waiting_owner", "waiting_tenant", "auto_monitoring", "snoozed"}),
+        OperationalCase.suppression_until > (now.astimezone(timezone.utc).replace(tzinfo=None) if now.tzinfo else now),
+    ).limit(1))
+    if suppressed:
+        return False, "owner_requested_pause"
     current_time = now.time()
     in_quiet_hours = current_time >= quiet_start or current_time < quiet_end
     if in_quiet_hours:

@@ -19,6 +19,7 @@ class DeepSeekResult:
     completion_tokens: int = 0
     raw: dict[str, Any] | None = None
     provider: str = "deepseek"
+    tool_calls: list[dict[str, Any]] | None = None
 
 
 class DeepSeekClient:
@@ -38,10 +39,12 @@ class DeepSeekClient:
         self,
         *,
         model: str,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         temperature: float = 0.2,
         max_tokens: int = 700,
         session_id: str = "",
+        tools: list[dict[str, Any]] | None = None,
+        timeout_seconds: float | None = None,
     ) -> DeepSeekResult:
         if not self.base_url:
             raise DeepSeekClientError("DeepSeek API URL is empty")
@@ -53,7 +56,12 @@ class DeepSeekClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
-        response = self._post_json("/chat/completions", payload)
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+            if self.provider_name == "deepseek":
+                payload["thinking"] = {"type": "disabled"}
+        response = self._post_json("/chat/completions", payload, timeout_seconds=timeout_seconds)
         choices = response.get("choices") or []
         if not choices:
             raise DeepSeekClientError("DeepSeek API returned no choices")
@@ -67,6 +75,7 @@ class DeepSeekClient:
             completion_tokens=int(usage.get("completion_tokens") or 0),
             raw=response,
             provider=self.provider_name,
+            tool_calls=message.get("tool_calls") or [],
         )
 
     def _post_json(
@@ -75,6 +84,7 @@ class DeepSeekClient:
         payload: dict[str, Any],
         *,
         extra_headers: dict[str, str] | None = None,
+        timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         normalized_path = path
         if self.base_url.endswith("/v1") and normalized_path.startswith("/v1/"):
@@ -92,12 +102,11 @@ class DeepSeekClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+            with urllib.request.urlopen(request, timeout=timeout_seconds or self.timeout_seconds) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise DeepSeekClientError(f"DeepSeek API failed: HTTP {exc.code}: {body[:500]}") from exc
+            raise DeepSeekClientError(f"LLM API failed: HTTP {exc.code}") from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            raise DeepSeekClientError(f"DeepSeek API request failed: {exc}") from exc
+            raise DeepSeekClientError(f"LLM API request failed: {type(exc).__name__}") from exc
         except json.JSONDecodeError as exc:
             raise DeepSeekClientError("DeepSeek API returned invalid JSON") from exc

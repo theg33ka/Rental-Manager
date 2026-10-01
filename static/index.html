@@ -807,6 +807,27 @@
           </div>
         </div>
         <div class="summary-grid" id="hermesOverview"></div>
+        <article class="card manager-panel">
+          <h3>Виртуальный управляющий</h3>
+          <div id="managerHealth" role="status"></div>
+          <form onsubmit="askManager(event)">
+            <label>Вопрос или решение по кейсу<textarea id="managerQuestion" maxlength="6000" required placeholder="Покажи долги по квартире 7 за весь период проживания Иванова"></textarea></label>
+            <button id="managerAskButton" type="submit">Спросить</button>
+          </form>
+          <div id="managerAnswer" class="message-preview" aria-live="polite" style="white-space:pre-wrap"></div>
+          <details><summary>Каналы и время уведомлений</summary>
+            <form onsubmit="saveManagerNotifications(event)">
+              <label><input id="managerNotifyEnabled" type="checkbox"> Проактивные сообщения</label>
+              <label>Канал<select id="managerNotifyMode"><option value="telegram">Telegram</option><option value="push">Телефон</option><option value="both">Оба канала</option><option value="critical_push">Критичные на телефон, остальные в Telegram</option></select></label>
+              <label>Тихие часы с <input id="managerQuietStart" type="number" min="0" max="23"></label>
+              <label>До <input id="managerQuietEnd" type="number" min="0" max="23"></label>
+              <label>Час сводки <input id="managerDailyHour" type="number" min="0" max="23"></label>
+              <label>Тон<select id="managerTone"><option value="calm">Спокойный</option><option value="conversational">Разговорный</option></select></label>
+              <button type="submit">Сохранить</button>
+            </form>
+          </details>
+          <h3>Сводка и история уведомлений</h3><div id="managerNotifications"></div>
+        </article>
         <div class="settings-nav hermes-nav" role="tablist" aria-label="Разделы Hermes">
           <button type="button" class="hermes-nav-btn active" data-hermes-target="cases">Кейсы</button>
           <button type="button" class="hermes-nav-btn" data-hermes-target="commitments">Обязательства</button>

@@ -602,6 +602,25 @@ class HermesAgentRun(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
+class AgentNotification(Base):
+    __tablename__ = "agent_notifications"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    dedupe_key: Mapped[str] = mapped_column(String(200), unique=True)
+    case_id: Mapped[int | None] = mapped_column(ForeignKey("operational_cases.id"), nullable=True, index=True)
+    channel: Mapped[str] = mapped_column(String(30))
+    importance: Mapped[str] = mapped_column(String(30))
+    text: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    remote_message_id: Mapped[str] = mapped_column(String(80), default="")
+    error: Mapped[str] = mapped_column(String(200), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class ConversationSummary(Base):
     __tablename__ = "conversation_summaries"
     __table_args__ = (UniqueConstraint("conversation_id", name="uq_conversation_summary"),)

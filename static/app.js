@@ -1347,10 +1347,20 @@ function renderHermes() {
   const data = state.hermes;
   if (!data) return;
   const overview = data.overview || {};
+  const health = data.manager || {};
+  const healthRoot = qs("#managerHealth");
+  if (healthRoot) healthRoot.textContent = `AI: ${{ working: "работает", error: "ошибка", disabled: "отключён", untested: "ещё не проверен" }[health.status] || "нет данных"} · ${health.provider || ""} / ${health.model || ""} · ошибок за сутки: ${health.errors_24h || 0} · последний успех: ${health.last_success ? formatDateTime(health.last_success) : "нет"} · Telegram: ${health.telegram === "configured" ? "настроен" : "не настроен"} · телефон: фоновый опрос · обработчик: ${health.worker_started ? "запущен" : "не запущен"}`;
+  const config = data.notification_config || {};
+  const settingFields = { managerNotifyMode: "mode", managerQuietStart: "quiet_start", managerQuietEnd: "quiet_end", managerDailyHour: "daily_hour", managerTone: "tone" };
+  Object.entries(settingFields).forEach(([id, key]) => { const input = qs(`#${id}`); if (input) input.value = config[key] ?? ""; });
+  if (qs("#managerNotifyEnabled")) qs("#managerNotifyEnabled").checked = Boolean(config.enabled);
+  const notificationRoot = qs("#managerNotifications");
+  const deliveryLabels = { pending: "ожидает отправки", sending: "отправляется", sent: "отправлено", delivered: "показано на телефоне", read: "прочитано", uncertain: "отправка не подтверждена", cancelled: "отменено", failed: "ошибка" };
+  if (notificationRoot) notificationRoot.innerHTML = (data.notifications || []).slice(0, 15).map((item) => `<p>${escapeHtml(item.text)}<br><small>${formatDateTime(item.created_at)} · ${escapeHtml(item.channel)} · ${escapeHtml(deliveryLabels[item.status] || item.status)}${item.case_id ? ` · <button class="link-button" onclick="showHermesCase(${Number(item.case_id)})">История ситуации</button>` : ""}</small></p>`).join("") || "Уведомлений пока нет.";
   const overviewRoot = qs("#hermesOverview");
   if (overviewRoot) {
     overviewRoot.innerHTML = [
-      ["Активные кейсы", overview.active_cases || 0, `${overview.waiting_owner || 0} ждут владельца`],
+      ["Требуют решения", overview.waiting_owner || 0, `${overview.auto_monitoring || 0} обрабатывает автоматика`],
       ["Подтверждения", overview.pending_proposals || 0, "изменения данных"],
       ["Запланировано", overview.scheduled_actions || 0, "обязательства"],
       ["Стоимость за месяц", money(overview.cost_month_rub || 0), `прогноз ${money(overview.monthly_forecast_rub || 0)}`],
@@ -1440,8 +1450,35 @@ async function showHermesCase(caseId) {
   const root = qs("#hermesCaseDetails");
   if (!root) return;
   root.hidden = false;
-  root.innerHTML = `<div class="section-title"><div><h3>${escapeHtml(item.label)} · ${escapeHtml(item.title)}</h3><span>${escapeHtml(hermesStatus(item.status))}</span></div><button class="mini" onclick="this.closest('#hermesCaseDetails').hidden=true">Закрыть</button></div><p>${escapeHtml(item.rolling_summary)}</p><pre class="message-preview">${escapeHtml(JSON.stringify({ metadata: item.metadata, commitments: item.commitments, proposals: item.proposals, history: item.history }, null, 2))}</pre>`;
+  state.managerCaseId = caseId;
+  root.innerHTML = `<div class="section-title"><div><h3>${escapeHtml(item.label)} · ${escapeHtml(item.title)}</h3><span>${escapeHtml(hermesStatus(item.status))}</span></div><button class="mini" onclick="state.managerCaseId=null; this.closest('#hermesCaseDetails').hidden=true">Закрыть</button></div><p>${escapeHtml(item.rolling_summary)}</p><p>Решение можно написать управляющему выше: оно будет связано с этим кейсом.</p>${(item.commitments || []).map((c) => `<p>${escapeHtml(c.description)} · контроль ${formatDateTime(c.due_at)}</p>`).join("")}${(item.history || []).map((e) => `<p>${formatDateTime(e.occurred_at)} — ${escapeHtml(hermesTechnicalLabel(e.event_type))} ${escapeHtml(e.payload?.description || e.payload?.reason || "")}</p>`).join("")}`;
   root.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+async function askManager(event) {
+  event.preventDefault();
+  const button = qs("#managerAskButton");
+  const output = qs("#managerAnswer");
+  button.disabled = true;
+  output.textContent = "Проверяю данные…";
+  try {
+    const result = await api("/api/hermes/chat", { method: "POST", body: JSON.stringify({ text: qs("#managerQuestion").value, case_id: state.managerCaseId || null }) });
+    output.textContent = result.reply;
+    await loadHermesControlCenter();
+  } catch (error) { output.textContent = `Не удалось получить ответ: ${error.message}`; }
+  finally { button.disabled = false; }
+}
+
+async function saveManagerNotifications(event) {
+  event.preventDefault();
+  try {
+    const config = { ...(state.hermes?.notification_config || {}), enabled: qs("#managerNotifyEnabled").checked,
+      mode: qs("#managerNotifyMode").value, quiet_start: Number(qs("#managerQuietStart").value),
+      quiet_end: Number(qs("#managerQuietEnd").value), daily_hour: Number(qs("#managerDailyHour").value), tone: qs("#managerTone").value };
+    await api("/api/hermes/notification-settings", { method: "PUT", body: JSON.stringify(config) });
+    toast("Настройки уведомлений сохранены");
+    await loadHermesControlCenter();
+  } catch (error) { toast(error.message); }
 }
 
 async function hermesCaseAction(caseId, action) {

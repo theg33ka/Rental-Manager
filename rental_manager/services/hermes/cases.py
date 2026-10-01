@@ -611,15 +611,17 @@ def upsert_operational_case(session: Session, candidate: CaseCandidate) -> Opera
     item.compact_summary = candidate.compact_summary[:1200]
     item.amount_total = round(candidate.amount_total, 2)
     item.currency = "RUB"
-    item.next_review_at = candidate.next_review_at
-    item.assigned_actor = candidate.assigned_actor
-    item.waiting_for = candidate.waiting_for
+    suppressed = bool(item.suppression_until and item.suppression_until > now)
+    if not suppressed:
+        item.next_review_at = candidate.next_review_at
+        item.assigned_actor = candidate.assigned_actor
+        item.waiting_for = candidate.waiting_for
     item.metadata_json = json.dumps(candidate.metadata, ensure_ascii=False, sort_keys=True)
     item.priority_score = _priority(candidate, item.first_seen_at)
     if changed:
         item.last_changed_at = now
         item.state_hash = state_hash
-        if item.status != "snoozed":
+        if item.status != "snoozed" and not suppressed:
             item.status = (
                 "waiting_owner"
                 if candidate.waiting_for == "owner"

@@ -9,6 +9,9 @@ final class DashboardDigest {
     String error = "";
     int alertCount = 0;
     int debtorApartmentCount = 0;
+    boolean managerNotifications = false;
+    boolean critical = false;
+    final List<Integer> managerNotificationIds = new ArrayList<>();
     final List<String> lines = new ArrayList<>();
     final List<String> eventTokens = new ArrayList<>();
     final List<Target> targets = new ArrayList<>();
@@ -61,6 +64,7 @@ final class DashboardDigest {
     }
 
     String title() {
+        if (managerNotifications) return "Управляющий Rental Manager";
         if (!networkOk) return "Rental Manager: связи нет";
         if (!authorized) return "Rental Manager: нужен PIN";
         if (alertCount > 0) return "Требуют внимания: " + alertCount;

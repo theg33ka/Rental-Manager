@@ -50,6 +50,22 @@ final class NotificationRepository {
 
     private static DashboardDigest parseDigest(Context context, JSONObject payload) {
         DashboardDigest digest = new DashboardDigest();
+        if (payload.optBoolean("manager_notifications_enabled", false)) {
+            digest.managerNotifications = true;
+            JSONArray notifications = payload.optJSONArray("agent_notifications");
+            if (notifications != null) for (int i = 0; i < notifications.length(); i++) {
+                JSONObject item = notifications.optJSONObject(i);
+                if (item == null) continue;
+                int id = item.optInt("id");
+                digest.managerNotificationIds.add(id);
+                digest.lines.add(item.optString("text"));
+                digest.eventTokens.add("manager:" + id);
+                digest.critical |= "critical".equals(item.optString("importance"));
+                digest.alertCount++;
+            }
+            digest.addTarget("hermes", "", "Управляющий");
+            return digest;
+        }
         JSONObject dashboard = payload.optJSONObject("dashboard");
         if (dashboard == null) return DashboardDigest.error("missing_dashboard");
         Set<String> enabled = new HashSet<>();
@@ -79,6 +95,19 @@ final class NotificationRepository {
         "rent_overdue", "rent_partial", "rent_today", "utility_overdue", "utility_partial", "utility_issued",
         "manual_debts", "provider_debts", "provider_reading_due", "stale_readings", "suspicious_receipts", "monthly_reports"
     };
+
+    static void acknowledgeShown(Context context, DashboardDigest digest) {
+        if (digest.managerNotificationIds.isEmpty()) return;
+        final Context app = context.getApplicationContext();
+        final java.util.List<Integer> ids = new java.util.ArrayList<>(digest.managerNotificationIds);
+        new Thread(() -> {
+            ApiClient api = new ApiClient(app);
+            for (int id : ids) {
+                try { api.postJson("/api/hermes/notifications/" + id + "/delivered", new JSONObject()); }
+                catch (Exception ignored) { /* Повторяем подтверждение при следующем опросе. */ }
+            }
+        }, "manager-delivery-ack").start();
+    }
 
     private static void addCategory(DashboardDigest digest, JSONObject dashboard, Set<String> enabled,
                                     Set<String> seen, Set<String> debtors, String category, String label,
