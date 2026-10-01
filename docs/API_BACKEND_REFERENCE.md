@@ -127,6 +127,10 @@ Monthly rent progress and salary totals exclude closed/ignored leases in the cur
 
 Effective resolution is not a public endpoint: shared backend logic resolves apartment override → object default → global settings and feeds message context, tenant requisites/AI and receipt validation.
 
+Payment profiles accept `payment_method: transfer|cash|mixed`. `cash` and `transfer` set both rent parts together; `mixed` uses `ip_payment_method` and `personal_payment_method` (`transfer|cash`). Existing profiles default to transfer. Responses expose all three fields. Utility payments remain transfers.
+
+Telegram `cashpay:<opaque token>` accepts a handover claim only from the bound tenant in the private chat. It creates a level-2 `confirm_cash_payment` proposal in the configured owner chat; it does not create a receipt. Existing owner proposal confirm/reject endpoints and callbacks preserve authorization, TTL and audit. Confirmation validates the current rent snapshot, atomically claims the request and creates targeted `PaymentReceipt` rows with source `cash_confirmed`. Duplicate or stale confirmations cannot credit again.
+
 ## 6. Tenants and leases
 
 | Method / path | Auth | Purpose | Request → response | Validation / entities / capability |

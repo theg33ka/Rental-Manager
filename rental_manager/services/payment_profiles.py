@@ -30,6 +30,13 @@ def payment_profile_values(profile: PaymentProfile) -> dict[str, str]:
 
 
 def apply_payment_profile_payload(profile: PaymentProfile, payload: dict[str, Any]) -> None:
+    payload = dict(payload)
+    if "payment_method" in payload:
+        method = payload["payment_method"]
+        if not isinstance(method, str) or method not in {"cash", "transfer", "mixed"}:
+            raise HTTPException(400, "Неизвестный тип оплаты")
+        if method != "mixed":
+            payload.update(ip_payment_method=method, personal_payment_method=method)
     for field in ("ip_payment_method", "personal_payment_method"):
         if field in payload and (not isinstance(payload[field], str) or payload[field] not in {"cash", "transfer"}):
             raise HTTPException(400, "Способ оплаты должен быть «Наличные» или «Перевод»")
@@ -77,9 +84,12 @@ def effective_payment_profile_summary(apartment: Apartment) -> dict[str, Any]:
 
 
 def serialize_payment_profile(profile: PaymentProfile) -> dict[str, Any]:
+    ip_method = profile.ip_payment_method or "transfer"
+    personal_method = profile.personal_payment_method or "transfer"
     return {
         "id": profile.id,
         "name": profile.name,
+        "payment_method": ip_method if ip_method == personal_method else "mixed",
         **payment_profile_values(profile),
         "notes": profile.notes,
         "active": profile.active,

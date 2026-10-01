@@ -2924,7 +2924,7 @@ function renderPaymentProfiles() {
   `;
   const cards = (state.bootstrap?.payment_profiles || []).map((profile) => {
     const usage = paymentProfileUsage(profile.id);
-    const recipient = profile.ip_recipient_name || profile.personal_recipient_name || "получатель не указан";
+    const recipient = profile.payment_method === "cash" ? "Оплата аренды наличными" : (profile.ip_recipient_name || profile.personal_recipient_name || "получатель не указан");
     return `
       <article class="card">
         <div class="section-title"><div><h3>${escapeHtml(profile.name)}</h3><span>${escapeHtml(recipient)}</span></div><span class="pill ${profile.active ? "ok" : "warn"}">${profile.active ? "активен" : "архив"}</span></div>
@@ -2996,10 +2996,21 @@ function openApartmentEditor(apartmentId) {
   });
 }
 
+function syncPaymentMethodFields(form) {
+  const method = form.elements.payment_method?.value || "transfer";
+  qsa('[name="ip_payment_method"], [name="personal_payment_method"]', form).forEach((input) => {
+    input.closest("label").hidden = method !== "mixed";
+  });
+  qsa('[name*="_recipient_"]', form).forEach((input) => {
+    input.closest("label").hidden = method === "cash";
+  });
+}
+
 function paymentProfileEditorFields(profile) {
   const field = (name) => escapeAttr(profile?.[name] || "");
   return `
     <label class="wide">Название набора<input name="name" required value="${field("name")}" /></label>
+    <label class="wide">Тип оплаты<select name="payment_method" onchange="syncPaymentMethodFields(this.form)"><option value="transfer">Перевод</option><option value="cash" ${profile?.payment_method === "cash" ? "selected" : ""}>Наличные</option><option value="mixed" ${profile?.payment_method === "mixed" ? "selected" : ""}>Раздельно по частям аренды</option></select></label>
     <label>Оплата части ИП<select name="ip_payment_method"><option value="transfer">Перевод на счёт ИП</option><option value="cash" ${profile?.ip_payment_method === "cash" ? "selected" : ""}>Наличные</option></select></label>
     <label>Оплата личной части<select name="personal_payment_method"><option value="transfer">Перевод по телефону</option><option value="cash" ${profile?.personal_payment_method === "cash" ? "selected" : ""}>Наличные</option></select></label>
     <p class="muted wide">Напомним снять наличные за 3 дня. «Деньги переданы» создаёт запрос владельцу; зачёт — после подтверждения. Коммуналка остаётся переводом.</p>
@@ -3026,6 +3037,7 @@ function openPaymentProfileEditor(profileId) {
     await api(`/api/payment-profiles/${profileId}`, { method: "PATCH", body: JSON.stringify(payload) });
     toast("Набор реквизитов обновлён");
   });
+  syncPaymentMethodFields(qs("#portfolioEditorForm"));
 }
 
 async function toggleObjectActive(objectId) {
@@ -5271,6 +5283,7 @@ function bindEvents() {
     const form = event.currentTarget;
     await api("/api/payment-profiles", { method: "POST", body: JSON.stringify(formData(form)) });
     form.reset();
+    syncPaymentMethodFields(form);
     const tool = qs("#paymentProfileTool");
     if (tool) tool.open = false;
     toast("Набор реквизитов создан");

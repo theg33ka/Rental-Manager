@@ -11,14 +11,16 @@ test("наличный набор создаётся, редактируется
   const name = `Наличные ${Date.now()}`;
   const form = page.locator("#paymentProfileForm");
   await form.locator('[name="name"]').fill(name);
-  await form.locator('[name="personal_payment_method"]').selectOption("cash");
+  await form.locator('[name="payment_method"]').selectOption("cash");
+  await expect(form.locator('[name="ip_recipient_account"]')).toBeHidden();
+  await expect(form.locator('[name="personal_recipient_phone"]')).toBeHidden();
   await form.getByRole("button", { name: "Создать набор" }).click();
   const card = page.locator("#paymentProfileRegistry .card").filter({ has: page.getByRole("heading", { name, exact: true }) });
   await expect(card).toContainText("Личная часть: наличные");
   await card.getByRole("button", { name: "Открыть и изменить" }).click();
   const editor = page.locator("#portfolioEditorForm");
-  await expect(editor.locator('[name="personal_payment_method"]')).toHaveValue("cash");
-  await editor.locator('[name="ip_payment_method"]').selectOption("cash");
+  await expect(editor.locator('[name="payment_method"]')).toHaveValue("cash");
+  await expect(editor.locator('[name="ip_recipient_account"]')).toBeHidden();
   await editor.getByRole("button", { name: "Сохранить", exact: true }).click();
   await expect(card).toContainText("Часть ИП: наличные");
   const assigned = await page.evaluate(async (profileName) => {
@@ -30,6 +32,7 @@ test("наличный набор создаётся, редактируется
   expect(assigned.object.payment_profile_id).toBe(assigned.profile.id);
   expect(assigned.profile.ip_payment_method).toBe("cash");
   expect(assigned.profile.personal_payment_method).toBe("cash");
+  expect(assigned.profile.payment_method).toBe("cash");
   await page.reload();
   await expect(page.locator("#loadingOverlay")).toBeHidden();
   await page.locator('.sidebar [data-tab="tenants"]').click();
