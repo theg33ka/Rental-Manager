@@ -480,6 +480,9 @@
           <summary><span><strong>Добавить набор реквизитов</strong><small>ИП и личный перевод в одном профиле</small></span></summary>
           <form id="paymentProfileForm" class="form-grid">
             <label class="wide">Название набора<input name="name" required placeholder="Например, Основной счёт — центр" /></label>
+            <label>Оплата части ИП<select name="ip_payment_method"><option value="transfer">Перевод на счёт ИП</option><option value="cash">Наличные</option></select></label>
+            <label>Оплата личной части<select name="personal_payment_method"><option value="transfer">Перевод по телефону</option><option value="cash">Наличные</option></select></label>
+            <p class="muted wide">Для наличных: напоминание снять деньги за 3 дня, зачёт после подтверждения владельца. Коммуналка оплачивается по прежним реквизитам.</p>
             <label class="wide">Получатель ИП<input name="ip_recipient_name" /></label>
             <label>ИНН ИП<input name="ip_recipient_inn" /></label>
             <label>ОГРНИП<input name="ip_recipient_ogrnip" /></label>

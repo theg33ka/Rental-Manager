@@ -17,6 +17,8 @@ class PaymentProfile(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(120), unique=True)
+    ip_payment_method: Mapped[str] = mapped_column(String(20), default="transfer", server_default="transfer")
+    personal_payment_method: Mapped[str] = mapped_column(String(20), default="transfer", server_default="transfer")
     ip_recipient_name: Mapped[str] = mapped_column(String(180), default="")
     ip_recipient_inn: Mapped[str] = mapped_column(String(20), default="")
     ip_recipient_ogrnip: Mapped[str] = mapped_column(String(20), default="")
@@ -138,6 +140,25 @@ class RentCharge(Base):
 
     lease: Mapped[Lease] = relationship(back_populates="rent_charges")
     receipts: Mapped[list["PaymentReceipt"]] = relationship(back_populates="rent_charge")
+
+
+class CashPaymentRequest(Base):
+    __tablename__ = "cash_payment_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token: Mapped[str] = mapped_column(String(32), unique=True)
+    rent_charge_id: Mapped[int] = mapped_column(ForeignKey("rent_charges.id", ondelete="CASCADE"), index=True)
+    tenant_chat_id: Mapped[str] = mapped_column(String(80))
+    ip_amount: Mapped[float] = mapped_column(Float, default=0)
+    personal_amount: Mapped[float] = mapped_column(Float, default=0)
+    snapshot_json: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default="offered")
+    proposal_id: Mapped[int | None] = mapped_column(ForeignKey("agent_action_proposals.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    rent_charge: Mapped[RentCharge] = relationship()
 
 
 class PaymentReceipt(Base):

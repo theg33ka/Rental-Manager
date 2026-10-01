@@ -24,7 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
-from sqlalchemy import delete, func, or_, select, text
+from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy.sql.elements import ColumnElement
@@ -73,6 +73,7 @@ from rental_manager.models import (
     utc_now,
     AppSetting,
     ProcessedTelegramUpdate,
+    CashPaymentRequest,
 )
 from rental_manager.security.pins import (
     LEGACY_PIN_SETTING_KEYS,
@@ -224,6 +225,7 @@ from rental_manager.services.payment_allocation import (
     recalculate_lease_balances,
     utility_line_candidates,
 )
+from rental_manager.services.cash_payments import cash_amounts, cash_request_valid, confirm_cash_payment, offer_cash_payment
 from rental_manager.services.payment_profiles import (
     apply_payment_profile_payload,
     effective_payment_profile_summary,
@@ -1413,6 +1415,7 @@ def table_model_map() -> dict[str, Any]:
         "ai_action_logs": AiActionLog,
         "agent_memories": AgentMemory,
         "agent_action_proposals": AgentActionProposal,
+        "cash_payment_requests": CashPaymentRequest,
         "agent_tenant_states": AgentTenantState,
         "payment_situations": PaymentSituation,
         "agent_tasks": AgentTask,
@@ -2286,7 +2289,9 @@ def receipt_meta(parsed: dict[str, Any]) -> dict[str, Any]:
 
 
 def payment_source_label(receipt: PaymentReceipt) -> str:
-    if receipt.source == UTILITY_ADVANCE_SOURCE:
+    if receipt.source == "cash_confirmed":
+        base = "наличные, подтверждены владельцем"
+    elif receipt.source == UTILITY_ADVANCE_SOURCE:
         base = "зачёт аванса"
     elif receipt.channel == UTILITY_ADVANCE_CHANNEL:
         base = "аванс коммуналки"
@@ -5442,6 +5447,8 @@ def rent_debt_bullet(charge: RentCharge) -> str:
 
 
 def rent_channel_summary_text(charge: RentCharge) -> str:
+    if sum(cash_amounts(charge).values()) > EPS:
+        return "; ".join(situation_payment_breakdown(charge))
     ip_done = money(charge.ip_paid) + 0.009 >= money(charge.ip_due)
     personal_done = money(charge.personal_paid) + 0.009 >= money(charge.personal_due)
     if ip_done and personal_done:
@@ -5659,6 +5666,31 @@ def render_message_text(
 ) -> str:
     if template_key == "custom":
         return custom_text.strip()
+    if charge and template_key.startswith("message_rent_") and sum(cash_amounts(charge).values()) > EPS:
+        settings = effective_payment_settings(charge.lease.apartment, get_settings(session))
+        parts = []
+        cash_total = 0.0
+        for channel, label in (("ip", "Часть ИП"), ("personal", "Личная часть")):
+            amount = money(max(0.0, getattr(charge, f"{channel}_due") - getattr(charge, f"{channel}_paid")))
+            if amount <= EPS:
+                continue
+            if settings.get(f"{channel}_payment_method") == "cash":
+                cash_total += amount
+                method = "наличными"
+            elif channel == "ip":
+                method = f"на счёт ИП {settings.get('ip_recipient_account') or 'не указан'}"
+            else:
+                method = f"переводом по номеру {settings.get('personal_recipient_phone') or 'не указан'}, {settings.get('personal_recipient_bank') or 'банк не указан'}"
+            parts.append(f"• {label}: {money_text(amount)} — {method}.")
+        heading = "Пожалуйста, заранее снимите наличные" if template_key == "message_rent_upcoming" else "Напоминание об оплате аренды"
+        return "\n".join([
+            f"{heading}.",
+            f"{charge.lease.apartment.object.name}, {charge.lease.apartment.name}.",
+            f"Период: {charge.period_start:%d.%m.%Y}–{charge.period_end:%d.%m.%Y}. Срок оплаты: {charge.due_date:%d.%m.%Y}.",
+            *parts,
+            f"После передачи {money_text(cash_total)} наличными нажмите «Деньги переданы». Платёж будет зачтён после подтверждения владельца.",
+            "Если передали только часть суммы, напишите об этом в чат вместо нажатия кнопки.",
+        ])
     context = build_message_context(
         session,
         lease,
@@ -5820,6 +5852,8 @@ def send_tenant_message(
     )
     if not text.strip():
         raise HTTPException(400, "Текст сообщения пустой")
+    if charge and template_key.startswith("message_rent_"):
+        keyboard = cash_payment_keyboard(session, charge, str(chat_id), keyboard)
     send_telegram_text(session, chat_id, text, keyboard, record_history=False)
     session.add(
         MessageLog(
@@ -7059,12 +7093,27 @@ def situation_payment_breakdown(target: RentCharge | UtilityBillLine) -> list[st
     if isinstance(target, RentCharge):
         ip_left = money(max(0.0, float(target.ip_due or 0) - float(target.ip_paid or 0)))
         personal_left = money(max(0.0, float(target.personal_due or 0) - float(target.personal_paid or 0)))
-        return [
-            f"на расчётный счёт ИП: {money_text(ip_left)}",
-            f"переводом по номеру телефона: {money_text(personal_left)}",
-        ]
+        methods = effective_payment_settings(target.lease.apartment, {})
+        ip_label = "часть ИП наличными" if methods.get("ip_payment_method") == "cash" else "на расчётный счёт ИП"
+        personal_label = "личная часть наличными" if methods.get("personal_payment_method") == "cash" else "переводом по номеру телефона"
+        return [f"{ip_label}: {money_text(ip_left)}", f"{personal_label}: {money_text(personal_left)}"]
     service = target.bill.service.name if target.bill and target.bill.service else "коммунальные услуги"
     return [f"{service}: {money_text(situation_debt(target))} — перевод по номеру телефона"]
+
+
+def cash_payment_keyboard(
+    session: Session, charge: RentCharge, chat_id: str, keyboard: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if lease_ignored(session, charge.lease_id) or not charge.lease.active:
+        return keyboard
+    request = offer_cash_payment(session, charge, chat_id)
+    if request is None:
+        return keyboard
+    rows = list((keyboard or {}).get("inline_keyboard") or [])
+    if abs(situation_debt(charge) - request.ip_amount - request.personal_amount) < EPS:
+        rows = [[button for button in row if not str(button.get("callback_data", "")).endswith((":paid", ":receipt"))] for row in rows]
+        rows = [row for row in rows if row]
+    return {"inline_keyboard": [[{"text": "Деньги переданы", "callback_data": f"cashpay:{request.token}"}], *rows]}
 
 
 def tenant_situation_keyboard(situation: PaymentSituation, *, overdue: bool = False) -> dict[str, Any]:
@@ -7147,11 +7196,14 @@ def send_payment_situation_message(
     chat_id = lease_chat_id(session, lease)
     if not chat_id:
         return False
+    keyboard = tenant_situation_keyboard(situation, overdue=bool(situation_due_date(target) and situation_due_date(target) < today))
+    if isinstance(target, RentCharge):
+        keyboard = cash_payment_keyboard(session, target, str(chat_id), keyboard)
     send_telegram_text(
         session,
         chat_id,
         text,
-        tenant_situation_keyboard(situation, overdue=bool(situation_due_date(target) and situation_due_date(target) < today)),
+        keyboard,
         record_history=False,
     )
     session.add(
@@ -9667,6 +9719,22 @@ def normalize_agent_action(
     if action_type not in OWNER_OPERATION_SPECS:
         raise HTTPException(400, "Агент предложил неподдерживаемую операцию")
 
+    if action_type == "confirm_cash_payment":
+        request = session.get(CashPaymentRequest, int(payload.get("cash_request_id") or 0))
+        if not request or request.status != "pending" or not cash_request_valid(request):
+            raise HTTPException(409, "Запрос на наличные отсутствует или устарел")
+        charge = request.rent_charge
+        lease = charge.lease
+        preview = (
+            f"Жилец сообщил: деньги переданы наличными.\n"
+            f"{lease.apartment.object.name}, {lease.apartment.name}; {lease.tenant.full_name}.\n"
+            f"Аренда за {charge.period_start:%d.%m.%Y}–{charge.period_end:%d.%m.%Y}.\n"
+            f"Сумма: {money_text(request.ip_amount + request.personal_amount)}.\n"
+            f"Часть ИП: {money_text(request.ip_amount)}; личная часть: {money_text(request.personal_amount)}.\n"
+            "Подтвердите только если получили эту сумму полностью. После подтверждения она будет зачтена в это начисление."
+        )
+        return lease, action_type, {"cash_request_id": request.id}, preview
+
     if action_type not in {"defer_rent", "move_out", "create_manual_debt", "send_tenant_message"}:
         lease, target = owner_operation_target(session, payload)
         if action_type == "update_lease":
@@ -10604,6 +10672,16 @@ def execute_agent_action(session: Session, proposal: AgentActionProposal) -> str
     except json.JSONDecodeError as exc:
         raise HTTPException(400, "Повреждены параметры предложения") from exc
 
+    if proposal.action_type == "confirm_cash_payment":
+        request = session.get(CashPaymentRequest, int(payload.get("cash_request_id") or 0))
+        if not request or not request.rent_charge or lease_ignored(session, request.rent_charge.lease_id):
+            raise HTTPException(409, "Договор в архиве или запрос не найден")
+        if str(lease_chat_id(session, request.rent_charge.lease)) != request.tenant_chat_id:
+            raise HTTPException(409, "Telegram-привязка жильца изменилась")
+        receipts = confirm_cash_payment(session, request.id, proposal)
+        sync_rental_budget_expense_receipts(session, receipts)
+        return f"Наличные {money_text(request.ip_amount + request.personal_amount)} подтверждены и зачтены в аренду. Запись добавлена в историю."
+
     if proposal.action_type == "grouped_deferral":
         try:
             return execute_grouped_deferral(session, proposal)
@@ -10890,6 +10968,63 @@ def handle_tenant_payment_text(session: Session, lease: Lease, chat_id: int | st
                 "До его решения я не буду обещать изменение срока."
             ),
         )
+    return True
+
+
+def handle_cash_payment_callback(session: Session, callback: dict[str, Any]) -> bool:
+    data = str(callback.get("data") or "")
+    if not data.startswith("cashpay:"):
+        return False
+    callback_id = str(callback.get("id") or "")
+    sender_id = str((callback.get("from") or {}).get("id") or "")
+    chat_id = str((((callback.get("message") or {}).get("chat") or {}).get("id")) or "")
+    token = telegram_token(session)
+    if not callback_id or not token:
+        return True
+    request = session.scalar(select(CashPaymentRequest).where(CashPaymentRequest.token == data.removeprefix("cashpay:")).with_for_update())
+    if not request or not request.rent_charge or sender_id != chat_id or request.tenant_chat_id != chat_id:
+        safe_answer_agent_callback(token, callback_id, "Эта кнопка недоступна в вашем чате.")
+        return True
+    lease = request.rent_charge.lease
+    if str(lease_chat_id(session, lease)) != chat_id or lease_ignored(session, lease.id) or not lease.active:
+        safe_answer_agent_callback(token, callback_id, "Договор или привязка изменились. Напишите владельцу.")
+        return True
+    if request.status != "offered":
+        message = "Запрос уже передан владельцу." if request.status == "pending" else "Запрос уже обработан. Используйте последнее напоминание."
+        safe_answer_agent_callback(token, callback_id, message)
+        return True
+    if not cash_request_valid(request):
+        request.status = "stale"
+        safe_answer_agent_callback(token, callback_id, "Сумма или способ оплаты изменились. Используйте новое напоминание.")
+        return True
+    owner_id = telegram_owner_chat_id(session)
+    if not owner_id:
+        safe_answer_agent_callback(token, callback_id, "Чат владельца не настроен. Платёж не зачтён, свяжитесь с владельцем.")
+        return True
+    try:
+        with session.begin_nested():
+            changed = session.execute(update(CashPaymentRequest).where(
+                CashPaymentRequest.id == request.id, CashPaymentRequest.status == "offered",
+            ).values(status="pending", claimed_at=utc_now())).rowcount
+            if changed != 1:
+                safe_answer_agent_callback(token, callback_id, "Запрос уже передан владельцу.")
+                return True
+            conversation = ai_conversation(session, owner_id, "owner", None)
+            proposal = create_agent_action_proposal(session, conversation, owner_id, {
+                "type": "owner_operation", "payload": {
+                    "operation": "confirm_cash_payment", "arguments": {"cash_request_id": request.id},
+                },
+            })
+            request.proposal_id = proposal.id
+            session.add(MessageLog(
+                lease_id=lease.id, rent_charge_id=request.rent_charge_id, channel="telegram",
+                template_key="cash_handover", status="received", recipient_chat_id=chat_id,
+                text=f"Деньги переданы: {money_text(request.ip_amount + request.personal_amount)} наличными. Ожидается подтверждение владельца.",
+            ))
+    except HTTPException:
+        safe_answer_agent_callback(token, callback_id, "Не удалось отправить запрос владельцу. Платёж не зачтён. Попробуйте ещё раз.")
+        return True
+    safe_answer_agent_callback(token, callback_id, "Владелец получил запрос. До его подтверждения платёж не зачтён.")
     return True
 
 
@@ -11481,6 +11616,15 @@ def tenant_requisites_text(session: Session, lease: Lease | None = None) -> str:
         "• коммунальные платежи — переводом по номеру телефона;",
         "• если переводов несколько, отправьте отдельный чек PDF по каждому.",
     ]
+    if settings.get("ip_payment_method") == "cash":
+        lines[:12] = ["Часть аренды «ИП» оплачивается наличными."]
+        lines = [line.replace("• часть аренды «ИП» — только на расчётный счёт ИП;", "• часть аренды «ИП» — наличными;") for line in lines]
+    if settings.get("personal_payment_method") == "cash":
+        lines = [line.replace("(дополнительная часть аренды и коммуналка)", "(коммуналка)").replace(
+            "• дополнительная часть аренды — переводом по номеру телефона;", "• дополнительная часть аренды — наличными;",
+        ) for line in lines]
+    if "cash" in {settings.get("ip_payment_method"), settings.get("personal_payment_method")}:
+        lines.extend(["", "После передачи наличных нажмите «Деньги переданы» в напоминании. Зачёт выполняется только после подтверждения владельца."])
     return "\n".join(lines)
 
 
@@ -11789,7 +11933,7 @@ def process_telegram_update_background(payload: dict[str, Any], received_at: flo
                 session.commit()
             dedupe_finished = time_module.perf_counter()
             if callback:
-                if not handle_payment_situation_callback_query(session, callback):
+                if not handle_cash_payment_callback(session, callback) and not handle_payment_situation_callback_query(session, callback):
                     handle_agent_callback_query(session, callback)
             else:
                 handle_telegram_message(session, message)
@@ -12777,6 +12921,7 @@ def delete_lease(lease_id: int, session: Session = Depends(get_session)) -> dict
         conversation.tenant_id = None
     session.execute(delete(MessageLog).where(MessageLog.lease_id == lease.id))
     charge_ids = select(RentCharge.id).where(RentCharge.lease_id == lease.id)
+    session.execute(delete(CashPaymentRequest).where(CashPaymentRequest.rent_charge_id.in_(charge_ids)))
     for receipt in session.scalars(select(PaymentReceipt).where(
         or_(PaymentReceipt.lease_id == lease.id, PaymentReceipt.rent_charge_id.in_(charge_ids))
     )).all():

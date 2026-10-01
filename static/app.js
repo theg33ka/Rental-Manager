@@ -2929,6 +2929,7 @@ function renderPaymentProfiles() {
       <article class="card">
         <div class="section-title"><div><h3>${escapeHtml(profile.name)}</h3><span>${escapeHtml(recipient)}</span></div><span class="pill ${profile.active ? "ok" : "warn"}">${profile.active ? "активен" : "архив"}</span></div>
         <p class="muted">${escapeHtml(usageLocationText(usage))}</p>
+        <p class="muted">Часть ИП: ${profile.ip_payment_method === "cash" ? "наличные" : "перевод на счёт"}. Личная часть: ${profile.personal_payment_method === "cash" ? "наличные" : "перевод по телефону"}.</p>
         <div class="settings-actions">
           <button class="mini" type="button" onclick="openPaymentProfileEditor(${profile.id})">Открыть и изменить</button>
           <button class="mini" type="button" onclick="togglePaymentProfileActive(${profile.id})">${profile.active ? "Архивировать" : "Вернуть в работу"}</button>
@@ -2999,6 +3000,9 @@ function paymentProfileEditorFields(profile) {
   const field = (name) => escapeAttr(profile?.[name] || "");
   return `
     <label class="wide">Название набора<input name="name" required value="${field("name")}" /></label>
+    <label>Оплата части ИП<select name="ip_payment_method"><option value="transfer">Перевод на счёт ИП</option><option value="cash" ${profile?.ip_payment_method === "cash" ? "selected" : ""}>Наличные</option></select></label>
+    <label>Оплата личной части<select name="personal_payment_method"><option value="transfer">Перевод по телефону</option><option value="cash" ${profile?.personal_payment_method === "cash" ? "selected" : ""}>Наличные</option></select></label>
+    <p class="muted wide">Напомним снять наличные за 3 дня. «Деньги переданы» создаёт запрос владельцу; зачёт — после подтверждения. Коммуналка остаётся переводом.</p>
     <label class="wide">Получатель ИП<input name="ip_recipient_name" value="${field("ip_recipient_name")}" /></label>
     <label>ИНН ИП<input name="ip_recipient_inn" value="${field("ip_recipient_inn")}" /></label>
     <label>ОГРНИП<input name="ip_recipient_ogrnip" value="${field("ip_recipient_ogrnip")}" /></label>

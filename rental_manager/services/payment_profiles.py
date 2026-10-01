@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from fastapi import HTTPException
+
 from rental_manager.models import Apartment, PaymentProfile
 
 
 PAYMENT_PROFILE_FIELDS = (
+    "ip_payment_method",
+    "personal_payment_method",
     "ip_recipient_name",
     "ip_recipient_inn",
     "ip_recipient_ogrnip",
@@ -22,10 +26,13 @@ PAYMENT_PROFILE_FIELDS = (
 
 
 def payment_profile_values(profile: PaymentProfile) -> dict[str, str]:
-    return {field: str(getattr(profile, field) or "") for field in PAYMENT_PROFILE_FIELDS}
+    return {field: str(getattr(profile, field) or ("transfer" if field.endswith("_payment_method") else "")) for field in PAYMENT_PROFILE_FIELDS}
 
 
 def apply_payment_profile_payload(profile: PaymentProfile, payload: dict[str, Any]) -> None:
+    for field in ("ip_payment_method", "personal_payment_method"):
+        if field in payload and (not isinstance(payload[field], str) or payload[field] not in {"cash", "transfer"}):
+            raise HTTPException(400, "Способ оплаты должен быть «Наличные» или «Перевод»")
     if "name" in payload:
         profile.name = str(payload.get("name") or "").strip()
     for field in PAYMENT_PROFILE_FIELDS:
@@ -48,7 +55,7 @@ def effective_payment_profile(apartment: Apartment) -> tuple[PaymentProfile | No
 def effective_payment_settings(apartment: Apartment, global_settings: dict[str, Any]) -> dict[str, Any]:
     profile, _source = effective_payment_profile(apartment)
     if profile is None:
-        return {field: global_settings.get(field, "") for field in PAYMENT_PROFILE_FIELDS}
+        return {field: global_settings.get(field, "transfer" if field.endswith("_payment_method") else "") for field in PAYMENT_PROFILE_FIELDS}
     return payment_profile_values(profile)
 
 

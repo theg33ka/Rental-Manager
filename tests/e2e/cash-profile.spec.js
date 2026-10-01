@@ -1,0 +1,38 @@
+const { test, expect } = require("@playwright/test");
+
+test("наличный набор создаётся, редактируется и назначается дому", async ({ page }) => {
+  await page.goto("/");
+  await page.getByLabel("PIN-код").fill(process.env.E2E_OWNER_PIN || ("12" + "98"));
+  await page.getByRole("button", { name: "Войти", exact: true }).click();
+  await expect(page.locator("#authOverlay")).toBeHidden();
+  await expect(page.locator("#loadingOverlay")).toBeHidden();
+  await page.locator('.sidebar [data-tab="tenants"]').click();
+  await page.locator("#paymentProfileTool summary").click();
+  const name = `Наличные ${Date.now()}`;
+  const form = page.locator("#paymentProfileForm");
+  await form.locator('[name="name"]').fill(name);
+  await form.locator('[name="personal_payment_method"]').selectOption("cash");
+  await form.getByRole("button", { name: "Создать набор" }).click();
+  const card = page.locator("#paymentProfileRegistry .card").filter({ has: page.getByRole("heading", { name, exact: true }) });
+  await expect(card).toContainText("Личная часть: наличные");
+  await card.getByRole("button", { name: "Открыть и изменить" }).click();
+  const editor = page.locator("#portfolioEditorForm");
+  await expect(editor.locator('[name="personal_payment_method"]')).toHaveValue("cash");
+  await editor.locator('[name="ip_payment_method"]').selectOption("cash");
+  await editor.getByRole("button", { name: "Сохранить", exact: true }).click();
+  await expect(card).toContainText("Часть ИП: наличные");
+  const assigned = await page.evaluate(async (profileName) => {
+    const profile = (await api("/api/payment-profiles")).find(item => item.name === profileName);
+    const object = await api("/api/objects", { method: "POST", body: JSON.stringify({ name: profileName, payment_profile_id: profile.id }) });
+    const apartment = await api("/api/apartments", { method: "POST", body: JSON.stringify({ object_id: object.id, name: "1" }) });
+    return { profile, object, apartment };
+  }, name);
+  expect(assigned.object.payment_profile_id).toBe(assigned.profile.id);
+  expect(assigned.profile.ip_payment_method).toBe("cash");
+  expect(assigned.profile.personal_payment_method).toBe("cash");
+  await page.reload();
+  await expect(page.locator("#loadingOverlay")).toBeHidden();
+  await page.locator('.sidebar [data-tab="tenants"]').click();
+  await expect(card).toContainText("Часть ИП: наличные");
+  await expect(card).toContainText("Личная часть: наличные");
+});
