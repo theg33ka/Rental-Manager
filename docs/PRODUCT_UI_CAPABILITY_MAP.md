@@ -190,7 +190,7 @@ Business changes → Domain Event → Operational Case → Briefing / Proposal /
 | Capability | Actor, entry point, UI | Inputs / entities | Result, rules, statuses, errors | Backend / risk / design note |
 | --- | --- | --- | --- | --- |
 | Preview/send сообщения | owner; Messages; UI: да | Target lease, template, custom text | Render uses current debts and effective details; sent/failed MessageLog | preview/send endpoints |
-| Массовая рассылка | owner; Messages; UI: да | all or lease IDs, text | Per-recipient sent/failed/skipped; unlinked chats skipped | `/api/messages/broadcast`; bulk + confirmation desirable |
+| Массовая рассылка | owner; «Связь» → «Рассылка» или «+ Действие» → «Отправить сообщение»; UI: да | all or lease IDs, text | Per-recipient sent/failed/skipped; unlinked chats skipped; возврат «К диалогам» | `/api/messages/broadcast`; подтверждение перед отправкой |
 | Читать/вести диалог | owner; Incoming; UI: да | Dialog, limit, outgoing text | Incoming/outgoing timeline; Telegram delivery | bot-dialog endpoints |
 | Настроить и запустить reminders | owner/background; Automation; UI: да | Global cutoff/cadence, per-lease overrides | Due reminders with duplicate suppression and pause modes | settings, lease cadence/automation, reminders run |
 | Подключить Telegram | owner; Settings; UI: да | token/secret/base URL | webhook setup/info/test | integration endpoints; secrets never returned |

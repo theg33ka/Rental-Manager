@@ -234,6 +234,10 @@ body[data-palette="neon"] .sidebar-nav .nav-group.active {
   display: none;
 }
 
+#quickActionsModal {
+  z-index: 100;
+}
+
 main {
   width: min(100%, 1600px);
   margin: 0 auto;

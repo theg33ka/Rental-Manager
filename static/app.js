@@ -353,6 +353,7 @@ function openQuickActions() {
       </div>
     </div>
   `;
+  root.hidden = false;
   openAccessibleModal(root, closeQuickActions);
 }
 

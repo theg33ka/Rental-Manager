@@ -223,7 +223,7 @@
     <link rel="stylesheet" href="/static/premium.css?v=2026-07-23-edit-utility-v8" />
     <link rel="stylesheet" href="/static/neon-ui.css?v=2026-08-29-themes-v2" />
     <link rel="stylesheet" href="/static/white-ui.css?v=2026-08-29-themes-v2" />
-    <link rel="stylesheet" href="/static/pen-ui.css?v=2026-08-30-pen-v1" />
+    <link rel="stylesheet" href="/static/pen-ui.css?v=2026-10-01-communications-v1" />
     <link rel="stylesheet" href="/static/payment-calendar.css?v=2026-09-18-calendar-v2" />
   </head>
   <body class="auth-locked app-loading" data-palette="neon">
@@ -674,7 +674,10 @@
       <section class="panel pen-screen" id="dialogs">
         <div class="page-heading">
           <div><p class="eyebrow">Коммуникации</p><h2>Входящие диалоги</h2><p class="muted">Telegram-чаты жильцов и ответы от имени сервиса.</p></div>
-          <button id="botDialogsRefreshBtn" type="button">Обновить диалоги</button>
+          <div class="settings-actions">
+            <button class="primary" type="button" onclick="openMessagesTab()">Рассылка</button>
+            <button id="botDialogsRefreshBtn" type="button">Обновить диалоги</button>
+          </div>
         </div>
         <div class="messenger-layout">
           <aside class="dialog-list" id="botDialogList"></aside>
@@ -692,6 +695,7 @@
       <section class="panel pen-screen" id="messages">
         <div class="page-heading">
           <div><p class="eyebrow">Коммуникации</p><h2>Рассылки и шаблоны</h2><p class="muted">Сегментированные сообщения и единый тон уведомлений.</p></div>
+          <button type="button" onclick="openDialogsTab()">К диалогам</button>
         </div>
         <section class="card stack">
           <div class="section-title">
@@ -1073,7 +1077,7 @@
     <div id="quickActionsModal" class="modal-shell" hidden></div>
     <div id="portfolioEditorModal" class="modal-shell" hidden></div>
     <div id="toast" role="status" aria-live="polite"></div>
-    <script type="module" src="/static/js/bootstrap.js?v=2026-09-18-archive-dialogs-v1"></script>
+    <script type="module" src="/static/js/bootstrap.js?v=2026-10-01-communications-v1"></script>
   </body>
 </html>
 
