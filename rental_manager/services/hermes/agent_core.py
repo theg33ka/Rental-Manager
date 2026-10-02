@@ -41,6 +41,15 @@ class FinalAnswer(BaseModel):
 
 FINISH_TOOL = function_tool("finish_answer", "Return one final answer with actual evidence IDs, missing data, and optional proposals. Never claim completeness for unread pages.", FinalAnswer.model_json_schema())
 
+SOURCE_LABELS = {"properties": "объекты", "units": "квартиры", "tenants": "жильцы", "leases": "периоды проживания",
+    "charges": "начисления аренды", "payments": "платежи", "utility_bills": "коммунальные счета",
+    "utility_lines": "начисления коммуналки", "services": "услуги", "meters": "счётчики", "readings": "показания",
+    "adjustments": "ручные долги", "advances": "авансы", "expenses": "расходы", "messages": "сообщения",
+    "conversations": "диалоги", "conversation_messages": "переписка", "bot_actions": "действия бота",
+    "events": "события", "cases": "кейсы", "commitments": "решения владельца", "case_memory": "память кейса",
+    "notifications": "доставка уведомлений", "agent_runs": "запуски AI", "automations": "автоматизации",
+    "get_debt_state": "расчёт долга: аренда, коммуналка, ручные долги", "analyze_payment_timing": "сроки оплаты"}
+
 
 def unsupported_amounts(reply: str, evidence: list[dict[str, Any]]) -> bool:
     numbers: set[float] = set()
@@ -144,7 +153,7 @@ def run_agent(*, data: RentalDataTools, messages: list[dict[str, Any]],
                         reply = "Данные неполные: " + " ".join(dict.fromkeys(missing)) + "\n\n" + reply
                     checked = sorted({trace[i - 1]["source"] for i in final.evidence})
                     if checked:
-                        reply += "\n\nПроверено: " + ", ".join(checked) + "."
+                        reply += "\n\nПроверено: " + ", ".join(SOURCE_LABELS.get(source, source) for source in checked) + "."
                     return AgentResult(AgentEnvelope(reply=reply, actions=final.actions,
                         need_disambiguation=final.clarification), trace, "partial" if missing else "completed",
                         llm_calls, prompt_tokens, completion_tokens)

@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 
 from rental_manager.models import (
     AgentActionProposal,
+    AgentNotification,
+    MessageLog,
     AiSkill,
     DomainEvent,
     HermesAgentRun,
@@ -138,6 +140,20 @@ def case_details(session: Session, case_id: int) -> dict[str, Any] | None:
     ]
     snapshot["commitments"] = [serialize_commitment(item) for item in commitments]
     snapshot["proposals"] = [serialize_proposal(item) for item in proposals]
+    delivery_labels = {"pending": "ожидает отправки", "sending": "отправляется", "sent": "отправлено",
+        "delivered": "показано на телефоне", "uncertain": "отправка не подтверждена", "rejected": "отклонено",
+        "failed": "ожидает повтора", "cancelled": "отменено"}
+    activity = [{"at": row.created_at.isoformat(), "text": f"Владелец: {row.description}"} for row in commitments]
+    for notice in session.scalars(select(AgentNotification).where(AgentNotification.case_id == item.id)
+            .order_by(AgentNotification.id.desc()).limit(30)).all():
+        activity.append({"at": notice.created_at.isoformat(), "text":
+            f"Управляющий → {'Telegram' if notice.channel == 'telegram' else 'телефон'}: {delivery_labels.get(notice.status, notice.status)}. {notice.text}"})
+    if item.contract_id:
+        for message in session.scalars(select(MessageLog).where(MessageLog.lease_id == item.contract_id)
+                .order_by(MessageLog.id.desc()).limit(20)).all():
+            activity.append({"at": message.created_at.isoformat(), "text":
+                f"Сообщение жильцу: {delivery_labels.get(message.status, message.status)}. {message.text}"})
+    snapshot["activity"] = sorted(activity, key=lambda row: row["at"], reverse=True)[:50]
     return snapshot
 
 

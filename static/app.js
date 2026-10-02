@@ -1358,6 +1358,7 @@ function renderHermes() {
   const deliveryLabels = { pending: "ожидает отправки", sending: "отправляется", sent: "отправлено", delivered: "показано на телефоне", read: "прочитано", uncertain: "отправка не подтверждена", rejected: "отклонено Telegram", cancelled: "отменено", failed: "ожидает повтора" };
   if (notificationRoot) notificationRoot.innerHTML = (data.notifications || []).slice(0, 15).map((item) => `<p>${escapeHtml(item.text)}<br><small>${formatDateTime(item.created_at)} · ${escapeHtml(item.channel)} · ${escapeHtml(deliveryLabels[item.status] || item.status)}${item.case_id ? ` · <button class="link-button" onclick="showHermesCase(${Number(item.case_id)})">История ситуации</button>` : ""}${["uncertain", "rejected"].includes(item.status) ? ` · <button class="link-button" onclick="retryManagerNotification(${Number(item.id)})">Повторить отправку</button>` : ""}</small></p>`).join("") || "Уведомлений пока нет.";
   if (healthRoot) healthRoot.textContent += ` · последняя фоновая проверка: ${health.worker_last_success ? formatDateTime(health.worker_last_success) : "нет"}${health.worker_healthy ? "" : " (нет свежего подтверждения)"}`;
+  if (healthRoot) healthRoot.textContent += ` · последняя ошибка: ${health.last_error ? formatDateTime(health.last_error) : "нет"} · последняя отправленная сводка: ${health.last_daily_summary ? formatDateTime(health.last_daily_summary.sent_at || health.last_daily_summary.delivered_at) : "нет"}`;
   const overviewRoot = qs("#hermesOverview");
   if (overviewRoot) {
     overviewRoot.innerHTML = [
@@ -1453,6 +1454,7 @@ async function showHermesCase(caseId) {
   root.hidden = false;
   state.managerCaseId = caseId;
   root.innerHTML = `<div class="section-title"><div><h3>${escapeHtml(item.label)} · ${escapeHtml(item.title)}</h3><span>${escapeHtml(hermesStatus(item.status))}</span></div><button class="mini" onclick="state.managerCaseId=null; this.closest('#hermesCaseDetails').hidden=true">Закрыть</button></div><p>${escapeHtml(item.rolling_summary)}</p><p>Решение можно написать управляющему выше: оно будет связано с этим кейсом.</p>${(item.commitments || []).map((c) => `<p>${escapeHtml(c.description)} · контроль ${formatDateTime(c.due_at)}</p>`).join("")}${(item.history || []).map((e) => `<p>${formatDateTime(e.occurred_at)} — ${escapeHtml(hermesTechnicalLabel(e.event_type))} ${escapeHtml(e.payload?.description || e.payload?.reason || "")}</p>`).join("")}`;
+  root.insertAdjacentHTML("beforeend", (item.activity || []).map(entry => `<p>${formatDateTime(entry.at)} — ${escapeHtml(entry.text)}</p>`).join(""));
   root.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 

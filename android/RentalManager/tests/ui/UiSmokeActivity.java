@@ -83,6 +83,7 @@ public final class UiSmokeActivity extends Activity {
         View root = (View) ((View) field.get(manager)).getParent().getParent();
         if (root.getParent() instanceof ViewGroup) ((ViewGroup) root.getParent()).removeView(root);
         setContentView(root);
+        MobileUi.applyWindow(this, root);
     }
 
     Object get(String name) throws Exception {

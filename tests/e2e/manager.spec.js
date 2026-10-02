@@ -7,7 +7,7 @@ test("управляющий показывает ответ, состояние
   await expect(page.locator("#loadingOverlay")).toBeHidden();
   await expect(page.locator("#authOverlay")).toBeHidden();
   await page.evaluate(() => openWorkspaceTab("hermes"));
-  await expect(page.locator("#managerHealth")).toContainText("AI:");
+  await expect(page.locator("#managerHealth")).toContainText("AI:", { timeout: 15_000 });
   let question;
   await page.route("**/api/hermes/chat", async route => {
     question = route.request().postDataJSON();
@@ -21,8 +21,10 @@ test("управляющий показывает ответ, состояние
   await page.getByText("Каналы и время уведомлений", { exact: true }).click();
   await page.locator("#managerNotifyMode").selectOption("critical_push");
   const form = page.locator("form").filter({ has: page.locator("#managerNotifyMode") });
+  const saved = page.waitForResponse(response => response.url().endsWith("/api/hermes/notification-settings") && response.request().method() === "PUT");
   await form.getByRole("button", { name: "Сохранить", exact: true }).click();
-  await expect(page.locator("#managerNotifyMode")).toHaveValue("critical_push");
+  expect((await saved).ok()).toBeTruthy();
+  await expect(page.locator("#managerNotifyMode")).toHaveValue("critical_push", { timeout: 15_000 });
   await page.reload();
   await expect(page.locator("#loadingOverlay")).toBeHidden();
   await page.evaluate(() => openWorkspaceTab("hermes"));

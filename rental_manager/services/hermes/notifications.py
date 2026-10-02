@@ -60,6 +60,18 @@ def importance(item: OperationalCase, cfg: NotificationConfig) -> str:
     return "informational"
 
 
+def historical(item: OperationalCase, cfg: NotificationConfig, now: datetime) -> bool:
+    metadata = json.loads(item.metadata_json or "{}")
+    age = int(metadata.get("days_overdue") or 0)
+    day = metadata.get("expense_date") or metadata.get("due_date")
+    if day:
+        try:
+            age = max(age, (local_time(now).date() - datetime.fromisoformat(str(day)).date()).days)
+        except ValueError:
+            pass
+    return age > cfg.historical_days
+
+
 def channels(cfg: NotificationConfig, level: str) -> list[str]:
     if cfg.mode == "both":
         return ["telegram", "push"]
@@ -118,7 +130,7 @@ def reconcile_notifications(session: Session, *, now: datetime | None = None,
         if level not in {"attention", "critical"}:
             continue
         metadata = json.loads(item.metadata_json or "{}")
-        if not due and int(metadata.get("days_overdue") or 0) > cfg.historical_days:
+        if not due and historical(item, cfg, now):
             continue
         today_start = local_time(now).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
         count = session.scalar(select(func.count(AgentNotification.id)).where(
@@ -161,7 +173,8 @@ def reconcile_notifications(session: Session, *, now: datetime | None = None,
             MessageLog.created_at < begin + timedelta(days=1), MessageLog.status == "sent", MessageLog.lease_id.is_not(None))) or 0
         changed = session.scalars(select(AgentNotification).where(AgentNotification.created_at >= begin,
             AgentNotification.case_id.is_not(None), AgentNotification.channel == channels(cfg, "attention")[0])).all()
-        text = f"Сегодня: принято оплат — {payments[0]} на {float(payments[1]):,.0f} ₽; отправлено сообщений жильцам — {sent}."
+        received = f"{float(payments[1]):,.2f}".replace(",", " ")
+        text = f"Сегодня: принято оплат — {payments[0]} на {received} ₽; отправлено сообщений жильцам — {sent}."
         labels = list(dict.fromkeys(row.text for row in changed))[:3]
         text += "\n" + ("\n".join(labels) if labels else "Новых изменений, требующих вашего решения, нет.")
         key = f"daily:{day}"
@@ -177,7 +190,7 @@ def deliver_telegram(session: Session, send: Callable[[str], dict[str, Any]], *,
     if not cfg.enabled:
         return 0
     session.execute(update(AgentNotification).where(AgentNotification.channel == "telegram",
-        AgentNotification.status == "sending", AgentNotification.next_attempt_at <= now).values(
+        AgentNotification.status == "sending", ((AgentNotification.next_attempt_at <= now) | AgentNotification.next_attempt_at.is_(None))).values(
             status="uncertain", error="Отправка прервалась; проверьте Telegram перед повтором."))
     session.commit()
     rows = session.scalars(select(AgentNotification).where(AgentNotification.channel == "telegram",

@@ -56,4 +56,4 @@ Web-панель является текущей полной поверхнос
 
 ## Виртуальный управляющий
 
-Общий native tool-call цикл owner AI, безопасные read projections, backend aggregates, сохранённая очередь уведомлений, паузы кейсов и web chat реализованы. Android 0.1.13 собран локально. Проверки, ограничения и настройка: [MANAGER_AGENT.md](MANAGER_AGENT.md). Production migration, live LLM/Telegram/телефон и публикация APK не выполнялись.
+Общий native tool-call цикл owner AI, безопасные read projections, backend aggregates и анализ задержек, сохранённая очередь уведомлений, паузы кейсов, web/native Android chat реализованы. Android 0.1.13 собран и подписан локально; native UI smoke прошёл на эмуляторе. Неопределённые Telegram-отправки требуют проверенного ручного повтора, HTTP 429 повторяется после задержки. Проверки, ограничения и настройка: [MANAGER_AGENT.md](MANAGER_AGENT.md); пользовательская приёмка: [how-to-test](MANAGER_HOW_TO_TEST.md). Production migration, live LLM/Telegram/телефон и публикация APK не выполнялись этой задачей.

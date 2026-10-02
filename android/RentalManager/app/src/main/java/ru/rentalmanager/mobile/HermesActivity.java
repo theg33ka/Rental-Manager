@@ -95,6 +95,7 @@ public class HermesActivity extends Activity {
         scroll.addView(content);
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         setContentView(root);
+        MobileUi.applyWindow(this, root);
     }
 
     private void loadSummary() {
@@ -186,10 +187,10 @@ public class HermesActivity extends Activity {
 
     private void showCaseDialog(JSONObject item) {
         StringBuilder historyText = new StringBuilder();
-        JSONArray history = item.optJSONArray("commitments");
+        JSONArray history = item.optJSONArray("activity");
         if (history != null) for (int i = 0; i < history.length(); i++) {
             JSONObject entry = history.optJSONObject(i);
-            if (entry != null) historyText.append("\n").append(entry.optString("description")).append(" · ").append(entry.optString("due_at"));
+            if (entry != null) historyText.append("\n").append(entry.optString("at")).append(" — ").append(entry.optString("text"));
         }
         String body = item.optString("rolling_summary")
             + "\n\nСтатус: " + item.optString("status")
@@ -401,9 +402,10 @@ public class HermesActivity extends Activity {
         String[] keys = {"telegram", "push", "both", "critical_push"};
         Spinner channel = new Spinner(this);
         channel.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
-            new String[]{"Telegram", "Телефон", "Оба канала", "Критичные на телефон, остальные Telegram"}));
+            new String[]{"Telegram", "Телефон", "Оба канала", "Критичные → телефон"}));
         for (int i = 0; i < keys.length; i++) if (keys[i].equals(config.optString("mode"))) channel.setSelection(i);
         panel.addView(channel);
+        panel.addView(hint("В смешанном режиме остальные сообщения идут в Telegram."));
         EditText start = hourField(panel, "Тихие часы с", config.optInt("quiet_start", 22));
         EditText end = hourField(panel, "До", config.optInt("quiet_end", 8));
         EditText daily = hourField(panel, "Час ежедневной сводки", config.optInt("daily_hour", 19));

@@ -59,16 +59,21 @@ test("портфель сортирует квартиры и отделяет �
 });
 
 test("расходы предлагают зачёт в ИП только для незачтённых сумм", async ({ page }) => {
+  const expense = { expense_date: "2026-08-14", apartment: "Баня 3", category: "Ремонт", amount: 11000, source_funds: "rental_budget" };
+  const expenses = [
+    { ...expense, id: 101, rent_credit_amount: 0 },
+    { ...expense, id: 102, rent_credit_amount: 11000 },
+  ];
+  await page.route("**/api/expenses", route => route.fulfill({ json: expenses }));
+  await page.route("**/api/app-state?*", async route => {
+    const response = await route.fetch();
+    const payload = await response.json();
+    if ("expenses" in payload) payload.expenses = expenses;
+    await route.fulfill({ response, json: payload });
+  });
   await page.evaluate(() => openWorkspaceTab("expenses"));
   await page.waitForLoadState("networkidle");
-  await page.evaluate(() => {
-    const expense = { expense_date: "2026-08-14", apartment: "Баня 3", category: "Ремонт", amount: 11000, source_funds: "rental_budget" };
-    state.expenses = [
-      { ...expense, id: 101, rent_credit_amount: 0 },
-      { ...expense, id: 102, rent_credit_amount: 11000 },
-    ];
-    renderExpenses();
-  });
+  await page.evaluate(async () => { await loadExpenses(); renderExpenses(); });
   await expect(page.locator("#expenseList").getByRole("button", { name: "Зачесть в ИП", exact: true })).toHaveCount(1);
   await expect(page.locator("#expenseList")).toContainText("Зачтено в аренду");
   const requestPromise = page.waitForRequest(request => request.url().endsWith("/api/expenses/101/credit-rent") && request.method() === "POST");

@@ -306,6 +306,8 @@ class ManagerAgentTests(unittest.TestCase):
 
     def test_daily_summary_does_not_repeat_old_debt_or_create_new_case(self):
         self.charge.due_date = date(2026, 1, 1)
+        self.session.add(m.Expense(expense_date=date(2026, 1, 1), category="Старый расход", amount=100001,
+            source_funds="personal", compensation_status="pending"))
         self.session.flush()
         now = datetime(2026, 10, 2, 13)
         reconcile_notifications(self.session, now=now)
