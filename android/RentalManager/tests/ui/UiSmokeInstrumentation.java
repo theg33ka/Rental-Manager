@@ -95,6 +95,10 @@ public final class UiSmokeInstrumentation extends Instrumentation {
                     || !partialText.toString().contains("Факт: 11.09")) throw new AssertionError("Partial salary amount or payment date is incorrect");
             });
             capture("salary-by-apartment", "dashboard");
+            for (String managerPage : new String[]{"summary", "chat", "settings"}) {
+                main(() -> host.prepareManager(this, managerPage));
+                capture("manager-" + managerPage, "manager");
+            }
             writeReport();
             result.putString("stream", "UI_SMOKE_PASS " + captures.length() + " screenshots; " + output.getAbsolutePath() + "\n");
             finish(Activity.RESULT_OK, result);
@@ -118,14 +122,19 @@ public final class UiSmokeInstrumentation extends Instrumentation {
         Thread.sleep(250);
         JSONObject record = new JSONObject().put("name", name);
         main(() -> {
+            if (!"manager".equals(tab)) {
             ViewGroup nav = (ViewGroup) host.get("bottomBar");
             if (nav.getChildCount() != 5) throw new AssertionError("Expected five navigation tabs: " + name);
             if (nav.getHeight() <= 0 || nav.getWidth() <= 0) throw new AssertionError("Navigation not laid out: " + name);
             ViewGroup content = (ViewGroup) host.get("content");
             if (content.getChildCount() == 0) throw new AssertionError("Empty render tree: " + name);
+            }
             StringBuilder text = new StringBuilder();
             JSONArray clipped = new JSONArray();
             inspect(host.getWindow().getDecorView(), text, clipped);
+            if ("manager-chat".equals(name) && !text.toString().contains("История разговора")) throw new AssertionError("Manager history unavailable");
+            if ("manager-settings".equals(name) && !text.toString().contains("Сохранить")) throw new AssertionError("Manager settings unavailable");
+            if ("manager-summary".equals(name) && !text.toString().contains("Квартира 7")) throw new AssertionError("Manager notification missing");
             record.put("text", text.toString()).put("clipped_text", clipped);
         });
         Bitmap screenshot = getUiAutomation().takeScreenshot();

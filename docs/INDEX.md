@@ -19,7 +19,7 @@
 | UI/UX redesign, аудит возможностей | [Продуктовая и UI-карта](PRODUCT_UI_CAPABILITY_MAP.md), [API reference](API_BACKEND_REFERENCE.md) | Обновить coverage, flows, states и open decisions после реализации |
 | Объекты, квартиры, реквизиты | [Продуктовая и UI-карта](PRODUCT_UI_CAPABILITY_MAP.md), [Миграции](CHANGE_AND_MIGRATION_GUIDE.md), [Тестирование](TESTING.md) | Regression tests, API reference, текущее состояние и ADR |
 | БД, данные, PIN/access | [Изменения и миграции](CHANGE_AND_MIGRATION_GUIDE.md), [Доступы](ACCESS_AND_SECRETS.md), [Тестирование](TESTING.md) | Новую Alembic revision и migration evidence |
-| Hermes/AI | [Hermes architecture](HERMES_CORE_ARCHITECTURE.md), [Hermes migration](HERMES_CORE_MIGRATION.md), [AI map](AI_ARCHITECTURE_MAP.md) | Tests, safety contract и ADR при смене границ |
+| Hermes/AI | [Hermes architecture](HERMES_CORE_ARCHITECTURE.md), [Hermes migration](HERMES_CORE_MIGRATION.md), [AI map](AI_ARCHITECTURE_MAP.md), [Управляющий](MANAGER_AGENT.md) | Tests, safety contract и ADR при смене границ |
 | Telegram | [Deployment](DEPLOYMENT.md), [Доступы](ACCESS_AND_SECRETS.md) | Integration tests/runbook при смене webhook flow |
 | Web/static | [Карта проекта](PROJECT_MAP.md), [Тестирование](TESTING.md) | JS check и Playwright для изменённого сценария |
 | Android | `../android/RentalManager/README.md`, [Операционный runbook](OPERATIONS_RUNBOOK.md) | Версию, APK evidence и текущее состояние |

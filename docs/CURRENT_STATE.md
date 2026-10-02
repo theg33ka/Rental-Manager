@@ -1,12 +1,12 @@
 # Текущее состояние
 
-Снимок документации: 1 октября 2026 года. Перед изменениями сверяйте его с кодом и `git log`, поскольку это не release automation.
+Снимок документации: 2 октября 2026 года. Перед изменениями сверяйте его с кодом и `git log`, поскольку это не release automation.
 
 ## Runtime и данные
 
 - Backend: FastAPI + SQLAlchemy; локально SQLite, deployment рассчитан на PostgreSQL.
 - Production container: Python 3.13, `alembic upgrade head`, затем Uvicorn на `$PORT`.
-- Alembic head в исходниках: `20261001_01` (наличные платежи); production upgrade требует проверенного backup.
+- Alembic head в исходниках: `20261002_01` (очередь уведомлений управляющего); production upgrade требует проверенного backup.
 - Health-check: `/healthz`.
 - Основной source remote: GitHub `origin`; deployment remote: `amvera`.
 
@@ -33,8 +33,8 @@ Web-панель является текущей полной поверхнос
 Архив договоров сохраняет долги и историю, отключая сообщения и автоначисления. Новые коммунальные начисления округляются вверх до 10 ₽ по каждой услуге. В диалогах сохраняются Telegram-автоответы и доступна вся сохранённая история.
 
 - package: `ru.rentalmanager.mobile`;
-- `versionCode`: `13`;
-- `versionName`: `0.1.12`;
+- `versionCode`: `14`;
+- `versionName`: `0.1.13`;
 - SDK 35, min API 23 в custom build script;
 - versioned APK создаётся как `android/RentalManager/build/rental-manager-mobile-<versionName>.apk` и игнорируется Git.
 - Обновления проверяются при запуске, возвращении в приложение и через отдельный JobScheduler. APK автоматически скачивается по Wi-Fi/мобильной сети (кроме роуминга), проверяется по SHA-256/размеру/package/версии/подписи и устанавливается после системного подтверждения. Основной запрос — `/api/mobile-update`; при недоступном серверном APK используется публичный GitHub Releases этого репозитория. Публикация описана в [Android release](ANDROID_RELEASE.md).
@@ -53,3 +53,7 @@ Web-панель является текущей полной поверхнос
 - Записанный в `TESTING.md` результат является историческим; для каждой задачи фиксируйте команды, выполненные в текущем checkout.
 
 Обновляйте документ при изменении Alembic head, deployment startup, Android версии, поддерживаемых API/клиентов или статуса Hermes. Не используйте его как список коммитов.
+
+## Виртуальный управляющий
+
+Общий native tool-call цикл owner AI, безопасные read projections, backend aggregates, сохранённая очередь уведомлений, паузы кейсов и web chat реализованы. Android 0.1.13 собран локально. Проверки, ограничения и настройка: [MANAGER_AGENT.md](MANAGER_AGENT.md). Production migration, live LLM/Telegram/телефон и публикация APK не выполнялись.

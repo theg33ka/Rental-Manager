@@ -6,6 +6,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+import asyncio
+import urllib.error
+
+from fastapi import HTTPException
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from sqlalchemy import create_engine, select, func
 from sqlalchemy.orm import sessionmaker
@@ -14,6 +20,8 @@ from rental_manager.database import Base
 from rental_manager import models as m
 from rental_manager.main import situation_debt, manual_debt_debt, api_manager_chat
 from rental_manager.services.deepseek_client import DeepSeekClient, DeepSeekResult
+from rental_manager.services.telegram_bot import TelegramApiError, telegram_api_request
+from rental_manager.security.sessions import issue_session
 from rental_manager.services.ai_providers import AiProvider, build_provider_runtime, provider_chain
 from rental_manager.services.hermes.agent_core import run_agent
 from rental_manager.services.hermes.data_tools import RentalDataTools, PROJECTIONS
@@ -198,10 +206,37 @@ class ManagerAgentTests(unittest.TestCase):
         self.assertIn("tools", send.call_args.args[1])
 
     def test_switch_provider(self):
-        env = {"RENTAL_AI_PROVIDER": "compatible", "RENTAL_AI_BASE_URL": "https://example.test/v1", "RENTAL_AI_API_KEY": "test", "RENTAL_AI_MODEL": "another-model"}
+        env = {"RENTAL_AI_PROVIDER": "compatible", "RENTAL_AI_BASE_URL": "https://example.test/v1", "RENTAL_AI_API_KEY": "test", "RENTAL_AI_MODEL": "another-model",
+            "RENTAL_AI_INPUT_RUB_PER_MILLION": "100", "RENTAL_AI_OUTPUT_RUB_PER_MILLION": "400"}
         self.assertEqual(provider_chain(env), [AiProvider.COMPATIBLE])
         runtime = build_provider_runtime(AiProvider.COMPATIBLE, requested_model="unused", environ=env)
         self.assertEqual(runtime.model, "another-model")
+        from rental_manager.main import ai_estimated_cost_rub
+        with patch.dict("os.environ", env):
+            self.assertEqual(ai_estimated_cost_rub("another-model", 1000000, 2000000), 900)
+        del env["RENTAL_AI_INPUT_RUB_PER_MILLION"]
+        with self.assertRaises(ValueError):
+            build_provider_runtime(AiProvider.COMPATIBLE, requested_model="unused", environ=env)
+
+    def test_full_text_read_is_bounded_and_secrets_stay_unavailable(self):
+        original = "Сохранённая история " * 401
+        row = m.MessageLog(lease_id=self.lease.id, text=original, status="sent", channel="telegram")
+        self.session.add(row)
+        self.session.flush()
+        record = self.data.query(resource="messages")["records"][0]
+        self.assertEqual(record["truncated_fields"], ["text"])
+        pieces = []
+        offset = 0
+        while True:
+            result = self.data.read_text("messages", row.id, "text", offset)
+            self.assertLessEqual(len(result["text"]), 3000)
+            pieces.append(result["text"])
+            if not result["has_more"]:
+                break
+            offset = result["next_offset"]
+        self.assertEqual("".join(pieces), original)
+        with self.assertRaises(ValueError):
+            self.data.read_text("payments", 1, "recipient_details")
 
     def test_pause_until_monday_reconcile_then_follow_up(self):
         friday = datetime(2026, 10, 2, 11)
@@ -287,6 +322,95 @@ class ManagerAgentTests(unittest.TestCase):
         response = api_manager_chat({"text": "До понедельника не трогай", "case_id": case.id}, self.session)
         self.assertIn("приостановлены", response["reply"])
         self.assertEqual(self.session.scalar(select(func.count(m.AiMessage.id))), 2)
+
+    def test_payment_delay_reconciles_both_channels_and_old_unknown(self):
+        self.charge.ip_paid = 10000
+        self.charge.personal_paid = 2000
+        self.session.add_all([
+            m.PaymentReceipt(rent_charge_id=self.charge.id, amount=6000, channel="ip", paid_at=datetime(2026, 10, 1)),
+            m.PaymentReceipt(rent_charge_id=self.charge.id, amount=4000, channel="ip", paid_at=datetime(2026, 10, 3)),
+            m.PaymentReceipt(rent_charge_id=self.charge.id, amount=2000, channel="personal", paid_at=datetime(2026, 10, 6)),
+            m.RentCharge(lease=self.lease, period_start=date(2026, 9, 1), period_end=date(2026, 9, 30),
+                due_date=date(2026, 9, 1), ip_due=10000, ip_paid=10000)])
+        self.session.flush()
+        result = self.data.payment_timing(start="2026-09-01", end="2026-10-31")
+        group = result["tenants"][0]
+        self.assertEqual((group["known_paid"], group["paid_late"], group["unknown"]), (1, 1, 1))
+        self.assertEqual(group["charges"][0]["paid_on"], "2026-10-06")
+        self.charge.ip_paid = 9000
+        self.session.flush()
+        with patch("rental_manager.models.utc_now", return_value=datetime(2026, 10, 10)):
+            result = self.data.payment_timing(start="2026-09-01", end="2026-10-31")
+        self.assertEqual(result["tenants"][0]["currently_late"], 1)
+
+    def test_payment_delay_refunds_are_unknown_and_deferral_is_explicit(self):
+        self.charge.ip_paid = 10000
+        self.charge.personal_due = 0
+        self.charge.deferral_until = date(2026, 10, 7)
+        self.session.add(m.PaymentReceipt(rent_charge_id=self.charge.id, amount=10000, channel="ip", paid_at=datetime(2026, 10, 6)))
+        self.session.flush()
+        self.assertEqual(self.data.payment_timing(start="2026-10-01", end="2026-10-31")["tenants"][0]["paid_late"], 1)
+        self.assertEqual(self.data.payment_timing(start="2026-10-01", end="2026-10-31", original_due=False)["tenants"][0]["paid_late"], 0)
+        self.session.add_all([m.PaymentReceipt(rent_charge_id=self.charge.id, amount=-100, channel="ip"),
+            m.PaymentReceipt(rent_charge_id=self.charge.id, amount=100, channel="ip")])
+        self.session.flush()
+        self.assertEqual(self.data.payment_timing(start="2026-10-01", end="2026-10-31")["tenants"][0]["unknown"], 1)
+
+    def test_delivery_rate_limit_retries_only_after_delay(self):
+        row = queue(self.session, key="limited", text="Проверка", level="critical", cfg=NotificationConfig())[0]
+        now = datetime(2026, 10, 2, 5)
+        def limited(text):
+            raise TelegramApiError("limit", status_code=429, retry_after=120)
+        deliver_telegram(self.session, limited, now=now)
+        self.assertEqual(row.status, "failed")
+        deliver_telegram(self.session, lambda text: self.fail("Early retry"), now=now + timedelta(seconds=30))
+        deliver_telegram(self.session, lambda text: {"ok": True, "result": {"message_id": 42}}, now=now + timedelta(minutes=3))
+        self.assertEqual(row.status, "sent")
+        self.assertEqual(row.attempts, 2)
+
+    def test_interrupted_delivery_requires_explicit_checked_retry(self):
+        from rental_manager.main import api_manager_retry_notification
+        row = queue(self.session, key="interrupted", text="Проверка", level="critical", cfg=NotificationConfig())[0]
+        row.status = "sending"
+        row.next_attempt_at = datetime(2026, 10, 1)
+        self.session.commit()
+        deliver_telegram(self.session, lambda text: self.fail("Interrupted send must not repeat"))
+        self.assertEqual(row.status, "uncertain")
+        with self.assertRaises(HTTPException):
+            api_manager_retry_notification(row.id, {}, self.session)
+        api_manager_retry_notification(row.id, {"checked_telegram": True}, self.session)
+        self.assertEqual(row.status, "pending")
+        self.assertIsNotNone(self.session.scalar(select(m.DomainEvent).where(m.DomainEvent.event_type == "manager_notification_retry_requested")))
+
+    def test_telegram_no_network_retry_when_delivery_is_uncertain(self):
+        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("timeout")) as transport:
+            with self.assertRaises(TelegramApiError):
+                telegram_api_request("synthetic", "sendMessage", {"chat_id": "test", "text": "test"}, retry_network=False)
+        self.assertEqual(transport.call_count, 1)
+
+    def test_manager_routes_require_owner_and_csrf(self):
+        from rental_manager import main
+        factory = sessionmaker(bind=self.engine)
+        paths = [("GET", "/api/hermes/chat"), ("POST", "/api/hermes/chat"),
+            ("PUT", "/api/hermes/notification-settings"), ("POST", "/api/hermes/notifications/1/retry"),
+            ("POST", "/api/hermes/notifications/1/delivered")]
+        self.session.commit()
+        async def next_handler(request):
+            return JSONResponse({"ok": True})
+        for role in (None, "guest", "owner"):
+            with factory() as session:
+                issued = issue_session(session, role) if role else None
+            for method, path in paths:
+                for valid_csrf in (False, True):
+                    headers = [] if not issued else [(b"cookie", f"rental_manager_panel_session={issued.token}".encode())]
+                    if issued and valid_csrf:
+                        headers.append((b"x-csrf-token", issued.csrf_token.encode()))
+                    request = Request({"type": "http", "method": method, "path": path, "headers": headers,
+                        "query_string": b"", "server": ("test", 80), "client": ("127.0.0.1", 123), "scheme": "http"})
+                    with patch.object(main, "SessionLocal", factory):
+                        result = asyncio.run(main.panel_auth_middleware(request, next_handler))
+                    expected = 401 if role is None else 403 if role == "guest" or (method != "GET" and not valid_csrf) else 200
+                    self.assertEqual(result.status_code, expected, (role, method, valid_csrf))
 
 
 if __name__ == "__main__":

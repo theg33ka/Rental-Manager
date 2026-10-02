@@ -3521,6 +3521,15 @@ def hermes_control_center_payload(session: Session) -> dict[str, Any]:
     result["settings"] = hermes_settings_payload(session)
     result["manager"] = manager_status(session)
     result["notification_config"] = manager_notifications.config(session).model_dump()
+    cfg = manager_notifications.config(session)
+    archived = ignored_lease_ids(session) | set(session.scalars(select(Lease.id).where(Lease.notes.contains(IGNORE_LEASE_MARK))).all())
+    now = utc_now()
+    result["attention_case_ids"] = [item.id for item in session.scalars(select(OperationalCase)).all()
+        if item.status in {"new", "active", "waiting_owner", "waiting_tenant", "auto_monitoring"}
+        and item.contract_id not in archived and not (item.suppression_until and item.suppression_until > now)
+        and manager_notifications.importance(item, cfg) in {"attention", "critical"}
+        and (int(json.loads(item.metadata_json or "{}").get("days_overdue") or 0) <= cfg.historical_days
+             or (item.next_review_at and item.next_review_at <= now and item.waiting_for == "owner"))]
     result["notifications"] = [manager_notifications.serialize(row) for row in session.scalars(
         select(AgentNotification).order_by(AgentNotification.id.desc()).limit(50)).all()]
     result["briefing_preview"] = briefing_preview(
@@ -3539,11 +3548,13 @@ def api_hermes_control_center(session: Session = Depends(get_session)) -> dict[s
 
 def manager_status(session: Session) -> dict[str, Any]:
     last_ok = session.scalar(select(HermesAgentRun).where(HermesAgentRun.status == "completed",
-        HermesAgentRun.model != "no_llm").order_by(HermesAgentRun.id.desc()).limit(1))
+        HermesAgentRun.model != "no_llm").order_by(HermesAgentRun.completed_at.desc(), HermesAgentRun.id.desc()).limit(1))
     last_error = session.scalar(select(HermesAgentRun).where(HermesAgentRun.status == "failed")
-        .order_by(HermesAgentRun.id.desc()).limit(1))
+        .order_by(HermesAgentRun.completed_at.desc(), HermesAgentRun.id.desc()).limit(1))
     enabled = ai_enabled(session)
-    state = "disabled" if not enabled else "error" if last_error and (not last_ok or last_error.id > last_ok.id) else "working" if last_ok else "untested"
+    state = "disabled" if not enabled else "error" if last_error and (not last_ok or (last_error.completed_at or last_error.started_at) > (last_ok.completed_at or last_ok.started_at)) else "working" if last_ok else "untested"
+    heartbeat = session.get(AppSetting, "manager_worker_heartbeat")
+    worker_at = datetime.fromisoformat(heartbeat.value) if heartbeat and heartbeat.value else None
     try:
         provider = provider_chain()[0].value
     except AiProviderConfigError:
@@ -3559,6 +3570,8 @@ def manager_status(session: Session) -> dict[str, Any]:
             HermesAgentRun.started_at >= utc_now() - timedelta(days=1))) or 0,
         "telegram": "configured" if telegram_token(session) and telegram_owner_chat_id(session) else "not_configured",
         "push": "android_polling", "worker_started": REMINDER_WORKER_STARTED,
+        "worker_last_success": worker_at.isoformat() if worker_at else None,
+        "worker_healthy": bool(worker_at and utc_now() - worker_at < timedelta(minutes=35)),
         "last_daily_summary": manager_notifications.serialize(summary) if summary else None}
 
 
@@ -3596,7 +3609,12 @@ def api_manager_chat(payload: dict[str, Any], session: Session = Depends(get_ses
     if not text or len(text) > 6000:
         raise HTTPException(400, "Введите вопрос длиной до 6000 символов")
     case_id = payload.get("case_id")
-    case = session.get(OperationalCase, int(case_id)) if case_id else None
+    try:
+        case = session.get(OperationalCase, int(case_id)) if case_id else None
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(400, "Неверный номер кейса") from exc
+    if case_id and case is None:
+        raise HTTPException(404, "Кейс не найден")
     conversation = ai_conversation(session, "panel-owner", "owner")
     if is_commitment_phrase(text):
         matches = [case] if case else resolve_case_alias(session, text)
@@ -3612,10 +3630,37 @@ def api_manager_chat(payload: dict[str, Any], session: Session = Depends(get_ses
     selected = build_hermes_owner_context(session, chat_id="panel-owner", user_text=text, model=model)
     conversation, envelope = call_agent_envelope(session, chat_id="panel-owner", actor_role="owner", lease=None,
         system_prompt="Ты управляющий Rental Manager. Панель: только чтение; actions должен быть пустым.",
-        context=selected.text, user_text=text, model=model, max_tokens=1800, manifest=selected.manifest)
+        context=selected.text + (f"\nВладелец открыл кейс {case.id}; текущий вопрос относится к нему. Прочитай case и case_memory через tools." if case else ""),
+        user_text=text, model=model, max_tokens=1800, manifest=selected.manifest)
     update_conversation_summary(session, conversation)
     session.commit()
     return {"reply": envelope.reply}
+
+
+@app.get("/api/hermes/chat")
+def api_manager_chat_history(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
+    conversation = ai_conversation(session, "panel-owner", "owner")
+    rows = session.scalars(select(AiMessage).where(AiMessage.conversation_id == conversation.id,
+        AiMessage.role.in_(["user", "assistant"])).order_by(AiMessage.id.desc()).limit(40)).all()
+    return [{"role": row.role, "text": row.text, "created_at": row.created_at.isoformat()} for row in reversed(rows)]
+
+
+@app.post("/api/hermes/notifications/{notification_id}/retry")
+def api_manager_retry_notification(notification_id: int, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
+    row = session.get(AgentNotification, notification_id)
+    if not row or row.channel != "telegram":
+        raise HTTPException(404, "Уведомление не найдено")
+    if row.status not in {"uncertain", "rejected"}:
+        raise HTTPException(409, "Это уведомление не требует ручного повтора")
+    if payload.get("checked_telegram") is not True:
+        raise HTTPException(400, "Сначала проверьте, что сообщение не пришло в Telegram")
+    row.status = "pending"
+    row.next_attempt_at = None
+    row.error = ""
+    emit_domain_event(session, "manager_notification_retry_requested", entity_type="AgentNotification",
+        entity_id=str(row.id), actor_type="owner", payload={"checked_telegram": True})
+    session.commit()
+    return manager_notifications.serialize(row)
 
 
 def run_manager_notifications(session: Session) -> int:
@@ -3634,11 +3679,16 @@ def run_manager_notifications(session: Session) -> int:
     archived = ignored_lease_ids(session) | set(session.scalars(select(Lease.id).where(Lease.notes.contains(IGNORE_LEASE_MARK))).all())
     manager_notifications.reconcile_notifications(session, render=render, excluded_leases=archived,
         daily_enabled=setting_bool_value(get_setting_value(session, "hermes_briefing_enabled")))
+    heartbeat = session.get(AppSetting, "manager_worker_heartbeat")
+    if heartbeat:
+        heartbeat.value = utc_now().isoformat()
+    else:
+        session.add(AppSetting(key="manager_worker_heartbeat", value=utc_now().isoformat()))
     session.commit()
     owner = telegram_owner_chat_id(session)
     if not owner or not telegram_token(session):
         return 0
-    return manager_notifications.deliver_telegram(session, lambda text: send_telegram_text(session, owner, text))
+    return manager_notifications.deliver_telegram(session, lambda text: send_telegram_text(session, owner, text, retry_network=False))
 
 
 @app.get("/api/hermes/overview")
@@ -8741,7 +8791,7 @@ def handle_tenant_receipt_message(session: Session, message: dict[str, Any], lin
 
 def send_telegram_text(
     session: Session, chat_id: int | str, text: str, keyboard: dict[str, Any] | None = None,
-    *, record_history: bool = True,
+    *, record_history: bool = True, retry_network: bool = True,
 ) -> dict[str, Any]:
     tenant_ids = [int(key) for key, value in get_tenant_links(session).items() if str(value) == str(chat_id) and str(key).isdigit()]
     lease = session.scalar(
@@ -8757,7 +8807,7 @@ def send_telegram_text(
         runtime_log("TELEGRAM", f"send skipped chat_id={chat_id} reason=missing_token")
         raise HTTPException(400, "Не задан токен Telegram-бота")
     try:
-        result = send_message(token, chat_id, text, reply_markup=keyboard)
+        result = send_message(token, chat_id, text, reply_markup=keyboard, **({"retry_network": False} if not retry_network else {}))
         if record_history:
             session.add(MessageLog(
                 lease_id=lease.id if lease else None,
@@ -8938,6 +8988,10 @@ def ai_estimated_cost_rub(
     completion_tokens: int,
     usd_rub_rate: float = AI_DEFAULT_USD_RUB_RATE,
 ) -> float:
+    if os.environ.get("RENTAL_AI_PROVIDER") == "compatible":
+        from rental_manager.services.ai_providers import compatible_prices
+        input_rub, output_rub = compatible_prices()
+        return money((prompt_tokens * input_rub + completion_tokens * output_rub) / 1_000_000)
     price_key = ai_model_price_key(model)
     input_usd, output_usd = AI_MODEL_PRICES_USD_PER_M.get(
         price_key,

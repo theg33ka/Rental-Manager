@@ -27,7 +27,7 @@ const state = {
   quickReadingArmedUntil: 0,
   performance: null,
   hermes: null,
-  hermesCaseFilters: { status: "", severity: "", propertyId: "" },
+  hermesCaseFilters: { status: "attention", severity: "", propertyId: "" },
   loadFailures: [],
 };
 
@@ -1355,12 +1355,13 @@ function renderHermes() {
   Object.entries(settingFields).forEach(([id, key]) => { const input = qs(`#${id}`); if (input) input.value = config[key] ?? ""; });
   if (qs("#managerNotifyEnabled")) qs("#managerNotifyEnabled").checked = Boolean(config.enabled);
   const notificationRoot = qs("#managerNotifications");
-  const deliveryLabels = { pending: "ожидает отправки", sending: "отправляется", sent: "отправлено", delivered: "показано на телефоне", read: "прочитано", uncertain: "отправка не подтверждена", cancelled: "отменено", failed: "ошибка" };
-  if (notificationRoot) notificationRoot.innerHTML = (data.notifications || []).slice(0, 15).map((item) => `<p>${escapeHtml(item.text)}<br><small>${formatDateTime(item.created_at)} · ${escapeHtml(item.channel)} · ${escapeHtml(deliveryLabels[item.status] || item.status)}${item.case_id ? ` · <button class="link-button" onclick="showHermesCase(${Number(item.case_id)})">История ситуации</button>` : ""}</small></p>`).join("") || "Уведомлений пока нет.";
+  const deliveryLabels = { pending: "ожидает отправки", sending: "отправляется", sent: "отправлено", delivered: "показано на телефоне", read: "прочитано", uncertain: "отправка не подтверждена", rejected: "отклонено Telegram", cancelled: "отменено", failed: "ожидает повтора" };
+  if (notificationRoot) notificationRoot.innerHTML = (data.notifications || []).slice(0, 15).map((item) => `<p>${escapeHtml(item.text)}<br><small>${formatDateTime(item.created_at)} · ${escapeHtml(item.channel)} · ${escapeHtml(deliveryLabels[item.status] || item.status)}${item.case_id ? ` · <button class="link-button" onclick="showHermesCase(${Number(item.case_id)})">История ситуации</button>` : ""}${["uncertain", "rejected"].includes(item.status) ? ` · <button class="link-button" onclick="retryManagerNotification(${Number(item.id)})">Повторить отправку</button>` : ""}</small></p>`).join("") || "Уведомлений пока нет.";
+  if (healthRoot) healthRoot.textContent += ` · последняя фоновая проверка: ${health.worker_last_success ? formatDateTime(health.worker_last_success) : "нет"}${health.worker_healthy ? "" : " (нет свежего подтверждения)"}`;
   const overviewRoot = qs("#hermesOverview");
   if (overviewRoot) {
     overviewRoot.innerHTML = [
-      ["Требуют решения", overview.waiting_owner || 0, `${overview.auto_monitoring || 0} обрабатывает автоматика`],
+      ["Требуют внимания", (data.attention_case_ids || []).length, `${overview.auto_monitoring || 0} обрабатывает автоматика`],
       ["Подтверждения", overview.pending_proposals || 0, "изменения данных"],
       ["Запланировано", overview.scheduled_actions || 0, "обязательства"],
       ["Стоимость за месяц", money(overview.cost_month_rub || 0), `прогноз ${money(overview.monthly_forecast_rub || 0)}`],
@@ -1370,7 +1371,7 @@ function renderHermes() {
 
   const filters = state.hermesCaseFilters;
   const filteredCases = (data.cases || []).filter((item) =>
-    (!filters.status || item.status === filters.status)
+    (!filters.status || (filters.status === "attention" ? (data.attention_case_ids || []).includes(item.id) : item.status === filters.status))
     && (!filters.severity || item.severity === filters.severity)
     && (!filters.propertyId || String(item.property_id || "") === filters.propertyId)
   );
@@ -1453,6 +1454,23 @@ async function showHermesCase(caseId) {
   state.managerCaseId = caseId;
   root.innerHTML = `<div class="section-title"><div><h3>${escapeHtml(item.label)} · ${escapeHtml(item.title)}</h3><span>${escapeHtml(hermesStatus(item.status))}</span></div><button class="mini" onclick="state.managerCaseId=null; this.closest('#hermesCaseDetails').hidden=true">Закрыть</button></div><p>${escapeHtml(item.rolling_summary)}</p><p>Решение можно написать управляющему выше: оно будет связано с этим кейсом.</p>${(item.commitments || []).map((c) => `<p>${escapeHtml(c.description)} · контроль ${formatDateTime(c.due_at)}</p>`).join("")}${(item.history || []).map((e) => `<p>${formatDateTime(e.occurred_at)} — ${escapeHtml(hermesTechnicalLabel(e.event_type))} ${escapeHtml(e.payload?.description || e.payload?.reason || "")}</p>`).join("")}`;
   root.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+async function showManagerHistory() {
+  try {
+    const rows = await api("/api/hermes/chat");
+    qs("#managerAnswer").textContent = rows.map(item => `${item.role === "user" ? "Вы" : "Управляющий"}: ${item.text}`).join("\n\n") || "Переписка пока пуста.";
+  } catch (error) { qs("#managerAnswer").textContent = error.message; }
+}
+
+async function retryManagerNotification(id) {
+  if (!confirm("Проверьте Telegram: сообщение точно не пришло? Повторная отправка может создать дубль.")) return;
+  try {
+    await api(`/api/hermes/notifications/${id}/retry`, { method: "POST", body: JSON.stringify({ checked_telegram: true }) });
+    const item = state.hermes.notifications.find(row => row.id === id);
+    if (item) item.status = "pending";
+    renderHermes();
+  } catch (error) { alert(error.message); }
 }
 
 async function askManager(event) {

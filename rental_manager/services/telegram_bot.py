@@ -9,7 +9,10 @@ from typing import Any
 
 
 class TelegramApiError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status_code: int | None = None, retry_after: int = 0):
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after = retry_after
 
 
 def normalize_bot_token(value: str | None) -> str:
@@ -118,10 +121,11 @@ def owner_commands() -> list[dict[str, str]]:
     ]
 
 
-def telegram_api_request(token: str, method: str, payload: dict[str, Any]) -> dict[str, Any]:
+def telegram_api_request(token: str, method: str, payload: dict[str, Any], *, retry_network: bool = True) -> dict[str, Any]:
     data = json.dumps(payload).encode("utf-8")
     last_error: BaseException | None = None
-    for attempt in range(3):
+    attempts = 3 if retry_network else 1
+    for attempt in range(attempts):
         req = urllib.request.Request(
             f"https://api.telegram.org/bot{token}/{method}",
             data=data,
@@ -132,6 +136,7 @@ def telegram_api_request(token: str, method: str, payload: dict[str, Any]) -> di
             with urllib.request.urlopen(req, timeout=20) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
+            error_payload = {}
             body = exc.read().decode("utf-8", errors="replace")
             try:
                 error_payload = json.loads(body)
@@ -140,20 +145,21 @@ def telegram_api_request(token: str, method: str, payload: dict[str, Any]) -> di
                 description = body
             if exc.code == 404 and str(description).strip().lower() == "not found":
                 description = "Not Found: Telegram не узнаёт токен бота. Проверь token в настройках."
-            raise TelegramApiError(f"Telegram API {method} failed: {description}") from exc
+            raise TelegramApiError(f"Telegram API {method} failed: {description}", status_code=exc.code,
+                retry_after=int((error_payload.get("parameters") or {}).get("retry_after") or 0)) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             last_error = exc
-            if attempt < 2:
+            if attempt < attempts - 1:
                 time.sleep(0.5 * (attempt + 1))
                 continue
     raise TelegramApiError(f"Telegram API {method} request failed: {last_error}")
 
 
-def send_message(token: str, chat_id: int | str, text: str, reply_markup: dict[str, Any] | None = None) -> dict[str, Any]:
+def send_message(token: str, chat_id: int | str, text: str, reply_markup: dict[str, Any] | None = None, *, retry_network: bool = True) -> dict[str, Any]:
     payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
     if reply_markup:
         payload["reply_markup"] = reply_markup
-    return telegram_api_request(token, "sendMessage", payload)
+    return telegram_api_request(token, "sendMessage", payload, **({"retry_network": False} if not retry_network else {}))
 
 
 def answer_callback_query(token: str, callback_query_id: str, text: str = "") -> dict[str, Any]:

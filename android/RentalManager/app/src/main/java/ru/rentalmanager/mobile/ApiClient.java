@@ -54,6 +54,10 @@ final class ApiClient {
         return request("PATCH", path, body == null ? new JSONObject() : body);
     }
 
+    JSONObject putJson(String path, JSONObject body) throws Exception {
+        return request("PUT", path, body);
+    }
+
     JSONObject deleteJson(String path) throws Exception {
         return request("DELETE", path, null);
     }
@@ -120,7 +124,7 @@ final class ApiClient {
             connection = (HttpURLConnection) url.openConnection();
             connection.setRequestMethod(method);
             connection.setConnectTimeout(10000);
-            connection.setReadTimeout(20000);
+            connection.setReadTimeout("/api/hermes/chat".equals(path) ? 200000 : 20000);
             connection.setRequestProperty("Accept", "application/json");
             connection.setRequestProperty("User-Agent", "RentalManagerAndroidNative/0.1.0");
             String cookie = cookieHeader();

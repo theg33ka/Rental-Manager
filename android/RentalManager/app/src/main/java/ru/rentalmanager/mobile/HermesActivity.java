@@ -39,6 +39,9 @@ public class HermesActivity extends Activity {
     private ApiClient api;
     private LinearLayout content;
     private TextView subtitle;
+    private int selectedCaseId;
+    private boolean chatRunning;
+    private String lastAnswer = "";
 
     interface Job {
         Object run() throws Exception;
@@ -64,7 +67,7 @@ public class HermesActivity extends Activity {
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.VERTICAL);
         header.setPadding(dp(18), dp(18), dp(18), dp(10));
-        TextView title = text("Hermes Core", 30, true);
+        TextView title = text("Управляющий", 30, true);
         subtitle = text("Загружаю центр управления AI", 13, false);
         subtitle.setTextColor(muted);
         header.addView(title);
@@ -77,6 +80,7 @@ public class HermesActivity extends Activity {
         nav.setOrientation(LinearLayout.HORIZONTAL);
         nav.setPadding(dp(12), 0, dp(12), dp(10));
         nav.addView(navButton("Сводка", v -> loadSummary()));
+        nav.addView(navButton("Чат", v -> renderChat()));
         nav.addView(navButton("Кейсы", v -> loadCases()));
         nav.addView(navButton("Подтверждения", v -> loadProposals()));
         nav.addView(navButton("Обязательства", v -> loadCommitments()));
@@ -102,10 +106,21 @@ public class HermesActivity extends Activity {
         JSONObject overview = data.optJSONObject("overview");
         if (overview == null) overview = new JSONObject();
         subtitle.setText(overview.optBoolean("enabled") ? "Hermes включён" : "Hermes выключен в настройках");
+        JSONObject health = data.optJSONObject("manager");
+        if (health != null) {
+            LinearLayout healthCard = card();
+            String status = health.optString("status");
+            healthCard.addView(text("AI: " + ("working".equals(status) ? "работает" : "error".equals(status) ? "ошибка" : "disabled".equals(status) ? "отключён" : "ещё не проверен"), 19, true));
+            healthCard.addView(hint(health.optString("provider") + " / " + health.optString("model")));
+            healthCard.addView(hint("Последний успех: " + health.optString("last_success", "нет") + "\nОшибок за сутки: " + health.optInt("errors_24h")));
+            healthCard.addView(primaryButton("Спросить управляющего", v -> renderChat()));
+            content.addView(healthCard);
+        }
         LinearLayout metrics = card();
         metrics.addView(text("Операционный контур", 19, true));
-        metrics.addView(metric("Активные кейсы", String.valueOf(overview.optInt("active_cases"))));
-        metrics.addView(metric("Ждут владельца", String.valueOf(overview.optInt("waiting_owner"))));
+        metrics.addView(metric("Под контролем автоматики", String.valueOf(overview.optInt("auto_monitoring"))));
+        JSONArray attention = data.optJSONArray("attention_case_ids");
+        metrics.addView(metric("Требуют внимания", String.valueOf(attention == null ? 0 : attention.length())));
         metrics.addView(metric("Ждут жильца", String.valueOf(overview.optInt("waiting_tenant"))));
         metrics.addView(metric("Нужны подтверждения", String.valueOf(overview.optInt("pending_proposals"))));
         metrics.addView(metric("Стоимость за месяц", money(overview.optDouble("cost_month_rub"))));
@@ -125,6 +140,19 @@ public class HermesActivity extends Activity {
         actions.addView(secondaryButton("Открыть подтверждения", v -> loadProposals()));
         actions.addView(secondaryButton("Открыть обязательства", v -> loadCommitments()));
         content.addView(actions);
+        JSONArray notices = data.optJSONArray("notifications");
+        if (notices != null) for (int i = 0; i < notices.length() && i < 10; i++) {
+            JSONObject notice = notices.optJSONObject(i);
+            if (notice == null) continue;
+            LinearLayout noticeCard = card();
+            noticeCard.addView(text(notice.optString("text"), 15, false));
+            String delivery = notice.optString("status");
+            String label = "sent".equals(delivery) ? "отправлено" : "delivered".equals(delivery) ? "показано на телефоне" : "uncertain".equals(delivery) ? "отправка не подтверждена" : "rejected".equals(delivery) ? "отклонено Telegram" : "cancelled".equals(delivery) ? "отменено" : "ожидает отправки";
+            noticeCard.addView(hint(notice.optString("channel") + " · " + label + " · " + notice.optString("created_at")));
+            int caseId = notice.optInt("case_id");
+            if (caseId > 0) noticeCard.addView(secondaryButton("История и ответ", v -> loadCaseDetails(caseId)));
+            content.addView(noticeCard);
+        }
     }
 
     private void loadCases() {
@@ -157,16 +185,75 @@ public class HermesActivity extends Activity {
     }
 
     private void showCaseDialog(JSONObject item) {
+        StringBuilder historyText = new StringBuilder();
+        JSONArray history = item.optJSONArray("commitments");
+        if (history != null) for (int i = 0; i < history.length(); i++) {
+            JSONObject entry = history.optJSONObject(i);
+            if (entry != null) historyText.append("\n").append(entry.optString("description")).append(" · ").append(entry.optString("due_at"));
+        }
         String body = item.optString("rolling_summary")
             + "\n\nСтатус: " + item.optString("status")
             + "\nОжидается: " + item.optString("waiting_for", "—")
             + "\nСледующая проверка: " + item.optString("next_review_at", "—")
-            + "\n\nИстория: " + item.optJSONArray("history");
+            + "\n\nРешения и сообщения:" + historyText;
         new AlertDialog.Builder(this)
             .setTitle(item.optString("label") + " · " + item.optString("title"))
             .setMessage(body)
+            .setNeutralButton("Ответить по кейсу", (dialog, which) -> { selectedCaseId = item.optInt("id"); renderChat(); })
             .setPositiveButton("Закрыть", null)
             .show();
+    }
+
+    private void renderChat() {
+        content.removeAllViews();
+        subtitle.setText(selectedCaseId > 0 ? "Разговор по кейсу #" + selectedCaseId : "Вопросы управляющему");
+        LinearLayout chat = card();
+        TextView answer = text(lastAnswer.isEmpty() ? "Можно спросить о договоре, истории платежей или дать решение по открытому кейсу." : lastAnswer, 16, false);
+        answer.setTextIsSelectable(true);
+        chat.addView(answer);
+        EditText question = new EditText(this);
+        question.setTextColor(text);
+        question.setHintTextColor(muted);
+        question.setHint("Ваш вопрос или решение");
+        question.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+        question.setMinLines(2);
+        question.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(6000)});
+        chat.addView(question, new LinearLayout.LayoutParams(-1, -2));
+        Button send = primaryButton(chatRunning ? "Проверяю данные…" : "Отправить", null);
+        send.setEnabled(!chatRunning);
+        send.setOnClickListener(v -> {
+            String value = question.getText().toString().trim();
+            if (value.isEmpty()) return;
+            JSONObject body = new JSONObject();
+            try { body.put("text", value); if (selectedCaseId > 0) body.put("case_id", selectedCaseId); }
+            catch (Exception exception) { toast("Проверьте вопрос"); return; }
+            chatRunning = true;
+            send.setEnabled(false);
+            answer.setText("Проверяю данные…");
+            new Thread(() -> {
+                String response;
+                try { response = api.postJson("/api/hermes/chat", body).optString("reply"); }
+                catch (Exception exception) { response = "Не удалось завершить запрос: " + exception.getMessage(); }
+                final String result = response;
+                runOnUiThread(() -> {
+                    chatRunning = false;
+                    lastAnswer = result;
+                    if (!isFinishing() && !isDestroyed()) { answer.setText(result); send.setEnabled(true); }
+                });
+            }, "manager-chat").start();
+        });
+        chat.addView(send);
+        chat.addView(secondaryButton("История разговора", v -> runApi("Загружаю переписку", () -> api.getArray("/api/hermes/chat"), value -> {
+            JSONArray rows = (JSONArray) value;
+            StringBuilder transcript = new StringBuilder();
+            for (int i = 0; i < rows.length(); i++) {
+                JSONObject entry = rows.optJSONObject(i);
+                if (entry != null) transcript.append("user".equals(entry.optString("role")) ? "Вы: " : "Управляющий: ").append(entry.optString("text")).append("\n\n");
+            }
+            answer.setText(transcript.length() == 0 ? "Переписка пока пуста." : transcript.toString());
+        })));
+        if (selectedCaseId > 0) chat.addView(secondaryButton("Новый общий вопрос", v -> { selectedCaseId = 0; renderChat(); }));
+        content.addView(chat);
     }
 
     private void loadProposals() {
@@ -300,6 +387,51 @@ public class HermesActivity extends Activity {
             runApi("Сохраняю настройки", () -> api.postJson("/api/android/hermes/settings", body), value -> toast("Настройки сохранены"));
         }));
         content.addView(card);
+        content.addView(secondaryButton("Каналы и время уведомлений", v -> runApi("Загружаю уведомления",
+            () -> api.getJson("/api/hermes"), value -> renderNotificationSettings(((JSONObject) value).optJSONObject("notification_config")))));
+    }
+
+    private void renderNotificationSettings(JSONObject config) {
+        if (config == null) { toast("Настройки недоступны"); return; }
+        content.removeAllViews();
+        subtitle.setText("Уведомления управляющего");
+        LinearLayout panel = card();
+        CheckBox enabled = check("Проактивные сообщения", config.optBoolean("enabled", true));
+        panel.addView(enabled);
+        String[] keys = {"telegram", "push", "both", "critical_push"};
+        Spinner channel = new Spinner(this);
+        channel.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
+            new String[]{"Telegram", "Телефон", "Оба канала", "Критичные на телефон, остальные Telegram"}));
+        for (int i = 0; i < keys.length; i++) if (keys[i].equals(config.optString("mode"))) channel.setSelection(i);
+        panel.addView(channel);
+        EditText start = hourField(panel, "Тихие часы с", config.optInt("quiet_start", 22));
+        EditText end = hourField(panel, "До", config.optInt("quiet_end", 8));
+        EditText daily = hourField(panel, "Час ежедневной сводки", config.optInt("daily_hour", 19));
+        CheckBox tone = check("Разговорный тон", "conversational".equals(config.optString("tone")));
+        panel.addView(tone);
+        panel.addView(primaryButton("Сохранить", v -> {
+            try {
+                int startHour = Integer.parseInt(start.getText().toString());
+                int endHour = Integer.parseInt(end.getText().toString());
+                int dailyHour = Integer.parseInt(daily.getText().toString());
+                if (startHour < 0 || startHour > 23 || endHour < 0 || endHour > 23 || dailyHour < 0 || dailyHour > 23) throw new IllegalArgumentException();
+                config.put("enabled", enabled.isChecked()); config.put("mode", keys[channel.getSelectedItemPosition()]);
+                config.put("quiet_start", startHour); config.put("quiet_end", endHour); config.put("daily_hour", dailyHour);
+                config.put("tone", tone.isChecked() ? "conversational" : "calm");
+                runApi("Сохраняю", () -> api.putJson("/api/hermes/notification-settings", config), value -> toast("Настройки сохранены"));
+            } catch (Exception exception) { toast("Укажите часы от 0 до 23"); }
+        }));
+        content.addView(panel);
+    }
+
+    private EditText hourField(LinearLayout panel, String label, int value) {
+        panel.addView(hint(label));
+        EditText field = new EditText(this);
+        field.setTextColor(text);
+        field.setInputType(InputType.TYPE_CLASS_NUMBER);
+        field.setText(String.valueOf(value));
+        panel.addView(field);
+        return field;
     }
 
     private void runApi(String loading, Job job, Done done) {

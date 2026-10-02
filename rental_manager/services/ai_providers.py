@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 import os
+import math
 from typing import Any, Protocol
 
 from rental_manager.services.deepseek_client import DeepSeekClient, DeepSeekResult
@@ -104,8 +105,20 @@ class CompatibleProviderAdapter:
         model = _env(environ, "RENTAL_AI_MODEL")
         if not base.startswith("https://") or not key or not model:
             raise AiProviderConfigError("Задайте RENTAL_AI_BASE_URL (https), RENTAL_AI_API_KEY и RENTAL_AI_MODEL")
+        compatible_prices(environ)
         return AiProviderRuntime(AiProvider.COMPATIBLE, model,
             DeepSeekClient(base, key, timeout_seconds=60, provider_name="compatible"))
+
+
+def compatible_prices(environ: Mapping[str, str] | None = None) -> tuple[float, float]:
+    source = environ if environ is not None else os.environ
+    try:
+        rates = (float(source["RENTAL_AI_INPUT_RUB_PER_MILLION"]), float(source["RENTAL_AI_OUTPUT_RUB_PER_MILLION"]))
+        if any(not math.isfinite(rate) or rate < 0 for rate in rates):
+            raise ValueError("Invalid rate")
+        return rates
+    except (KeyError, ValueError) as exc:
+        raise AiProviderConfigError("Задайте тарифы RENTAL_AI_INPUT_RUB_PER_MILLION и RENTAL_AI_OUTPUT_RUB_PER_MILLION для контроля бюджета") from exc
 
 
 class DeepSeekProviderAdapter:

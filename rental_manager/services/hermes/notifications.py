@@ -15,6 +15,7 @@ from rental_manager.models import (AgentNotification, AppSetting, HermesAgentRun
 from rental_manager.services.hermes.cases import OPEN_CASE_STATUSES, case_label, reconcile_operational_cases
 from rental_manager.services.hermes.events import stable_hash
 from rental_manager.services.hermes.memory import reconcile_owner_commitments
+from rental_manager.services.telegram_bot import TelegramApiError
 
 
 class NotificationConfig(BaseModel):
@@ -82,6 +83,8 @@ def queue(session: Session, *, key: str, text: str, level: str, cfg: Notificatio
                     session.flush()
             except IntegrityError:
                 row = session.scalar(select(AgentNotification).where(AgentNotification.dedupe_key == dedupe))
+                if row is None:
+                    raise
         rows.append(row)
     return rows
 
@@ -117,7 +120,7 @@ def reconcile_notifications(session: Session, *, now: datetime | None = None,
         metadata = json.loads(item.metadata_json or "{}")
         if not due and int(metadata.get("days_overdue") or 0) > cfg.historical_days:
             continue
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start = local_time(now).replace(hour=0, minute=0, second=0, microsecond=0).astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
         count = session.scalar(select(func.count(AgentNotification.id)).where(
             AgentNotification.case_id.is_not(None), AgentNotification.created_at >= today_start)) or 0
         if count >= cfg.daily_case_limit * len(channels(cfg, level)):
@@ -144,7 +147,8 @@ def reconcile_notifications(session: Session, *, now: datetime | None = None,
                 stale.status = "cancelled"
         queue(session, key=key, text=text, level=level, cfg=cfg, case_id=item.id)
     # Unavailable LLM never prevents deterministic supervision and notifications.
-    last = session.scalar(select(HermesAgentRun).order_by(HermesAgentRun.id.desc()).limit(1))
+    last = session.scalar(select(HermesAgentRun).where(HermesAgentRun.completed_at.is_not(None))
+        .order_by(HermesAgentRun.completed_at.desc(), HermesAgentRun.id.desc()).limit(1))
     if last and last.status == "failed":
         queue(session, key=f"ai-failure:{local_time(now).date()}", text="AI не смог завершить запрос. Расчёты и обычные напоминания продолжают работать. Проверьте состояние AI в панели.", level="critical", cfg=cfg)
     if daily_enabled and local_time(now).hour >= cfg.daily_hour:
@@ -172,6 +176,10 @@ def deliver_telegram(session: Session, send: Callable[[str], dict[str, Any]], *,
     cfg = config(session)
     if not cfg.enabled:
         return 0
+    session.execute(update(AgentNotification).where(AgentNotification.channel == "telegram",
+        AgentNotification.status == "sending", AgentNotification.next_attempt_at <= now).values(
+            status="uncertain", error="Отправка прервалась; проверьте Telegram перед повтором."))
+    session.commit()
     rows = session.scalars(select(AgentNotification).where(AgentNotification.channel == "telegram",
         AgentNotification.status.in_(["pending", "failed"])).order_by(AgentNotification.id).limit(30)).all()
     sent = 0
@@ -184,22 +192,34 @@ def deliver_telegram(session: Session, send: Callable[[str], dict[str, Any]], *,
         if case and (case.status not in OPEN_CASE_STATUSES or (case.suppression_until and case.suppression_until > now)):
             continue
         claimed = session.execute(update(AgentNotification).where(AgentNotification.id == row.id,
-            AgentNotification.status.in_(["pending", "failed"])).values(status="sending", attempts=AgentNotification.attempts + 1))
-        if not claimed.rowcount:
+            AgentNotification.status.in_(["pending", "failed"])).values(status="sending",
+                next_attempt_at=now + timedelta(minutes=2), attempts=AgentNotification.attempts + 1))
+        if not getattr(claimed, "rowcount", 0):
             continue
         session.commit()  # Persist the claim before the external call; uncertain sends are not retried blindly.
         try:
             response = send(row.text)
             if not response.get("ok"):
-                raise ValueError("Telegram rejected message")
+                raise TelegramApiError("Telegram rejected message", status_code=response.get("error_code"),
+                    retry_after=int((response.get("parameters") or {}).get("retry_after") or 0))
             row.remote_message_id = str((response.get("result") or {}).get("message_id") or "")
             row.status = "sent"
             row.sent_at = now
             row.error = ""
+            row.next_attempt_at = None
             sent += 1
-        except Exception:
-            row.status = "uncertain"
-            row.error = "Не удалось подтвердить отправку; проверьте Telegram перед повтором."
+        except Exception as exc:
+            cause = exc.__cause__ or exc
+            if isinstance(cause, TelegramApiError) and cause.status_code == 429:
+                row.status = "failed"
+                row.next_attempt_at = now + timedelta(seconds=max(60, cause.retry_after))
+                row.error = "Telegram ограничил частоту; повтор после указанной задержки."
+            elif isinstance(cause, TelegramApiError) and cause.status_code in {400, 401, 403, 404}:
+                row.status = "rejected"
+                row.error = "Telegram отклонил отправку; проверьте бота и доступ к чату."
+            else:
+                row.status = "uncertain"
+                row.error = "Не удалось подтвердить отправку; проверьте Telegram перед повтором."
         session.commit()
     return sent
 

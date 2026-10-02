@@ -59,8 +59,9 @@ test("портфель сортирует квартиры и отделяет �
 });
 
 test("расходы предлагают зачёт в ИП только для незачтённых сумм", async ({ page }) => {
+  await page.evaluate(() => openWorkspaceTab("expenses"));
+  await page.waitForLoadState("networkidle");
   await page.evaluate(() => {
-    openWorkspaceTab("expenses");
     const expense = { expense_date: "2026-08-14", apartment: "Баня 3", category: "Ремонт", amount: 11000, source_funds: "rental_budget" };
     state.expenses = [
       { ...expense, id: 101, rent_credit_amount: 0 },

@@ -59,6 +59,32 @@ public final class UiSmokeActivity extends Activity {
         invoke("hideLoadingCard");
     }
 
+    void prepareManager(Instrumentation instrumentation, String page) throws Exception {
+        ActivityInfo info = getPackageManager().getActivityInfo(getComponentName(), 0);
+        HermesActivity manager = (HermesActivity) instrumentation.newActivity(HermesActivity.class, this,
+            getWindow().getDecorView().getWindowToken(), getApplication(), new Intent(this, UiSmokeActivity.class), info,
+            "Synthetic Manager", null, "manager-smoke", null);
+        manager.setTheme(R.style.AppTheme);
+        Method build = HermesActivity.class.getDeclaredMethod("buildUi");
+        build.setAccessible(true); build.invoke(manager);
+        Method render;
+        if ("chat".equals(page)) {
+            render = HermesActivity.class.getDeclaredMethod("renderChat");
+            render.setAccessible(true); render.invoke(manager);
+        } else {
+            render = HermesActivity.class.getDeclaredMethod("settings".equals(page) ? "renderNotificationSettings" : "renderSummary", JSONObject.class);
+            render.setAccessible(true);
+            JSONObject value = "settings".equals(page) ? new JSONObject("{\"enabled\":true,\"mode\":\"critical_push\",\"quiet_start\":22,\"quiet_end\":8,\"daily_hour\":19}")
+                : new JSONObject("{\"overview\":{\"enabled\":true},\"manager\":{\"status\":\"working\",\"provider\":\"test\",\"model\":\"synthetic\"},\"notifications\":[{\"text\":\"Квартира 7: срок контроля наступил. Возвращаемся к вопросу?\",\"status\":\"delivered\",\"channel\":\"push\",\"case_id\":1}]}");
+            render.invoke(manager, value);
+        }
+        Field field = HermesActivity.class.getDeclaredField("content");
+        field.setAccessible(true);
+        View root = (View) ((View) field.get(manager)).getParent().getParent();
+        if (root.getParent() instanceof ViewGroup) ((ViewGroup) root.getParent()).removeView(root);
+        setContentView(root);
+    }
+
     Object get(String name) throws Exception {
         Field field = MainActivity.class.getDeclaredField(name);
         field.setAccessible(true);
@@ -93,6 +119,7 @@ public final class UiSmokeActivity extends Activity {
     private JSONObject populatedPayload() throws Exception {
         JSONObject payload = emptyPayload();
         JSONObject bootstrap = payload.getJSONObject("bootstrap");
+        bootstrap.put("today", "2026-09-19");
         JSONObject summary = bootstrap.getJSONObject("dashboard").getJSONObject("month_summary");
         summary.put("salary_paid", 1234567).put("salary_due", 2345678).put("bill_payment_paid", 32540)
             .put("bill_payment_due", 42860).put("advance_paid", 12340).put("advance_due", 17650)

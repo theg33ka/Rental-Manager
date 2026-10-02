@@ -815,6 +815,7 @@
             <button id="managerAskButton" type="submit">Спросить</button>
           </form>
           <div id="managerAnswer" class="message-preview" aria-live="polite" style="white-space:pre-wrap"></div>
+          <button type="button" onclick="showManagerHistory()">История разговора</button>
           <details><summary>Каналы и время уведомлений</summary>
             <form onsubmit="saveManagerNotifications(event)">
               <label><input id="managerNotifyEnabled" type="checkbox"> Проактивные сообщения</label>
@@ -843,7 +844,7 @@
           <div class="form-grid compact hermes-filters">
             <label>Статус
               <select id="hermesCaseStatusFilter" onchange="updateHermesCaseFilter('status', this.value)">
-                <option value="">Все</option><option value="new">Новые</option><option value="active">Активные</option><option value="waiting_owner">Ждут владельца</option><option value="waiting_tenant">Ждут жильца</option><option value="auto_monitoring">Под контролем</option><option value="snoozed">Отложенные</option><option value="resolved">Закрытые</option>
+                <option value="attention">Требуют внимания сейчас</option><option value="">Вся история</option><option value="new">Новые</option><option value="active">Активные</option><option value="waiting_owner">Ждут владельца</option><option value="waiting_tenant">Ждут жильца</option><option value="auto_monitoring">Под контролем</option><option value="snoozed">Отложенные</option><option value="resolved">Закрытые</option>
               </select>
             </label>
             <label>Важность

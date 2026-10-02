@@ -197,7 +197,7 @@ final class NotificationHelper {
     }
 
     private static PendingIntent openAppIntent(Context context, DashboardDigest.Target target) {
-        Intent intent = new Intent(context, MainActivity.class);
+        Intent intent = new Intent(context, "hermes".equals(target.tab) ? HermesActivity.class : MainActivity.class);
         intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
         intent.putExtra(EXTRA_TAB, target.tab);
         intent.putExtra(EXTRA_ACTION, target.action);

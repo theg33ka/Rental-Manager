@@ -109,6 +109,7 @@ def run_agent(*, data: RentalDataTools, messages: list[dict[str, Any]],
             continue
         history.append({"role": "assistant", "content": response.content or None, "tool_calls": calls})
         for call in calls:
+            entry: dict[str, Any]
             if len(trace) >= max_calls or time.monotonic() - started >= timeout_seconds:
                 stop = "tool_limit_or_timeout"
                 break
@@ -149,7 +150,12 @@ def run_agent(*, data: RentalDataTools, messages: list[dict[str, Any]],
                         llm_calls, prompt_tokens, completion_tokens)
                 output = data.execute(name, args)
                 source = str(args.get("resource") or name)
-                page_key = name + json.dumps({k: v for k, v in args.items() if k not in {"after_id", "limit"}}, sort_keys=True)
+                for row in output.get("records", []):
+                    for field_name in row.get("truncated_fields", []):
+                        outstanding.add(f"text:{source}:{row['id']}:{field_name}")
+                if name == "read_record_text" and output.get("complete"):
+                    outstanding.discard(f"text:{source}:{args['record_id']}:{args['field']}")
+                page_key = name + json.dumps({k: v for k, v in args.items() if k not in {"after_id", "offset", "limit"}}, sort_keys=True)
                 if output.get("has_more"):
                     outstanding.add(page_key)
                 else:
