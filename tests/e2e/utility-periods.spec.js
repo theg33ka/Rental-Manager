@@ -65,3 +65,33 @@ test("аванс предыдущего жильца не покрывает н�
   });
   expect(result.map((row) => row.advance)).toEqual([-570, 0, -30]);
 });
+
+test("удаление группы предупреждает о возврате оплат и обновляет экран после частичной ошибки", async ({ page }) => {
+  const calls = [];
+  await page.route("**/api/utility-bills/*", async (route) => {
+    calls.push(new URL(route.request().url()).pathname);
+    await route.fulfill({ status: calls.length === 1 ? 200 : 400, contentType: "application/json",
+      body: JSON.stringify(calls.length === 1 ? { ok: true } : { detail: "Оплаченный аванс" }) });
+  });
+  const result = await page.evaluate(async () => {
+    const original = { loadAll, confirm: window.confirm, toast };
+    let question = "";
+    let refreshed = 0;
+    try {
+      window.confirm = (text) => { question = text; return true; };
+      loadAll = async () => { refreshed += 1; };
+      toast = () => {};
+      let error = "";
+      try { await deleteUtilityGroup("68,69"); } catch (caught) { error = caught.message; }
+      return { question, refreshed, error };
+    } finally {
+      loadAll = original.loadAll;
+      window.confirm = original.confirm;
+      toast = original.toast;
+    }
+  });
+  expect(result.question).toContain("вернутся в аванс тех же жильцов");
+  expect(calls).toEqual(["/api/utility-bills/68", "/api/utility-bills/69"]);
+  expect(result.refreshed).toBe(1);
+  expect(result.error).toBe("Оплаченный аванс");
+});

@@ -31,6 +31,7 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from rental_manager.database import Base, DATABASE_URL, ROOT_DIR, SessionLocal, get_session, init_db
 from rental_manager.services.lease_deletion import detach_lease_audit, prepare_lease_deletion
+from rental_manager.services.utility_bill_deletion import delete_bill_preserving_payments
 from rental_manager.services.utility_advances import advance_owner_key, advance_owner_lease_ids, monthly_history, usage_forecasts
 from rental_manager.services.expense_rent_credit import CREDIT_SOURCE, credit_expense_to_rent, expense_rent_credit_amount
 from rental_manager.models import (
@@ -14473,36 +14474,7 @@ def create_object_utility_bills(payload: dict[str, Any], session: Session = Depe
 
 @app.delete("/api/utility-bills/{bill_id}")
 def delete_utility_bill(bill_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
-    bill = session.get(UtilityBill, bill_id)
-    if not bill:
-        raise HTTPException(404, "???????????? ???? ?? ??????")
-    line_ids = [line.id for line in bill.lines]
-    if any(money(line.paid_amount) > EPS for line in bill.lines):
-        raise HTTPException(400, "?????? ??????? ????, ? ??????? ??? ???????? ??????. ??????? ???????? ??? ??????? ??? ???????.")
-    linked_receipts = (
-        session.scalars(select(PaymentReceipt).where(PaymentReceipt.utility_line_id.in_(line_ids))).all()
-        if line_ids
-        else []
-    )
-    if any(receipt.status == "accepted" and money(receipt.amount) > EPS for receipt in linked_receipts):
-        raise HTTPException(400, "?????? ??????? ????, ?? ???????? ??? ??????? ??????. ??????? ????????? ??????????? ????.")
-    linked_logs = (
-        session.scalars(select(MessageLog).where(MessageLog.utility_line_id.in_(line_ids))).all()
-        if line_ids
-        else []
-    )
-    affected_lease_ids = {line.lease_id for line in bill.lines if line.lease_id}
-    for receipt in linked_receipts:
-        receipt.utility_line_id = None
-    for log in linked_logs:
-        log.utility_line_id = None
-    deleted_status = bill.status
-    session.delete(bill)
-    session.flush()
-    for lease_id in sorted(affected_lease_ids):
-        recalculate_lease_balances(session, int(lease_id))
-    session.commit()
-    return {"ok": True, "bill_id": bill_id, "deleted_status": deleted_status}
+    return delete_bill_preserving_payments(session, bill_id)
 
 
 def available_utility_advances(session: Session, lease_id: int) -> list[PaymentReceipt]:

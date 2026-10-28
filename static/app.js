@@ -4853,7 +4853,7 @@ async function deleteUtilityBill(id, status = "draft") {
   const issued = status !== "draft";
   const question = issued
     ? "Удалить этот уже выставленный счёт? Если по нему нет зачтённых оплат, его можно будет пересоздать заново."
-    : "Удалить этот черновик коммуналки? Потом можно пересоздать заново.";
+    : "Удалить этот черновик коммуналки? Зачтённые оплаты фактической коммуналки вернутся в аванс тех же жильцов. Потом можно пересоздать счёт.";
   if (!confirm(question)) return;
   await api(`/api/utility-bills/${id}`, { method: "DELETE" });
   toast(issued ? "Счёт удалён" : "Черновик удалён");
@@ -4866,12 +4866,15 @@ async function deleteUtilityGroup(idsText) {
     .map((value) => Number(value))
     .filter(Boolean);
   if (!ids.length) return;
-  if (!confirm("Удалить этот общий черновик коммуналки вместе с авансом? Потом можно пересоздать заново.")) return;
-  for (const id of ids) {
-    await api(`/api/utility-bills/${id}`, { method: "DELETE" });
+  if (!confirm("Удалить этот общий черновик коммуналки вместе с авансом? Зачтённые оплаты фактической коммуналки вернутся в аванс тех же жильцов. Потом можно пересоздать счёт.")) return;
+  try {
+    for (const id of ids) {
+      await api(`/api/utility-bills/${id}`, { method: "DELETE" });
+    }
+    toast("Общий черновик удалён");
+  } finally {
+    await loadAll();
   }
-  toast("Общий черновик удалён");
-  await loadAll();
 }
 
 async function providerPaid(id) {

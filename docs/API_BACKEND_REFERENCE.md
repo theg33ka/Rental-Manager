@@ -184,7 +184,7 @@ Telegram `cashpay:<opaque token>` accepts a handover claim only from the bound t
 | `GET /api/utilities/calendar/summary` | Owner | Hidden overdue periods across history | mode=utility/rent → apartments with issues (start/end exclusive, status=gap/overdue) | Read-only boundary sweep, no daily expansion; same day rules as calendar |
 | `POST /api/utility-bills/calculate` | Owner | Calculate one service | service_id, period start/end, allow_estimate → bill + warnings | Readings/tariff/period; apartment total cannot exceed object; duplicate draft rules |
 | `POST /api/utility-bills/calculate-object` | Owner | Calculate all active services of object | object_id, period, allow_estimate → created/errors arrays | Object/services exist; per-service errors retained |
-| `DELETE /api/utility-bills/{id}` | Owner | Delete allowed bill | id → `{ok}` | 404/status/dependency constraints; destructive |
+| `DELETE /api/utility-bills/{id}` | Owner | Delete allowed bill; paid usage drafts return payments to the same resident's utility advance | id → `{ok, bill_id, deleted_status, returned_to_advance}` | 400 for paid issued/advance bills; 409 for inconsistent payment ownership/totals; preserves receipts, ledger and audit |
 | `GET /api/utility-bills/{id}/issue-preview` | Owner | Preview grouped issue | id → target texts/link state/due/bill ids | 404; no send |
 | `POST /api/utility-bills/{id}/issue` | Owner | Issue grouped bills and notify | id → bill + sent/skipped/failed/applied advances | Draft/group validity; zero successful linked sends with failures returns error; partial delivery preserved |
 | `POST /api/utility-bills/{id}/provider-paid` | Owner | Mark supplier paid | id → bill | 404; provider timestamp |
