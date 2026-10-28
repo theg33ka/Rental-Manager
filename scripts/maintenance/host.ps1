@@ -53,11 +53,14 @@ switch ($Command) {
     }
 }
 $previousPin = $env:RENTAL_MAINTENANCE_PIN
+$previousEncoding = $env:PYTHONIOENCODING
 try {
     $env:RENTAL_MAINTENANCE_PIN = $credential.GetNetworkCredential().Password
+    $env:PYTHONIOENCODING = 'utf-8'
     & (Join-Path $projectRoot '.venv\Scripts\python.exe') (Join-Path $PSScriptRoot 'host_client.py') @clientArgs
     if ($LASTEXITCODE -ne 0) { throw 'Операция на хосте не выполнена.' }
 } finally {
     $env:RENTAL_MAINTENANCE_PIN = $previousPin
+    $env:PYTHONIOENCODING = $previousEncoding
     $credential = $null
 }

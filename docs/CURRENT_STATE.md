@@ -47,7 +47,7 @@ Web-панель является текущей полной поверхнос
 
 ## Важные ограничения
 
-В коде добавлен owner-only [клиент обслуживания хоста](HOST_MAINTENANCE.md): финансовая диагностика квартиры и исправления через общие owner operations/proposals с аудитом. Он требует deployment и отдельной однократной локальной настройки доступа; работа на production в рамках этой реализации ещё не подтверждена. Alembic head не меняется.
+Owner-only [клиент обслуживания хоста](HOST_MAINTENANCE.md) опубликован на Amvera 2026-10-28: HTTPS login, финансовая диагностика квартиры и logout проверены на production; новая версия web-скриптов и health 200 подтверждены. Локальный доступ настроен через Windows DPAPI. Защищённая копия базы сохранена вне репозитория и проверена чтением; live financial write не выполнялся. Alembic head остаётся `20261002_01`. Исправления данных выполняются через общие owner operations/proposals с аудитом либо согласованную forward migration.
 
 - `rental_manager/main.py` остаётся крупным composition hotspot; бизнес-логику не следует дополнительно размножать в routes и клиентах.
 - SQLite smoke не доказывает PostgreSQL indexes/constraints и production migration behavior.
