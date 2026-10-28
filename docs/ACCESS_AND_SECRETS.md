@@ -21,4 +21,6 @@
 
 Ключевой файл `RENTAL_MANAGER_SETTINGS_ENCRYPTION_KEY_FILE` должен находиться на persistent volume: его потеря может сделать сохранённые настройки нечитаемыми. Android-скрипт по умолчанию создаёт development keystore с известным паролем; он не является production signing strategy. Для обновляемого APK передавайте стабильный keystore через `-KeystorePath` и утверждённый защищённый процесс.
 
+Для локального агента доступен [клиент обслуживания хоста](HOST_MAINTENANCE.md): HTTPS, существующая owner-сессия и CSRF, Windows DPAPI для локального PIN, ограниченная диагностика и исправления через proposals. Настройка выполняется владельцем один раз локально; PIN не передаётся в чат. Этот доступ не отменяет согласование production write и проверку backup.
+
 При утечке отзовите/замените соответствующий токен или ключ, оцените доступ к зашифрованным данным и только затем возобновляйте deployment. Изменение persisted auth state оформляется по [Migration guide](CHANGE_AND_MIGRATION_GUIDE.md).

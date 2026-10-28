@@ -4262,6 +4262,44 @@ def api_month_progress(year: int, month: int, session: Session = Depends(get_ses
     }
 
 
+@app.get("/api/admin/maintenance/apartments/{apartment_id}")
+def maintenance_apartment(apartment_id: int, response: Response, limit: int = 100,
+                          session: Session = Depends(get_session)) -> dict[str, Any]:
+    from rental_manager.services.maintenance import apartment_finance_snapshot
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return apartment_finance_snapshot(session, apartment_id, limit)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+MAINTENANCE_OPERATIONS = {"update_payment_receipt", "update_lease", "update_apartment"}
+
+
+@app.post("/api/admin/maintenance/proposals")
+def maintenance_proposal(payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
+    operation = str(payload.get("operation") or "")
+    reason = str(payload.get("reason") or "").strip()
+    arguments = payload.get("arguments")
+    if operation not in MAINTENANCE_OPERATIONS:
+        raise HTTPException(400, "Операция обслуживания не разрешена")
+    if not reason or len(reason) > 1000 or not isinstance(arguments, dict):
+        raise HTTPException(400, "Нужны arguments и причина исправления (до 1000 символов)")
+    conversation = ai_conversation(session, "maintenance", "owner")
+    proposal = create_agent_action_proposal(
+        session, conversation, "maintenance",
+        {"type": "owner_operation", "payload": {"operation": operation, "arguments": arguments}},
+        notify_owner=False,
+    )
+    proposal.requested_by = "maintenance"
+    session.add(AiActionLog(conversation_id=conversation.id, action_type=operation,
+                            actor_role="owner", status="maintenance_requested",
+                            payload_json=proposal.payload_json, note=reason))
+    session.commit()
+    return serialize_proposal(proposal)
+
+
 @app.get("/api/admin/database-export")
 def export_database(session: Session = Depends(get_session)) -> Response:
     snapshot = current_database_snapshot(session)
@@ -10100,6 +10138,8 @@ def create_agent_action_proposal(
     conversation: AiConversation,
     owner_chat_id: int | str,
     action: dict[str, Any],
+    *,
+    notify_owner: bool = True,
 ) -> AgentActionProposal:
     lease, action_type, payload, preview = normalize_agent_action(session, action)
     payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
@@ -10175,13 +10215,14 @@ def create_agent_action_proposal(
             note=preview[:2000],
         )
     )
-    response = send_telegram_text(
-        session,
-        owner_chat_id,
-        preview + "\n\nНикаких изменений пока не внесено.",
-        action_confirmation_keyboard(proposal.id),
-    )
-    proposal.owner_message_id = int(((response.get("result") or {}) if isinstance(response, dict) else {}).get("message_id") or 0) or None
+    if notify_owner:
+        response = send_telegram_text(
+            session,
+            owner_chat_id,
+            preview + "\n\nНикаких изменений пока не внесено.",
+            action_confirmation_keyboard(proposal.id),
+        )
+        proposal.owner_message_id = int(((response.get("result") or {}) if isinstance(response, dict) else {}).get("message_id") or 0) or None
     return proposal
 
 

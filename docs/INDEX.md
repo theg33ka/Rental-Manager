@@ -8,6 +8,7 @@
 - [Карта проекта](PROJECT_MAP.md) — владельцы кода, клиенты и потоки данных.
 - [Текущее состояние](CURRENT_STATE.md) — версии, Alembic head и активные контуры.
 - [Доступы и секреты](ACCESS_AND_SECRETS.md) — GitHub, Amvera, БД, панель, Telegram, DeepSeek и Android signing.
+- [Доступ к хосту для обслуживания](HOST_MAINTENANCE.md) — диагностика квартиры и подтверждаемые исправления через общий backend.
 - [Продуктовая и UI-карта](PRODUCT_UI_CAPABILITY_MAP.md) — канонический перевод реальной системы на язык экранов, сценариев, состояний и ролей для дизайна.
 - [API / Backend Reference](API_BACKEND_REFERENCE.md) — полный технический справочник операций, auth, inputs, results и errors.
 

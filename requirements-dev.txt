@@ -2,3 +2,4 @@
 -c constraints.txt
 ruff==0.12.12
 mypy==1.17.1
+httpx>=0.28,<1.0

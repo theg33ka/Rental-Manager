@@ -533,6 +533,21 @@ function utilityReadingDatesForTarget(targetValue) {
   return [...firstSet].filter((value) => restSets.every((set) => set.has(value))).sort();
 }
 
+function utilityReadingDateLabel(targetValue, value) {
+  const serviceIds = new Set(utilityTargetServices(targetValue).map((service) => Number(service.id)));
+  const bills = state.utilityBills.filter((bill) => serviceIds.has(Number(bill.service_id))
+    && bill.bill_type !== "advance" && bill.status !== "cancelled"
+    && bill.period_start < value && bill.period_end >= value);
+  const labels = bills.map((bill) => {
+    const activeLines = (bill.lines || []).filter((line) => line.status !== "cancelled" && line.line_type !== "advance"
+      && (line.period_start || bill.period_start) < value && (line.period_end || bill.period_end) >= value);
+    if (!activeLines.length) return "";
+    const issued = bill.status !== "draft" && activeLines.some((line) => line.status !== "draft");
+    return `${bill.service}: ${issued ? "есть выставленные начисления" : "черновик"}`;
+  }).filter(Boolean);
+  return `${formatDate(value)}${labels.length ? ` · ${[...new Set(labels)].join(", ")}` : ""}`;
+}
+
 function bootstrapDefaults() {
   return {
     today: today(),
@@ -3848,6 +3863,28 @@ function groupedDraftProviderOpen(group) {
   return group.bills.some((bill) => bill.bill_type !== "advance" && !bill.provider_paid);
 }
 
+function groupedUtilityPeriods(bills) {
+  const services = new Map();
+  bills.forEach(({ bill, line }) => {
+    const label = line.line_type === "advance" ? "Аванс коммуналки" : bill.service;
+    const key = `${bill.service_id || label}:${line.line_type || "usage"}`;
+    const entry = services.get(key) || { label, ranges: [], fallback: new Set() };
+    if (line.period_start && line.period_end) entry.ranges.push([line.period_start, line.period_end]);
+    else if (line.period_label) entry.fallback.add(line.period_label);
+    services.set(key, entry);
+  });
+  return [...services.values()].flatMap(({ label, ranges, fallback }) => {
+    const merged = [];
+    ranges.sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1])).forEach(([start, end]) => {
+      const previous = merged[merged.length - 1];
+      if (previous && start <= previous[1]) previous[1] = end > previous[1] ? end : previous[1];
+      else merged.push([start, end]);
+    });
+    return [...merged.map(([start, end]) => `${label}: ${start.split("-").reverse().join(".")} → ${end.split("-").reverse().join(".")}`),
+      ...[...fallback].map((period) => `${label}: ${period}`)];
+  });
+}
+
 function groupedDraftRows(group) {
   const rows = new Map();
   group.bills.forEach((bill) => {
@@ -3863,9 +3900,10 @@ function groupedDraftRows(group) {
         advanceCharge: 0,
         statuses: new Set(),
         periods: new Set(),
+        periodLines: [],
       };
       row.statuses.add(line.status);
-      if (line.period_label) row.periods.add(`${bill.service}: ${line.period_label}`);
+      row.periodLines.push({ bill, line });
       if (line.line_type === "advance") {
         row.advanceBalance = Math.max(row.advanceBalance, Number(line.advance_balance_before || line.advance_balance_available || 0));
         row.advanceCharge += Number(line.total_amount || 0);
@@ -3888,6 +3926,7 @@ function groupedDraftRows(group) {
       const total = Math.max(0, row.fact + advanceImpact) + row.advanceCharge;
       return {
         ...row,
+        periods: new Set(groupedUtilityPeriods(row.periodLines)),
         advanceImpact,
         total,
         status: row.statuses.has("overdue") ? "overdue" : row.statuses.has("partial") ? "partial" : row.statuses.has("issued") ? "issued" : "draft",
@@ -4006,8 +4045,8 @@ function updateUtilityPeriodControls() {
   const currentStart = startSelect.value || startInput.value;
   const currentEnd = endSelect.value || endInput.value;
 
-  setValueOptions(startSelect, dates, (value) => formatDate(value), "Выбери дату");
-  setValueOptions(endSelect, dates, (value) => formatDate(value), "Выбери дату");
+  setValueOptions(startSelect, dates, (value) => utilityReadingDateLabel(targetValue, value), "Выбери дату");
+  setValueOptions(endSelect, dates, (value) => utilityReadingDateLabel(targetValue, value), "Выбери дату");
   startSelect.disabled = !dates.length;
   endSelect.disabled = !dates.length;
 

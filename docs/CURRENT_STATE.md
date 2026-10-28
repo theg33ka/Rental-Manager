@@ -47,6 +47,8 @@ Web-панель является текущей полной поверхнос
 
 ## Важные ограничения
 
+В коде добавлен owner-only [клиент обслуживания хоста](HOST_MAINTENANCE.md): финансовая диагностика квартиры и исправления через общие owner operations/proposals с аудитом. Он требует deployment и отдельной однократной локальной настройки доступа; работа на production в рамках этой реализации ещё не подтверждена. Alembic head не меняется.
+
 - `rental_manager/main.py` остаётся крупным composition hotspot; бизнес-логику не следует дополнительно размножать в routes и клиентах.
 - SQLite smoke не доказывает PostgreSQL indexes/constraints и production migration behavior.
 - Реальные Telegram, DeepSeek, Amvera и Android signing проверки требуют внешних доступов и не считаются выполненными без явного evidence.

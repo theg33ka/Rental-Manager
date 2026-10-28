@@ -16,6 +16,8 @@
 
 ## 1. Public, auth, bootstrap and settings
 
+Обслуживание хоста (Owner + CSRF для POST): `GET /api/admin/maintenance/apartments/{id}?limit=100` — ограниченная read-only финансовая проекция квартиры; `POST /api/admin/maintenance/proposals` — `{operation, arguments, reason}` → pending proposal. Поддержаны `update_payment_receipt`, `update_lease`, `update_apartment`; подтверждение выполняется существующим Hermes confirm endpoint. Ограничения и процедура: [HOST_MAINTENANCE.md](HOST_MAINTENANCE.md).
+
 | Method / path | Auth | Purpose / capability | Request → response | Validation, errors, entities |
 | --- | --- | --- | --- | --- |
 | `GET /` | Public | Открыть web SPA | — → `static/index.html` | File must exist; UI shell |
