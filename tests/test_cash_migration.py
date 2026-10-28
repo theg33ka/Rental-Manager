@@ -19,7 +19,7 @@ class CashMigrationTests(unittest.TestCase):
             clean = Path(root) / "clean.db"
             self.migrate(clean, "head")
             with closing(sqlite3.connect(clean)) as db:
-                self.assertEqual(db.execute("SELECT version_num FROM alembic_version").fetchone()[0], "20261028_01")
+                self.assertEqual(db.execute("SELECT version_num FROM alembic_version").fetchone()[0], "20261028_02")
                 self.assertIsNotNone(db.execute("SELECT name FROM sqlite_master WHERE name='cash_payment_requests'").fetchone())
             existing = Path(root) / "existing.db"
             self.migrate(existing, "20260828_01")

@@ -6,7 +6,7 @@
 
 - Backend: FastAPI + SQLAlchemy; локально SQLite, deployment рассчитан на PostgreSQL.
 - Production container: Python 3.13, `alembic upgrade head`, затем Uvicorn на `$PORT`.
-- Alembic head в исходниках: `20261028_01` (согласованный перенос аванса вместо ручной компенсации); production upgrade требует проверенного backup.
+- Alembic head в исходниках: `20261028_02` (сверка разнесения оплат и коммунальной переплаты после переноса аванса); production upgrade требует проверенного backup.
 - Health-check: `/healthz`.
 - Основной source remote: GitHub `origin`; deployment remote: `amvera`.
 
