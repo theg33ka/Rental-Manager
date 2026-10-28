@@ -25,6 +25,8 @@ def delete_bill_preserving_payments(session: Session, bill_id: int) -> dict:
 
     accounted = {line_id: 0.0 for line_id in lines}
     for receipt in accepted:
+        if receipt.utility_line_id is None:
+            raise HTTPException(409, "Оплата потеряла привязку к черновику. Обновите страницу.")
         line = lines[receipt.utility_line_id]
         if (not line.lease_id or receipt.lease_id != line.lease_id
                 or receipt.apartment_id != line.apartment_id or receipt.rent_charge_id
@@ -32,6 +34,8 @@ def delete_bill_preserving_payments(session: Session, bill_id: int) -> dict:
             raise HTTPException(409, "Привязки оплаты требуют проверки перед удалением черновика.")
         accounted[line.id] += receipt.amount
     for entry in entries:
+        if entry.utility_line_id is None:
+            raise HTTPException(409, "Зачёт аванса потерял привязку к черновику. Обновите страницу.")
         line = lines[entry.utility_line_id]
         if entry.amount and (entry.kind != "advance_applied" or entry.amount > 0
                              or not line.lease_id or entry.lease_id != line.lease_id
