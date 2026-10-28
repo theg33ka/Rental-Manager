@@ -6,7 +6,7 @@ test("черновик разделяет жильцов одной кварти
     const group = { object: "Белый дом", period_start: "2026-06-26", period_end: "2026-09-17", bills: [{
       id: 999, service: "Вода", bill_type: "utility", lines: [
         { apartment_id: 3, apartment: "БД3", lease_id: 1, tenant: "Прежний жилец", total_amount: 740, advance_balance_available: 100, period_label: "26.06.2026 -> 08.09.2026", status: "draft" },
-        { apartment_id: 3, apartment: "БД3", lease_id: 2, tenant: "Новая жилица", total_amount: 20, advance_balance_available: 100, period_label: "15.09.2026 -> 17.09.2026", status: "draft" },
+        { apartment_id: 3, apartment: "БД3", lease_id: 2, tenant: "Новая жилица", total_amount: 20, advance_balance_available: 0, period_label: "15.09.2026 -> 17.09.2026", status: "draft" },
       ],
     }] };
     return { rows: groupedDraftRows(group).map(row => ({ tenant: row.tenant, fact: row.fact, advance: row.advanceImpact })), html: renderGroupedDraftCard(group) };

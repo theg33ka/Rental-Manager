@@ -120,6 +120,7 @@ const statusText = {
   not_required: "не требуется",
   suspicious: "проверить",
   accepted: "зачтён",
+  transferred: "перенесён в аванс",
   moderated: "модерировано",
   rejected: "отклонён",
   ignored: "скрыт",
@@ -3892,6 +3893,7 @@ function groupedDraftRows(group) {
       const rowKey = `${line.apartment_id}:${line.lease_id || "none"}`;
       const row = rows.get(rowKey) || {
         apartment_id: line.apartment_id,
+        advanceOwnerKey: line.advance_owner_key || `${line.apartment_id}:${line.tenant_id || line.lease_id || "unassigned"}`,
         apartment: line.apartment,
         tenant: line.tenant || "без жильца",
         fact: 0,
@@ -3905,7 +3907,7 @@ function groupedDraftRows(group) {
       row.statuses.add(line.status);
       row.periodLines.push({ bill, line });
       if (line.line_type === "advance") {
-        row.advanceBalance = Math.max(row.advanceBalance, Number(line.advance_balance_before || line.advance_balance_available || 0));
+        row.advanceBalance = Math.max(row.advanceBalance, Number(line.advance_balance_available || 0));
         row.advanceCharge += Number(line.total_amount || 0);
         row.paid += Number(line.paid_amount || 0);
       } else {
@@ -3917,12 +3919,12 @@ function groupedDraftRows(group) {
     });
   });
   const remainingAdvance = new Map();
-  rows.forEach((row) => remainingAdvance.set(row.apartment_id, Math.max(remainingAdvance.get(row.apartment_id) || 0, row.advanceBalance)));
+  rows.forEach((row) => remainingAdvance.set(row.advanceOwnerKey, Math.max(remainingAdvance.get(row.advanceOwnerKey) || 0, row.advanceBalance)));
   return [...rows.values()]
     .map((row) => {
-      const available = remainingAdvance.get(row.apartment_id) || 0;
-      const advanceImpact = -Math.min(Math.max(available, 0), Math.max(row.fact - row.paid, 0));
-      remainingAdvance.set(row.apartment_id, available + advanceImpact);
+      const available = remainingAdvance.get(row.advanceOwnerKey) || 0;
+      const advanceImpact = -Math.min(Math.max(available, 0), Math.max(row.fact - row.paid, 0)) || 0;
+      remainingAdvance.set(row.advanceOwnerKey, available + advanceImpact);
       const total = Math.max(0, row.fact + advanceImpact) + row.advanceCharge;
       return {
         ...row,

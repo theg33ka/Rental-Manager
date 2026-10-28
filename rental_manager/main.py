@@ -31,6 +31,7 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from rental_manager.database import Base, DATABASE_URL, ROOT_DIR, SessionLocal, get_session, init_db
 from rental_manager.services.lease_deletion import detach_lease_audit, prepare_lease_deletion
+from rental_manager.services.utility_advances import advance_owner_key, advance_owner_lease_ids, monthly_history, usage_forecasts
 from rental_manager.services.expense_rent_credit import CREDIT_SOURCE, credit_expense_to_rent, expense_rent_credit_amount
 from rental_manager.models import (
     AgentActionProposal,
@@ -627,9 +628,8 @@ UTILITY_LINE_ADVANCE = "advance"
 UTILITY_BILL_USAGE = "utility"
 UTILITY_BILL_ADVANCE = "advance"
 UTILITY_ADVANCE_CURRENT_CAP_DEFAULT = 2.0
-UTILITY_ADVANCE_CURRENT_CAP_SHOULDER = 5.0
-UTILITY_ADVANCE_CURRENT_CAP_WINTER = 8.0
-UTILITY_ADVANCE_CURRENT_CAP_BUFFER = 1000.0
+UTILITY_ADVANCE_CURRENT_CAP_SHOULDER = 2.0
+UTILITY_ADVANCE_CURRENT_CAP_WINTER = 2.0
 REMINDER_WORKER_STARTED = False
 REMINDER_WORKER_INTERVAL_SECONDS = 900
 TELEGRAM_PROCESSED_UPDATE_LIMIT = 500
@@ -2572,12 +2572,13 @@ def utility_advance_applied_to_line(session: Session, line_id: int) -> float:
     )
 
 
-def utility_advance_ledger_balance(session: Session, apartment_id: int) -> float:
+def utility_advance_ledger_balance(session: Session, apartment_id: int, lease_id: int | None = None) -> float:
     return money(
         float(
             session.scalar(
                 select(func.coalesce(func.sum(UtilityAdvanceLedger.amount), 0)).where(
-                    UtilityAdvanceLedger.apartment_id == apartment_id
+                    UtilityAdvanceLedger.apartment_id == apartment_id,
+                    UtilityAdvanceLedger.lease_id.in_(advance_owner_lease_ids(session, apartment_id, lease_id)),
                 )
             )
             or 0
@@ -2585,12 +2586,13 @@ def utility_advance_ledger_balance(session: Session, apartment_id: int) -> float
     )
 
 
-def legacy_unlinked_utility_advance_balance(session: Session, apartment_id: int) -> float:
+def legacy_unlinked_utility_advance_balance(session: Session, apartment_id: int, lease_id: int | None = None) -> float:
     return money(
         float(
             session.scalar(
                 select(func.coalesce(func.sum(PaymentReceipt.amount), 0)).where(
                     PaymentReceipt.apartment_id == apartment_id,
+                    PaymentReceipt.lease_id.in_(advance_owner_lease_ids(session, apartment_id, lease_id)),
                     PaymentReceipt.status == "accepted",
                     PaymentReceipt.channel == UTILITY_ADVANCE_CHANNEL,
                     PaymentReceipt.utility_line_id.is_(None),
@@ -2602,10 +2604,10 @@ def legacy_unlinked_utility_advance_balance(session: Session, apartment_id: int)
     )
 
 
-def utility_advance_balance(session: Session, apartment_id: int) -> float:
+def utility_advance_balance(session: Session, apartment_id: int, lease_id: int | None = None) -> float:
     return money(
-        utility_advance_ledger_balance(session, apartment_id)
-        + legacy_unlinked_utility_advance_balance(session, apartment_id)
+        max(0.0, utility_advance_ledger_balance(session, apartment_id, lease_id)
+        + legacy_unlinked_utility_advance_balance(session, apartment_id, lease_id))
     )
 
 
@@ -2640,7 +2642,7 @@ def capped_utility_advance_forecast(
     if current <= EPS or uncapped <= current + EPS:
         return uncapped, metadata
 
-    forecast_cap = money(max(current * multiplier, current + UTILITY_ADVANCE_CURRENT_CAP_BUFFER))
+    forecast_cap = money(current * multiplier)
     metadata["forecast_cap"] = forecast_cap
     if uncapped > forecast_cap + EPS:
         metadata["forecast_capped"] = True
@@ -2679,15 +2681,12 @@ def estimated_apartment_utility_amount(
             UtilityBillLine.line_type != UTILITY_LINE_ADVANCE,
             UtilityBill.status != "draft",
             UtilityBill.period_start < target_start,
+            UtilityBill.period_end <= target_start,
         )
         .order_by(UtilityBill.period_start.desc(), UtilityBillLine.id.desc())
     ).all()
-    monthly: dict[tuple[int, int], float] = {}
-    for line in historical_lines:
-        if not line.bill:
-            continue
-        key = (line.bill.period_start.year, line.bill.period_start.month)
-        monthly[key] = money(monthly.get(key, 0.0) + float(line.total_amount or 0))
+    forecast_days = (add_calendar_month(target_start) - target_start).days
+    monthly, excluded_history_lines = monthly_history(list(historical_lines), forecast_days)
 
     ordered = sorted(monthly.items(), reverse=True)
     last_12 = ordered[:12]
@@ -2718,6 +2717,8 @@ def estimated_apartment_utility_amount(
         "seasonal_average": seasonal_average,
         "annual_average": annual_average,
         "history_months": len(last_12),
+        "excluded_history_lines": excluded_history_lines,
+        "forecast_days": forecast_days,
         **cap_meta,
     }
 
@@ -2813,7 +2814,7 @@ def serialize_bill_line(
     period_start, period_end = utility_line_period(line)
     metadata = utility_line_metadata(line)
     advance_applied = utility_advance_applied_to_line(session, line.id) if include_advance and session and line.id else 0.0
-    advance_balance_available = utility_advance_balance(session, line.apartment_id) if include_advance and session and line.apartment_id else 0.0
+    advance_balance_available = utility_advance_balance(session, line.apartment_id, line.lease_id) if include_advance and session and line.apartment_id else 0.0
     return {
         "id": line.id,
         "bill_id": line.bill_id,
@@ -2833,6 +2834,7 @@ def serialize_bill_line(
         "debt": utility_line_debt_amount(line),
         "advance_applied_amount": advance_applied,
         "advance_balance_available": advance_balance_available,
+        "advance_owner_key": advance_owner_key(line.lease, line.apartment_id),
         "advance_balance_before": metadata.get("advance_balance_before", 0),
         "advance_recommended_amount": metadata.get("advance_recommended_amount", 0),
         "status": line.status,
@@ -6725,7 +6727,7 @@ def projected_utility_debts_for_issue_preview(
     combined_lines: list[UtilityBillLine],
 ) -> dict[int, float]:
     selected_ids = {line.id for line in selected_lines}
-    balance_by_apartment: dict[int, float] = {}
+    balance_by_apartment: dict[str, float] = {}
     projected: dict[int, float] = {}
     for line in sorted(combined_lines, key=lambda item: (
         item.bill.period_start, item.bill.id, item.lease_id or 0,
@@ -6737,11 +6739,12 @@ def projected_utility_debts_for_issue_preview(
             and not utility_line_is_advance(line)
             and debt > EPS
         ):
-            balance = balance_by_apartment.setdefault(line.apartment_id, utility_advance_balance(session, line.apartment_id))
+            owner_key = advance_owner_key(line.lease, line.apartment_id)
+            balance = balance_by_apartment.setdefault(owner_key, utility_advance_balance(session, line.apartment_id, line.lease_id))
             portion = money(min(balance, debt))
             if portion > EPS:
                 debt = money(debt - portion)
-                balance_by_apartment[line.apartment_id] = money(balance - portion)
+                balance_by_apartment[owner_key] = money(balance - portion)
         projected[line.id] = debt
     return projected
 
@@ -6765,14 +6768,15 @@ def utility_message_projection_context(
         + utility_message_line(line, projected_debts.get(line.id))
         for line in visible_lines
     ]
-    for apartment_id in sorted({line.apartment_id for line in selected_lines}):
-        balance = utility_advance_balance(session, apartment_id)
+    owner_lines = {advance_owner_key(line.lease, line.apartment_id): line for line in selected_lines}
+    for owner_key, owner_line in sorted(owner_lines.items()):
+        balance = utility_advance_balance(session, owner_line.apartment_id, owner_line.lease_id)
         if balance <= EPS:
             continue
         allocations = [
             (line, money(utility_line_debt_amount(line) - projected_debts.get(line.id, 0.0)))
             for line in combined_lines
-            if line.id in selected_ids and line.apartment_id == apartment_id
+            if line.id in selected_ids and advance_owner_key(line.lease, line.apartment_id) == owner_key
             and not utility_line_is_advance(line)
         ]
         details.extend(["", f"Аванс на момент выставления: {money_text(balance)}."])
@@ -6827,9 +6831,13 @@ def fully_advance_covered_utility_message(
         line_start,
         line_end,
         current_amount=gross_usage,
+        forecast_current_amount=usage_forecasts(
+            list({line.bill.id: line.bill for line in usage_lines}.values()),
+            (advance_end - advance_start).days,
+        ).get(lease.apartment_id),
     )
     planned_advance = money(advance_metadata.get("advance_prorated_amount", 0.0))
-    advance_balance = utility_advance_balance(session, lease.apartment_id)
+    advance_balance = utility_advance_balance(session, lease.apartment_id, lease.id)
     covered_total = money(gross_usage + planned_advance)
     if planned_advance <= EPS or covered_total > advance_balance + EPS:
         return None
@@ -13734,11 +13742,17 @@ def delete_manual_debt(debt_id: int, session: Session = Depends(get_session)) ->
     return {"ok": True}
 
 
+def require_editable_payment_receipt(receipt: PaymentReceipt) -> None:
+    if receipt.source == "utility_advance_transfer":
+        raise HTTPException(409, "Это запись переноса аванса. Исправление требует согласованного обратного переноса.")
+
+
 @app.patch("/api/payment-receipts/{receipt_id}")
 def update_payment_receipt(receipt_id: int, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
     receipt = session.get(PaymentReceipt, receipt_id)
     if not receipt:
         raise HTTPException(404, "платёж не найден")
+    require_editable_payment_receipt(receipt)
     if (receipt.source or "").startswith(CREDIT_SOURCE):
         raise HTTPException(400, "Зачёт связан с расходом. Для отмены удалите зачёт; повторно зачесть расход можно в разделе расходов.")
     old_lease_id = receipt.lease_id
@@ -13827,6 +13841,7 @@ def delete_payment_receipt(receipt_id: int, session: Session = Depends(get_sessi
     receipt = session.get(PaymentReceipt, receipt_id)
     if not receipt:
         raise HTTPException(404, "платёж не найден")
+    require_editable_payment_receipt(receipt)
     lease_id = receipt.lease_id
     status = receipt.status
     linked_expense = linked_expense_fund_record(session, receipt.id)
@@ -13888,6 +13903,7 @@ def ignore_payment_receipt(receipt_id: int, session: Session = Depends(get_sessi
     receipt = session.get(PaymentReceipt, receipt_id)
     if not receipt:
         raise HTTPException(404, "платёж не найден")
+    require_editable_payment_receipt(receipt)
     receipt.status = "ignored"
     receipt.notes = "; ".join(part for part in [receipt.notes, "скрыто из дашборда вручную"] if part)
     session.commit()
@@ -13899,6 +13915,7 @@ def moderate_payment_receipt(receipt_id: int, payload: dict[str, Any], session: 
     receipt = session.get(PaymentReceipt, receipt_id)
     if not receipt:
         raise HTTPException(404, "платёж не найден")
+    require_editable_payment_receipt(receipt)
     action = (payload.get("action") or "").strip()
     note = (payload.get("note") or "").strip()
     parsed = parse_receipt_details(receipt)
@@ -14496,7 +14513,8 @@ def available_utility_advances(session: Session, lease_id: int) -> list[PaymentR
         for receipt in session.scalars(
             select(PaymentReceipt)
             .where(
-                PaymentReceipt.apartment_id == apartment_id if apartment_id else PaymentReceipt.lease_id == lease_id,
+                PaymentReceipt.apartment_id == apartment_id,
+                PaymentReceipt.lease_id.in_(advance_owner_lease_ids(session, apartment_id or -1, lease_id)),
                 PaymentReceipt.status == "accepted",
                 PaymentReceipt.channel == UTILITY_ADVANCE_CHANNEL,
                 PaymentReceipt.utility_line_id.is_(None),
@@ -14523,13 +14541,14 @@ def apply_utility_advances_to_bill(session: Session, bill: UtilityBill) -> float
         line_debt = money(max(0.0, float(line.total_amount or 0) - float(line.paid_amount or 0)))
         if line_debt <= EPS:
             continue
+        owner_available = utility_advance_balance(session, line.apartment_id, line.lease_id)
         for advance in available_utility_advances(session, int(line.lease_id)):
-            if line_debt <= EPS:
+            if line_debt <= EPS or owner_available <= EPS:
                 break
             advance_amount = money(float(advance.amount or 0))
             if advance_amount <= EPS:
                 continue
-            portion = money(min(advance_amount, line_debt))
+            portion = money(min(advance_amount, line_debt, owner_available))
             note = f"зачтено из аванса в счёт {bill.service.name} за {bill.period_end:%m.%Y}"
             if advance_amount <= portion + EPS:
                 advance.utility_line_id = line.id
@@ -14556,11 +14575,12 @@ def apply_utility_advances_to_bill(session: Session, bill: UtilityBill) -> float
                 )
             applied_total = money(applied_total + portion)
             line_debt = money(line_debt - portion)
+            owner_available = money(owner_available - portion)
             affected_lease_ids.add(int(line.lease_id))
             session.flush()
-        ledger_balance = utility_advance_ledger_balance(session, line.apartment_id)
-        if line_debt > EPS and ledger_balance > EPS:
-            portion = money(min(ledger_balance, line_debt))
+        ledger_balance = utility_advance_ledger_balance(session, line.apartment_id, line.lease_id)
+        if line_debt > EPS and ledger_balance > EPS and owner_available > EPS:
+            portion = money(min(ledger_balance, line_debt, owner_available))
             session.add(
                 UtilityAdvanceLedger(
                     apartment_id=line.apartment_id,
@@ -14673,18 +14693,19 @@ def build_utility_advance_line_payload(
     line_end: date,
     *,
     current_amount: float,
+    forecast_current_amount: float | None = None,
 ) -> tuple[float, dict[str, Any]]:
     recommended, forecast_meta = estimated_apartment_utility_amount(
         session,
         apartment.id,
         advance_start,
-        current_amount=current_amount,
+        current_amount=forecast_current_amount if forecast_current_amount is not None else current_amount,
     )
     full_days = max((advance_end - advance_start).days, 1)
     line_days = max((line_end - line_start).days, 0)
     period_factor = min(1.0, max(0.0, line_days / full_days))
     prorated_recommended = money(recommended * period_factor)
-    balance_before = utility_advance_balance(session, apartment.id)
+    balance_before = utility_advance_balance(session, apartment.id, lease.id)
     balance_applied_to_current = money(min(balance_before, max(0.0, current_amount)))
     balance_after_current = money(max(0.0, balance_before - balance_applied_to_current))
     amount = money(max(0.0, prorated_recommended - balance_after_current))
@@ -14713,11 +14734,13 @@ def ensure_utility_advance_draft_for_object(
     period_end: date,
     *,
     current_amounts_by_apartment: dict[int, float],
+    current_bills: list[UtilityBill] | None = None,
 ) -> UtilityBill | None:
     services = active_services_for_object(session, object_id)
     if not services:
         return None
     advance_start, advance_end = next_utility_advance_period(period_start, period_end)
+    forecasts = usage_forecasts(current_bills or [], (advance_end - advance_start).days)
     cancel_stale_unpaid_advance_lines(session, object_id, advance_start)
 
     existing = advance_bill_for_object_period(session, object_id, advance_start, advance_end)
@@ -14731,13 +14754,19 @@ def ensure_utility_advance_draft_for_object(
     ).all()
     desired: dict[int, tuple[Apartment, Lease, float, dict[str, Any], date, date]] = {}
     for apartment in apartments:
-        lease = active_lease_for_apartment(session, apartment.id, period_start, period_end)
+        lease = active_lease_for_apartment(session, apartment.id, advance_start, advance_end)
         if not lease or lease_ignored(session, lease.id):
             continue
         line_period = lease_utility_advance_period(lease, advance_start, advance_end)
         if not line_period:
             continue
         line_start, line_end = line_period
+        current_owner_amount = money(sum(
+            utility_line_debt_amount(line)
+            for item in current_bills or [] for line in item.lines
+            if not utility_line_is_advance(line) and line.status != "cancelled"
+            and advance_owner_key(line.lease, line.apartment_id) == advance_owner_key(lease, apartment.id)
+        )) if current_bills is not None else current_amounts_by_apartment.get(apartment.id, 0.0)
         amount, metadata = build_utility_advance_line_payload(
             session,
             apartment,
@@ -14746,7 +14775,8 @@ def ensure_utility_advance_draft_for_object(
             advance_end,
             line_start,
             line_end,
-            current_amount=current_amounts_by_apartment.get(apartment.id, 0.0),
+            current_amount=current_owner_amount,
+            forecast_current_amount=forecasts.get(apartment.id),
         )
         if amount > EPS:
             desired[apartment.id] = (apartment, lease, amount, metadata, line_start, line_end)
@@ -14831,6 +14861,7 @@ def ensure_utility_advance_drafts_for_bills(session: Session, bills: list[Utilit
             period_start,
             period_end,
             current_amounts_by_apartment=utility_usage_amounts_by_apartment(grouped_bills),
+            current_bills=grouped_bills,
         )
         if advance_bill:
             result.append(advance_bill)

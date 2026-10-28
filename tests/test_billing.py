@@ -614,7 +614,7 @@ class UtilityBillingTests(DatabaseTestCase):
             )
 
         self.assertEqual(len(result["advance_bills"]), 1)
-        self.assertEqual(result["advance_bills"][0]["lines"][0]["total_amount"], 5520.0)
+        self.assertEqual(result["advance_bills"][0]["lines"][0]["total_amount"], 5704.0)
 
     def test_utility_bill_fails_when_apartment_consumption_exceeds_object(self) -> None:
         with self.seed() as session:
@@ -2078,8 +2078,8 @@ class UtilityAdvanceTests(DatabaseTestCase):
             self.assertIn("электричество за период", expected_text.lower())
             self.assertIn("Аванс на момент выставления: 3 000,00 ₽", expected_text)
             self.assertIn("аванс коммуналки на следующий период", expected_text.lower())
-            self.assertIn("списано 2 000,00 ₽", expected_text)
-            self.assertIn("Осталось в авансе: 1 000,00 ₽", expected_text)
+            self.assertIn("списано 2 034,48 ₽", expected_text)
+            self.assertIn("Осталось в авансе: 965,52 ₽", expected_text)
             self.assertIn("Доплачивать сейчас ничего не нужно", expected_text)
             self.assertNotIn("Всего: 0,00 ₽", expected_text)
 
@@ -2193,7 +2193,7 @@ class UtilityAdvanceTests(DatabaseTestCase):
         self.assertEqual(metadata["advance_balance_before"], 600)
         self.assertEqual(metadata["advance_balance_applied_to_current"], 600)
         self.assertEqual(metadata["advance_balance_after_current"], 0)
-        self.assertEqual(new_advance_amount, 1000)
+        self.assertEqual(new_advance_amount, 1034.48)
         self.assertEqual(payload["applied_advances"], 600)
         self.assertEqual(applied_to_usage, 600)
 
@@ -2327,6 +2327,7 @@ class UtilityAdvanceTests(DatabaseTestCase):
     def test_auto_advance_draft_uses_apartment_history_and_current_bill(self) -> None:
         with self.Session() as session:
             lease, bill, _line = self._seed_bill(session, total_amount=1000)
+            lease.start_date = date(2025, 1, 1)
             historical_bill = UtilityBill(
                 service=bill.service,
                 period_start=date(2025, 6, 30),
@@ -2361,12 +2362,13 @@ class UtilityAdvanceTests(DatabaseTestCase):
             self.assertEqual(advance_bills[0].period_start, date(2026, 6, 30))
             self.assertEqual(advance_bills[0].period_end, date(2026, 7, 30))
             self.assertEqual(advance_line.line_type, "advance")
-            self.assertAlmostEqual(advance_line.total_amount, 917.5)
+            self.assertAlmostEqual(advance_line.total_amount, 923.53)
             self.assertIn("Аванс коммуналки", advance_line.note)
 
     def test_auto_advance_caps_non_winter_history_spike_against_current_bill(self) -> None:
         with self.Session() as session:
             lease, bill, _line = self._seed_bill(session, total_amount=1475.54)
+            lease.start_date = date(2025, 1, 1)
             historical_bill = UtilityBill(
                 service=bill.service,
                 period_start=date(2025, 6, 1),
@@ -2397,7 +2399,7 @@ class UtilityAdvanceTests(DatabaseTestCase):
 
             advance_line = advance_bills[0].lines[0]
             metadata = json.loads(advance_line.metadata_json)
-            self.assertAlmostEqual(advance_line.total_amount, 2951.08)
+            self.assertAlmostEqual(advance_line.total_amount, 3052.84)
             self.assertTrue(metadata["forecast_capped"])
             self.assertGreater(metadata["uncapped_forecast"], 29000)
             self.assertEqual(metadata["forecast_cap_multiplier"], 2.0)
@@ -2405,6 +2407,7 @@ class UtilityAdvanceTests(DatabaseTestCase):
     def test_issue_preview_refreshes_existing_bad_advance_draft(self) -> None:
         with self.Session() as session:
             lease, bill, _line = self._seed_bill(session, total_amount=1475.54)
+            lease.start_date = date(2025, 1, 1)
             historical_bill = UtilityBill(
                 service=bill.service,
                 period_start=date(2025, 6, 1),
@@ -2458,7 +2461,7 @@ class UtilityAdvanceTests(DatabaseTestCase):
             preview_issue_utility_bill(bill.id, session=session)
             session.refresh(advance_line)
 
-            self.assertAlmostEqual(advance_line.total_amount, 2951.08)
+            self.assertAlmostEqual(advance_line.total_amount, 3052.84)
             metadata = json.loads(advance_line.metadata_json)
             self.assertTrue(metadata["forecast_capped"])
 
@@ -2473,7 +2476,7 @@ class UtilityAdvanceTests(DatabaseTestCase):
 
             self.assertEqual(len(advance_bills), 1)
             advance_line = advance_bills[0].lines[0]
-            self.assertAlmostEqual(advance_line.total_amount, 333.33)
+            self.assertAlmostEqual(advance_line.total_amount, 344.83)
             self.assertIn("30.06.2026 -> 10.07.2026", advance_line.note)
             metadata = json.loads(advance_line.metadata_json)
             self.assertEqual(metadata["line_period_end"], "2026-07-10")

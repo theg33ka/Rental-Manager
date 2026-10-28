@@ -54,3 +54,14 @@ test("разные услуги и новый аванс имеют отдель
   expect(periods).toHaveLength(3);
   expect(periods[2].match(/Аванс коммуналки/g)).toHaveLength(1);
 });
+
+test("аванс предыдущего жильца не покрывает нового и не повторяется в нескольких строках владельца", async ({ page }) => {
+  const result = await page.evaluate(() => {
+    const line = (lease_id, owner, amount, balance) => ({ apartment_id: 3, apartment: "К3", lease_id,
+      advance_owner_key: owner, total_amount: amount, advance_balance_available: balance, status: "draft" });
+    return groupedDraftRows({ bills: [{ service: "Электричество", lines: [
+      line(1, "3:11", 570, 600), line(2, "3:22", 70, 0), line(3, "3:11", 50, 600),
+    ] }] }).map((row) => ({ fact: row.fact, advance: row.advanceImpact }));
+  });
+  expect(result.map((row) => row.advance)).toEqual([-570, 0, -30]);
+});
