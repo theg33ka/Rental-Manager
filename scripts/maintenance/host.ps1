@@ -1,4 +1,4 @@
-param(
+﻿param(
     [switch]$Configure,
     [string]$Url,
     [ValidateSet('inspect', 'propose', 'proposals', 'confirm')]

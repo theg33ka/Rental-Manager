@@ -3,8 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import socket
+import shutil
+import subprocess
 import threading
 import time
+from pathlib import Path
+import unittest
 from unittest.mock import patch
 
 import httpx
@@ -21,6 +25,13 @@ from tests.test_billing import DatabaseTestCase
 
 
 class HostMaintenanceTests(DatabaseTestCase):
+    @unittest.skipUnless(shutil.which("powershell.exe"), "Windows PowerShell is required")
+    def test_windows_powershell_can_parse_credential_script(self):
+        path = Path(__file__).resolve().parents[1] / "scripts" / "maintenance" / "host.ps1"
+        command = "$errors=$null; [System.Management.Automation.Language.Parser]::ParseFile('" + str(path).replace("'", "''") + "', [ref]$null, [ref]$errors) | Out-Null; if ($errors) { $errors | ForEach-Object { $_.Message }; exit 1 }"
+        result = subprocess.run(["powershell.exe", "-NoProfile", "-Command", command], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def setUp(self):
         super().setUp()
         with self.Session() as session:
