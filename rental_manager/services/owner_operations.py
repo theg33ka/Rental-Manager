@@ -4,6 +4,12 @@ from typing import Any
 
 
 OWNER_OPERATION_SPECS: dict[str, dict[str, Any]] = {
+    "repair_transfer_finance": {
+        "label": "сверить финансы переезда",
+        "required": ["source_lease_id", "target_lease_id", "expense_id", "funding_apartment_id", "duplicate_pairs"],
+        "optional": ["expected_fingerprint"],
+        "steps": ["сверить состояние с preview", "сохранить и отменить ошибочные зачёты и повторы", "перенести существующий аванс парными записями", "покрыть фактическую коммуналку нового договора и записать аудит"],
+    },
     "confirm_cash_payment": {
         "label": "подтвердить получение наличных",
         "required": ["cash_request_id"],

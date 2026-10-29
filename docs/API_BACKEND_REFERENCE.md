@@ -16,7 +16,11 @@
 
 ## 1. Public, auth, bootstrap and settings
 
-Обслуживание хоста (Owner + CSRF для POST): `GET /api/admin/maintenance/apartments/{id}?limit=100` — ограниченная read-only финансовая проекция квартиры; `POST /api/admin/maintenance/proposals` — `{operation, arguments, reason}` → pending proposal. Поддержаны `update_payment_receipt`, `update_lease`, `update_apartment`; подтверждение выполняется существующим Hermes confirm endpoint. Ограничения и процедура: [HOST_MAINTENANCE.md](HOST_MAINTENANCE.md).
+Обслуживание хоста (Owner + CSRF для POST): `GET /api/admin/maintenance/apartments/{id}?limit=100` — ограниченная read-only финансовая проекция квартиры; `POST /api/admin/maintenance/proposals` — `{operation, arguments, reason}` → pending proposal. Поддержаны `update_payment_receipt`, `update_lease`, `update_apartment`, `repair_transfer_finance`; сверка переезда требует PIN уровня 3 и fingerprint, рассчитанный сервером в preview. Подтверждение выполняется существующим Hermes confirm endpoint. Ограничения и процедура: [HOST_MAINTENANCE.md](HOST_MAINTENANCE.md).
+
+Создание расхода (`POST /api/expenses`, `create_expense`) не создаёт зачёт аренды по признаку `source_funds=rental_budget`. Для зачёта используется явная `credit_expense_rent`/`POST /api/expenses/{id}/credit-rent`. `rent_credit_blocked=true` в представлении расхода запрещает повторный зачёт, отменённый сверкой источника денег.
+
+`GET /api/admin/maintenance/backup-status` (только owner) сообщает `mode` и `verified` для копии settings key, подготовленной до миграций. Секрет, путь и его fingerprint не передаются.
 
 | Method / path | Auth | Purpose / capability | Request → response | Validation, errors, entities |
 | --- | --- | --- | --- | --- |

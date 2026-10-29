@@ -31,6 +31,7 @@ LEVEL_ONE_TOOLS = {
 }
 
 LEVEL_THREE_OPERATIONS = {
+    "repair_transfer_finance",
     "delete_lease",
     "delete_manual_debt",
     "delete_payment_receipt",

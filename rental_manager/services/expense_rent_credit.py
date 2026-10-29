@@ -26,6 +26,8 @@ def credit_expense_to_rent(session: Session, expense_id: int) -> list[PaymentRec
     expense = session.scalar(select(Expense).where(Expense.id == expense_id).with_for_update())
     if not expense:
         raise ValueError("Расход не найден")
+    if "RENT_CREDIT_REVERSED:" in (expense.notes or ""):
+        raise ValueError("Зачёт отменён сверкой: источник денег отличается от квартиры расхода")
     if expense.source_funds != "rental_budget":
         raise ValueError("В аренду засчитываются только расходы из арендного бюджета")
     if not math.isfinite(expense.amount) or expense.amount <= 0:

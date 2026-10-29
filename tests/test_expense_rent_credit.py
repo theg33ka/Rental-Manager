@@ -40,9 +40,11 @@ class ExpenseRentCreditTests(unittest.TestCase):
         self.assertTrue(all(c.ip_paid == 0 for c in charges if c.due_date < date(2026, 8, 1)))
         self.assertEqual(self.session.scalar(select(func.count(Expense.id))), 1)
 
-    def test_new_expense_credits_ip_and_carries_remainder_once(self):
+    def test_new_expense_requires_explicit_credit_and_carries_remainder_once(self):
         result = create_expense(self.payload(), self.session)
-        self.assertEqual(result["rent_credit_amount"], 11000)
+        self.assertEqual(result["rent_credit_amount"], 0)
+        self.assertEqual(self.session.scalar(select(func.count(PaymentReceipt.id))), 0)
+        self.assertEqual(credit_expense_rent(result["id"], self.session)["credited"], 11000)
         self.assertEqual(credit_expense_rent(result["id"], self.session)["credited"], 0)
         for receipt in self.session.scalars(select(PaymentReceipt)).all():
             sync_rental_budget_expense_receipt(self.session, receipt)
@@ -58,13 +60,24 @@ class ExpenseRentCreditTests(unittest.TestCase):
         self.assertEqual(credit_expense_rent(expense.id, self.session)["credited"], 0)
         self.assert_credit()
 
-    def test_missing_apartment_rolls_back_expense(self):
+    def test_budget_expense_without_tenant_does_not_create_rent_credit(self):
         payload = self.payload()
         payload.pop("apartment_id")
+        result = create_expense(payload, self.session)
+        self.assertEqual(result['rent_credit_amount'], 0)
         with self.assertRaises(HTTPException):
-            create_expense(payload, self.session)
-        self.assertEqual(self.session.scalar(select(func.count(Expense.id))), 0)
+            credit_expense_rent(result['id'], self.session)
+        self.assertEqual(self.session.scalar(select(func.count(Expense.id))), 1)
 
     def test_personal_expense_does_not_credit_rent(self):
         create_expense({**self.payload(), "source_funds": "personal"}, self.session)
+        self.assertEqual(self.session.scalar(select(func.count(PaymentReceipt.id))), 0)
+
+    def test_explicit_credit_after_move_cannot_use_closed_lease(self):
+        self.lease.end_date = date(2026, 8, 7)
+        self.lease.active = False
+        self.session.commit()
+        result = create_expense(self.payload(), self.session)
+        with self.assertRaises(HTTPException):
+            credit_expense_rent(result['id'], self.session)
         self.assertEqual(self.session.scalar(select(func.count(PaymentReceipt.id))), 0)

@@ -4286,14 +4286,14 @@ function renderExpenses() {
       <td>${expenseSourceLabel(expense.source_funds)}</td>
       <td>${statusPill(expense.compensation_status === "compensated" ? "paid" : expense.compensation_status === "pending" ? "partial" : "issued")}</td>
       <td>${expense.description || ""}</td>
-      <td class="actions">${expense.compensation_status !== "compensated" && expense.source_funds === "personal" ? `<button class="mini primary" onclick="compensateExpense(${expense.id})">Компенсировано</button>` : ""}${expense.source_funds === "rental_budget" ? (Number(expense.rent_credit_amount || 0) >= Number(expense.amount) ? '<span class="pill ok">Зачтено в аренду</span>' : `<button class="mini primary" onclick="creditExpenseRent(${expense.id})">Зачесть в ИП</button>`) : ""}</td>
+      <td class="actions">${expense.compensation_status !== "compensated" && expense.source_funds === "personal" ? `<button class="mini primary" onclick="compensateExpense(${expense.id})">Компенсировано</button>` : ""}${expense.source_funds === "rental_budget" ? (expense.rent_credit_blocked ? '<span class="pill">Учтён как расход бюджета</span>' : Number(expense.rent_credit_amount || 0) >= Number(expense.amount) ? '<span class="pill ok">Зачтено в аренду</span>' : `<button class="mini primary" onclick="creditExpenseRent(${expense.id})">Зачесть в ИП</button>`) : ""}</td>
     </tr>
   `).join("");
   qs("#expenseList").innerHTML = `${summary}${table(["Дата", "Объект", "Квартира", "Категория", "Сумма", "Источник", "Компенсация", "Описание", "Действия"], rows)}`;
 }
 
 async function creditExpenseRent(id) {
-  if (!confirm("Зачесть расход в ИП-аренду за месяц расхода? Остаток перейдёт в следующие ИП-платежи.")) return;
+  if (!confirm("Расход оплачен из ещё не внесённой аренды жильца этой квартиры? Зачёт уменьшит его ИП-долг. Для денег другой квартиры или уже полученной аренды зачёт не нужен.")) return;
   await api(`/api/expenses/${id}/credit-rent`, { method: "POST" });
   toast("Расход зачтён в ИП-аренду");
   await loadAll();

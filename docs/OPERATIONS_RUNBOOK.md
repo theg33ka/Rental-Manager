@@ -12,7 +12,8 @@
 
 - Зафиксируйте целевой commit, окружение и ответственного.
 - Проверьте новый Alembic upgrade path и наличие одного head.
-- Сделайте свежий database backup; отдельно сохраните persistent settings-encryption key file.
+- Сделайте свежий database backup. Запуск контейнера до Alembic создаёт и побайтно проверяет отдельную копию существующего settings-encryption key file в `key-backups/` рядом с ключом на persistent volume (каталог 0700, файл 0600). Исходный ключ не заменяется. Ошибка копирования/проверки останавливает запуск до миграций; первый запуск без существующего ключа не создаёт его этим шагом. Для ключа из environment сохраняется существующий deployment secret store.
+- После deployment проверьте owner-only `GET /api/admin/maintenance/backup-status`: перед финансовой правкой требуется `verified=true`. Ответ не содержит ключ, fingerprint или путь; копия на том же persistent volume не заменяет резервирование самого volume.
 - Проверьте diff и `scripts/check_secrets.py`.
 - Подтвердите runtime variables, public base URL, Telegram webhook target и health-check.
 - Не запускайте demo/screenshot seed, database import или downgrade на production.

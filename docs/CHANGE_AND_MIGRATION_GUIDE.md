@@ -32,6 +32,8 @@ Production container выполняет `alembic upgrade head` до запуск
 
 ## Auth и доступ
 
+Согласованная runtime-сверка переезда может выполняться общей `repair_transfer_finance` через maintenance proposal уровня 3 с fingerprint исходных записей, PIN и аудитом; правила backup и показа preview сохраняются. Она не запускается миграцией или автоматически при deployment. Контракт и точный scope описаны в `HOST_MAINTENANCE.md`.
+
 Редактирование старой применённой миграции не меняет deployed database. Восстановление persisted PIN/settings выполняется новой forward migration или явно согласованной runtime-операцией, затем проверяется реальный login flow и deployment state. Plaintext PIN и encryption key не попадают в revision, test output или документацию.
 
 ## API и клиенты

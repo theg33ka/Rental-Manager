@@ -63,6 +63,10 @@ class HostMaintenanceTests(DatabaseTestCase):
             main.app.dependency_overrides.pop(main.get_session, None)
 
     def test_owner_only_and_csrf(self):
+        backup_path = '/api/admin/maintenance/backup-status'
+        self.assertEqual(self.request('GET', backup_path).status_code, 401)
+        self.assertEqual(self.request('GET', backup_path, identity=self.guest).status_code, 403)
+        self.assertEqual(self.request('GET', backup_path, identity=self.owner).status_code, 200)
         path = f"/api/admin/maintenance/apartments/{self.apartment_id}"
         self.assertEqual(self.request("GET", path).status_code, 401)
         self.assertEqual(self.request("GET", path, identity=self.guest).status_code, 403)
@@ -96,6 +100,31 @@ class HostMaintenanceTests(DatabaseTestCase):
             self.assertEqual(session.get(Apartment, self.apartment_id).name, "К2")
             self.assertEqual(session.scalar(select(func.count()).select_from(AiActionLog).where(
                 AiActionLog.status == "executed")), 1)
+
+    def test_transfer_repair_preview_requires_pin_and_revalidates_snapshot(self):
+        from tests.test_transfer_finance_repair import TransferFinanceRepairTests
+
+        with self.Session() as session:
+            args, old, *_ = TransferFinanceRepairTests.fixture(self, session)
+            session.add(AppSetting(key=PIN_SETTING_KEYS['owner'], value=hash_pin('synthetic-repair-pin')))
+            session.commit()
+            old_id = old.id
+        args.pop('expected_fingerprint')
+        with patch.object(main, 'send_telegram_text') as telegram, patch.object(main, 'configured_environment_pin_hash', return_value=''):
+            response = self.request('POST', '/api/admin/maintenance/proposals', identity=self.owner,
+                                    payload={'operation': 'repair_transfer_finance', 'arguments': args, 'reason': 'Synthetic repair'})
+            self.assertEqual(response.status_code, 200, response.text)
+            proposal = response.json()
+            self.assertEqual(proposal['safety_level'], 3)
+            self.assertIn('2503.05', proposal['preview'])
+            with self.Session() as session:
+                self.assertEqual(main.utility_advance_balance(session, session.get(main.Lease, old_id).apartment_id, old_id), 2381)
+            path = f"/api/hermes/proposals/{proposal['id']}/confirm"
+            self.assertEqual(self.request('POST', path, identity=self.owner, payload={}).status_code, 403)
+            result = self.request('POST', path, identity=self.owner, payload={'confirmation_pin': 'synthetic-repair-pin'})
+            self.assertEqual(result.status_code, 200, result.text)
+            self.assertEqual(result.json()['status'], 'executed')
+            telegram.assert_not_called()
 
     def test_unsupported_or_unexplained_operation_rejected(self):
         for plan in [{"operation": "sql", "arguments": {}, "reason": "repair"},

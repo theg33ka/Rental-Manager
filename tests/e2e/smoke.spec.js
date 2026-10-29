@@ -63,6 +63,7 @@ test("расходы предлагают зачёт в ИП только для
   const expenses = [
     { ...expense, id: 101, rent_credit_amount: 0 },
     { ...expense, id: 102, rent_credit_amount: 11000 },
+    { ...expense, id: 103, rent_credit_amount: 0, rent_credit_blocked: true },
   ];
   await page.route("**/api/expenses", route => route.fulfill({ json: expenses }));
   await page.route("**/api/app-state?*", async route => {
@@ -76,6 +77,7 @@ test("расходы предлагают зачёт в ИП только для
   await page.evaluate(async () => { await loadExpenses(); renderExpenses(); });
   await expect(page.locator("#expenseList").getByRole("button", { name: "Зачесть в ИП", exact: true })).toHaveCount(1);
   await expect(page.locator("#expenseList")).toContainText("Зачтено в аренду");
+  await expect(page.locator("#expenseList")).toContainText("Учтён как расход бюджета");
   const requestPromise = page.waitForRequest(request => request.url().endsWith("/api/expenses/101/credit-rent") && request.method() === "POST");
   await page.route("**/api/expenses/101/credit-rent", route => route.fulfill({ json: { ok: true, credited: 11000 } }));
   page.once("dialog", dialog => dialog.accept());

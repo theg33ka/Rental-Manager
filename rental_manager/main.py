@@ -2927,6 +2927,7 @@ def serialize_expense(expense: Expense, session: Session | None = None) -> dict[
         "amount": expense.amount,
         "source_funds": expense.source_funds,
         "rent_credit_amount": expense_rent_credit_amount(session, expense) if session and expense.source_funds == "rental_budget" else 0,
+        "rent_credit_blocked": "RENT_CREDIT_REVERSED:" in (expense.notes or ""),
         "payment_method": expense.payment_method,
         "description": expense.description,
         "compensation_status": expense.compensation_status,
@@ -4277,7 +4278,14 @@ def maintenance_apartment(apartment_id: int, response: Response, limit: int = 10
         raise HTTPException(404, str(exc)) from exc
 
 
-MAINTENANCE_OPERATIONS = {"update_payment_receipt", "update_lease", "update_apartment"}
+MAINTENANCE_OPERATIONS = {"update_payment_receipt", "update_lease", "update_apartment", "repair_transfer_finance"}
+
+
+@app.get("/api/admin/maintenance/backup-status")
+def maintenance_backup_status() -> dict[str, str | bool]:
+    from rental_manager.security.key_backup import settings_key_backup
+
+    return settings_key_backup()
 
 
 @app.post("/api/admin/maintenance/proposals")
@@ -4289,6 +4297,16 @@ def maintenance_proposal(payload: dict[str, Any], session: Session = Depends(get
         raise HTTPException(400, "Операция обслуживания не разрешена")
     if not reason or len(reason) > 1000 or not isinstance(arguments, dict):
         raise HTTPException(400, "Нужны arguments и причина исправления (до 1000 символов)")
+    repair_preview = None
+    if operation == "repair_transfer_finance":
+        from rental_manager.services.transfer_repair import repair_state
+
+        try:
+            arguments = validate_owner_operation(operation, arguments)
+            arguments = {**arguments, "expected_fingerprint": repair_state(session, arguments)}
+        except (ValueError, TypeError, KeyError) as exc:
+            raise HTTPException(400, "Неверные параметры сверки переезда") from exc
+        repair_preview = repair_transfer_finance(arguments, session, preview=True)
     conversation = ai_conversation(session, "maintenance", "owner")
     proposal = create_agent_action_proposal(
         session, conversation, "maintenance",
@@ -4296,6 +4314,8 @@ def maintenance_proposal(payload: dict[str, Any], session: Session = Depends(get
         notify_owner=False,
     )
     proposal.requested_by = "maintenance"
+    if repair_preview is not None:
+        proposal.preview_text += "\nСверка: " + json.dumps(repair_preview, ensure_ascii=False)
     session.add(AiActionLog(conversation_id=conversation.id, action_type=operation,
                             actor_role="owner", status="maintenance_requested",
                             payload_json=proposal.payload_json, note=reason))
@@ -10830,6 +10850,8 @@ def execute_owner_web_operation(session: Session, operation: str, payload: dict[
         result = update_lease(int(payload["lease_id"]), payload, session)
     elif operation == "transfer_lease":
         result = transfer_lease(int(payload["lease_id"]), payload, session)
+    elif operation == "repair_transfer_finance":
+        result = repair_transfer_finance(payload, session)
     elif operation == "delete_lease":
         result = delete_lease(int(payload["lease_id"]), session)
     elif operation == "set_lease_automation":
@@ -13039,9 +13061,33 @@ def parse_transfer_money(payload: dict[str, Any], key: str, fallback: float) -> 
     return money(value)
 
 
+def repair_transfer_finance(payload: dict[str, Any], session: Session, *, preview: bool = False) -> dict[str, Any]:
+    from rental_manager.services.transfer_repair import repair_transfer
+
+    savepoint = session.begin_nested()
+    try:
+        target_id = int(payload["target_lease_id"])
+        result = repair_transfer(
+            session, payload, sync_advance=sync_utility_advance_credit_for_receipt,
+            apply_bill=lambda db, bill: apply_utility_advances_to_bill(db, bill, lease_ids={target_id}),
+        )
+        if preview:
+            savepoint.rollback()
+        else:
+            savepoint.commit()
+            session.commit()
+        return result
+    except (ValueError, TypeError, KeyError) as exc:
+        savepoint.rollback()
+        raise HTTPException(409, str(exc)) from exc
+    except Exception:
+        savepoint.rollback()
+        raise
+
+
 @app.post("/api/leases/{lease_id}/transfer")
 def transfer_lease(lease_id: int, payload: dict[str, Any], session: Session = Depends(get_session)) -> dict[str, Any]:
-    lease = session.get(Lease, lease_id)
+    lease = session.scalar(select(Lease).where(Lease.id == lease_id).with_for_update().execution_options(populate_existing=True))
     if not lease:
         raise HTTPException(404, "Договор не найден")
     repeat_closed_transfer = not lease.active and setting_bool_value(payload.get("repeat_closed_transfer", False))
@@ -13066,6 +13112,12 @@ def transfer_lease(lease_id: int, payload: dict[str, Any], session: Session = De
     if transfer_date <= lease.start_date:
         raise HTTPException(400, "Дата переезда должна быть позже даты текущего заезда")
     old_end = transfer_date - timedelta(days=1)
+    successor = session.scalar(select(Lease.id).where(
+        Lease.tenant_id == lease.tenant_id, Lease.id != lease.id,
+        Lease.start_date >= transfer_date,
+    ).limit(1))
+    if successor:
+        raise HTTPException(409, "После даты переезда уже есть договор жильца. Проверьте историю переездов.")
 
     if repeat_closed_transfer:
         other_leases = session.scalars(select(Lease).where(Lease.id != lease.id)).all()
@@ -13114,6 +13166,12 @@ def transfer_lease(lease_id: int, payload: dict[str, Any], session: Session = De
 
     ip_amount = parse_transfer_money(payload, "ip_amount", float(lease.ip_amount or 0))
     personal_amount = parse_transfer_money(payload, "personal_amount", float(lease.personal_amount or 0))
+    future_paid = session.scalar(select(PaymentReceipt.id).join(RentCharge).where(
+        RentCharge.lease_id == lease.id, RentCharge.due_date > old_end,
+        PaymentReceipt.status == "accepted",
+    ).limit(1))
+    if future_paid:
+        raise HTTPException(409, "После даты переезда есть оплаченная аренда. Сначала согласуйте её перенос.")
 
     if repeat_closed_transfer:
         lease.end_date = old_end
@@ -13142,6 +13200,26 @@ def transfer_lease(lease_id: int, payload: dict[str, Any], session: Session = De
     session.add(new_lease)
     session.flush()
     copy_lease_automation(session, lease.id, new_lease.id)
+    from rental_manager.services.lease_transfer_finance import transfer_advance
+
+    try:
+        source_advances = session.scalars(select(PaymentReceipt).where(
+            PaymentReceipt.lease_id.in_(advance_owner_lease_ids(session, lease.apartment_id, lease.id)),
+            PaymentReceipt.status == "accepted", PaymentReceipt.utility_line_id.is_not(None),
+        )).all()
+        sync_utility_advance_credits_for_receipts(session, list(source_advances))
+        session.flush()
+        source_bills = session.scalars(select(UtilityBill).where(
+            UtilityBill.status == "issued", UtilityBill.id.in_(select(UtilityBillLine.bill_id).where(
+                UtilityBillLine.lease_id == lease.id,
+            )),
+        ).order_by(UtilityBill.period_end, UtilityBill.id)).all()
+        for bill in source_bills:
+            apply_utility_advances_to_bill(session, bill, lease_ids={lease.id})
+        advance_transferred = transfer_advance(session, lease, new_lease)
+    except ValueError as exc:
+        session.rollback()
+        raise HTTPException(409, str(exc)) from exc
     lease.tenant.active = True
     generate_rent_charges(session)
     session.commit()
@@ -13154,6 +13232,7 @@ def transfer_lease(lease_id: int, payload: dict[str, Any], session: Session = De
             "transfer_date": transfer_date.isoformat(),
             "old_end_date": old_end.isoformat(),
             "target_apartment": target_apartment.name,
+            "utility_advance_transferred": advance_transferred,
             "ip_amount": money(ip_amount),
             "personal_amount": money(personal_amount),
         },
@@ -13743,9 +13822,19 @@ def delete_manual_debt(debt_id: int, session: Session = Depends(get_session)) ->
     return {"ok": True}
 
 
-def require_editable_payment_receipt(receipt: PaymentReceipt) -> None:
+def require_editable_payment_receipt(receipt: PaymentReceipt, session: Session | None = None) -> None:
     if receipt.source == "utility_advance_transfer":
         raise HTTPException(409, "Это запись переноса аванса. Исправление требует согласованного обратного переноса.")
+    if "transfer_repair:" in (receipt.notes or ""):
+        raise HTTPException(409, "Запись сохранена финансовой сверкой. Нужна отдельная подтверждаемая коррекция.")
+    if session and receipt.lease_id and receipt.apartment_id:
+        line = session.get(UtilityBillLine, receipt.utility_line_id) if receipt.utility_line_id else None
+        is_advance = receipt.channel == UTILITY_ADVANCE_CHANNEL or (line is not None and utility_line_is_advance(line))
+        if is_advance and session.scalar(select(UtilityAdvanceLedger.id).where(
+            UtilityAdvanceLedger.lease_id.in_(advance_owner_lease_ids(session, receipt.apartment_id, receipt.lease_id)),
+            UtilityAdvanceLedger.apartment_id == receipt.apartment_id, UtilityAdvanceLedger.kind == "transfer_out",
+        ).limit(1)):
+            raise HTTPException(409, "Аванс перенесён в другую квартиру. Нужна подтверждаемая сверка переноса.")
 
 
 @app.patch("/api/payment-receipts/{receipt_id}")
@@ -13753,7 +13842,7 @@ def update_payment_receipt(receipt_id: int, payload: dict[str, Any], session: Se
     receipt = session.get(PaymentReceipt, receipt_id)
     if not receipt:
         raise HTTPException(404, "платёж не найден")
-    require_editable_payment_receipt(receipt)
+    require_editable_payment_receipt(receipt, session)
     if (receipt.source or "").startswith(CREDIT_SOURCE):
         raise HTTPException(400, "Зачёт связан с расходом. Для отмены удалите зачёт; повторно зачесть расход можно в разделе расходов.")
     old_lease_id = receipt.lease_id
@@ -13842,7 +13931,7 @@ def delete_payment_receipt(receipt_id: int, session: Session = Depends(get_sessi
     receipt = session.get(PaymentReceipt, receipt_id)
     if not receipt:
         raise HTTPException(404, "платёж не найден")
-    require_editable_payment_receipt(receipt)
+    require_editable_payment_receipt(receipt, session)
     lease_id = receipt.lease_id
     status = receipt.status
     linked_expense = linked_expense_fund_record(session, receipt.id)
@@ -13904,7 +13993,7 @@ def ignore_payment_receipt(receipt_id: int, session: Session = Depends(get_sessi
     receipt = session.get(PaymentReceipt, receipt_id)
     if not receipt:
         raise HTTPException(404, "платёж не найден")
-    require_editable_payment_receipt(receipt)
+    require_editable_payment_receipt(receipt, session)
     receipt.status = "ignored"
     receipt.notes = "; ".join(part for part in [receipt.notes, "скрыто из дашборда вручную"] if part)
     session.commit()
@@ -13916,7 +14005,7 @@ def moderate_payment_receipt(receipt_id: int, payload: dict[str, Any], session: 
     receipt = session.get(PaymentReceipt, receipt_id)
     if not receipt:
         raise HTTPException(404, "платёж не найден")
-    require_editable_payment_receipt(receipt)
+    require_editable_payment_receipt(receipt, session)
     action = (payload.get("action") or "").strip()
     note = (payload.get("note") or "").strip()
     parsed = parse_receipt_details(receipt)
@@ -14502,11 +14591,12 @@ def append_receipt_note(receipt: PaymentReceipt, note: str) -> None:
     receipt.notes = "; ".join(part for part in [receipt.notes, note] if part)
 
 
-def apply_utility_advances_to_bill(session: Session, bill: UtilityBill) -> float:
+def apply_utility_advances_to_bill(session: Session, bill: UtilityBill, *, lease_ids: set[int] | None = None) -> float:
     applied_total = 0.0
     affected_lease_ids: set[int] = set()
     lines = sorted(
-        [line for line in bill.lines if line.lease_id and not utility_line_is_advance(line)],
+        [line for line in bill.lines if line.lease_id and not utility_line_is_advance(line)
+         and (lease_ids is None or line.lease_id in lease_ids)],
         key=lambda item: (item.lease_id or 0, item.due_date or bill.due_date or bill.period_end, item.id or 0),
     )
     for line in lines:
@@ -15073,12 +15163,6 @@ def create_expense(payload: dict[str, Any], session: Session = Depends(get_sessi
         raise HTTPException(400, "Сумма должна быть больше нуля")
     session.add(expense)
     session.flush()
-    if expense.source_funds == "rental_budget":
-        try:
-            credit_expense_to_rent(session, expense.id)
-        except ValueError as exc:
-            session.rollback()
-            raise HTTPException(400, str(exc)) from exc
     session.commit()
     session.refresh(expense)
     return serialize_expense(expense, session)
